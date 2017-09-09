@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,8 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/Pattern.h"
+#include "swift/AST/SubstitutionMap.h"
+#include "swift/IRGen/Linking.h"
 #include "swift/SIL/SILModule.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -33,7 +35,6 @@
 #include "GenType.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
-#include "Linking.h"
 #include "IndirectTypeInfo.h"
 #include "MemberAccessStrategy.h"
 #include "NonFixedTypeInfo.h"
@@ -412,7 +413,7 @@ namespace {
       assert(TheStruct.getStructOrBoundGenericStruct());
     }
     
-    llvm::Value *getOffsetForIndex(IRGenFunction &IGF, unsigned index) {
+    llvm::Value *getOffsetForIndex(IRGenFunction &IGF, unsigned index) override {
       // Get the field offset vector from the struct metadata.
       llvm::Value *metadata = IGF.emitTypeMetadataRefForLayout(TheStruct);
       Address fieldVector = emitAddressOfFieldOffsetVector(IGF,
@@ -782,7 +783,7 @@ private:
   }
 };
 
-}  // end anonymous namespace.
+} // end anonymous namespace
 
 /// A convenient macro for delegating an operation to all of the
 /// various struct implementations.
@@ -825,6 +826,41 @@ llvm::Constant *irgen::emitPhysicalStructMemberFixedOffset(IRGenModule &IGM,
   FOR_STRUCT_IMPL(IGM, baseType, getConstantFieldOffset, field);
 }
 
+llvm::Constant *
+irgen::emitPhysicalStructMemberOffsetOfFieldOffset(IRGenModule &IGM,
+                                                   SILType baseType,
+                                                   VarDecl *field) {
+  class FieldScanner : public StructMetadataScanner<FieldScanner> {
+    VarDecl *Field;
+  public:
+    FieldScanner(IRGenModule &IGM, StructDecl *Target, VarDecl *Field)
+      : StructMetadataScanner(IGM, Target), Field(Field)
+    {}
+    
+    Size OffsetOfFieldOffset = Size::invalid();
+    
+    void noteAddressPoint() {
+      assert(OffsetOfFieldOffset == Size::invalid()
+             && "found field offset before address point?");
+      NextOffset = Size(0);
+    }
+    
+    void addFieldOffset(VarDecl *theField) {
+      if (Field == theField)
+        OffsetOfFieldOffset = NextOffset;
+      StructMetadataScanner::addFieldOffset(theField);
+    }
+  };
+  FieldScanner scanner(IGM, baseType.getStructOrBoundGenericStruct(),
+                       field);
+  scanner.layout();
+  if (scanner.OffsetOfFieldOffset == Size::invalid())
+    return nullptr;
+  
+  return llvm::ConstantInt::get(IGM.SizeTy,
+                                scanner.OffsetOfFieldOffset.getValue());
+}
+
 MemberAccessStrategy
 irgen::getPhysicalStructMemberAccessStrategy(IRGenModule &IGM,
                                              SILType baseType, VarDecl *field) {
@@ -837,8 +873,16 @@ unsigned irgen::getPhysicalStructFieldIndex(IRGenModule &IGM, SILType baseType,
 }
 
 void IRGenModule::emitStructDecl(StructDecl *st) {
-  emitStructMetadata(*this, st);
+  if (!IRGen.tryEnableLazyTypeMetadata(st))
+    emitStructMetadata(*this, st);
+
   emitNestedTypeDecls(st->getMembers());
+
+  if (shouldEmitOpaqueTypeMetadataRecord(st)) {
+    emitOpaqueTypeMetadataRecord(st);
+    return;
+  }
+
   emitFieldMetadataRecord(st);
 }
 
@@ -855,7 +899,7 @@ namespace {
       setSubclassKind((unsigned) StructTypeInfoKind::ResilientStructTypeInfo);
     }
   };
-}
+} // end anonymous namespace
 
 const TypeInfo *TypeConverter::convertResilientStruct() {
   llvm::Type *storageType = IGM.OpaquePtrTy->getElementType();

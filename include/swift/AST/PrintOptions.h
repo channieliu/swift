@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,6 +24,7 @@ namespace swift {
 class GenericEnvironment;
 class CanType;
 class Decl;
+class Pattern;
 class ValueDecl;
 class ExtensionDecl;
 class NominalTypeDecl;
@@ -43,36 +44,10 @@ struct TypeTransformContext {
   explicit TypeTransformContext(Type T);
   explicit TypeTransformContext(NominalTypeDecl* NTD);
 
-  Type getTypeBase() const;
+  Type getBaseType() const;
   NominalTypeDecl *getNominal() const;
 
   bool isPrintingSynthesizedExtension() const;
-};
-
-typedef std::pair<ExtensionDecl*, bool> ExtensionAndIsSynthesized;
-typedef llvm::function_ref<void(ArrayRef<ExtensionAndIsSynthesized>)>
-  ExtensionGroupOperation;
-
-class SynthesizedExtensionAnalyzer {
-  struct Implementation;
-  Implementation &Impl;
-public:
-  SynthesizedExtensionAnalyzer(NominalTypeDecl *Target,
-                               PrintOptions Options,
-                               bool IncludeUnconditional = true);
-  ~SynthesizedExtensionAnalyzer();
-
-  enum class MergeGroupKind : char {
-    All,
-    MergeableWithTypeDef,
-    UnmergeableWithTypeDef,
-  };
-
-  void forEachExtensionMergeGroup(MergeGroupKind Kind,
-                                  ExtensionGroupOperation Fn);
-  bool isInSynthesizedExtension(const ValueDecl *VD);
-  bool shouldPrintRequirement(ExtensionDecl *ED, StringRef Req);
-  bool hasMergeGroup(MergeGroupKind Kind);
 };
 
 class BracketOptions {
@@ -131,6 +106,12 @@ public:
   bool operator!=(AnyAttrKind K) const { return !(*this == K); }
 };
 
+struct ShouldPrintChecker {
+  virtual bool shouldPrint(const Decl *D, PrintOptions &Options);
+  bool shouldPrint(const Pattern *P, PrintOptions &Options);
+  virtual ~ShouldPrintChecker() = default;
+};
+
 /// Options for printing AST nodes.
 ///
 /// A default-constructed PrintOptions is suitable for printing to users;
@@ -186,10 +167,6 @@ struct PrintOptions {
   /// ([] and ?), even if there are no sugar type nodes.
   bool SynthesizeSugarOnTypes = false;
 
-  /// \brief Print a dynamic Self type as its underlying type, rather than
-  /// the keyword `Self`.
-  bool StripDynamicSelf = false;
-
   /// \brief If true, the printer will explode a pattern like this:
   /// \code
   ///   var (a, b) = f()
@@ -242,6 +219,9 @@ struct PrintOptions {
   /// Whether to skip parameter type attributes
   bool SkipParameterTypeAttributes = false;
 
+  /// Whether to skip placeholder members.
+  bool SkipMissingMemberPlaceholders = true;
+  
   /// Whether to print a long attribute like '\@available' on a separate line
   /// from the declaration or other attributes.
   bool PrintLongAttrsOnSeparateLines = false;
@@ -280,7 +260,7 @@ struct PrintOptions {
   /// Print all decls that have at least this level of access.
   Accessibility AccessibilityFilter = Accessibility::Private;
 
-  /// Print IfConfigDecls and IfConfigStmts.
+  /// Print IfConfigDecls.
   bool PrintIfConfig = true;
 
   /// Whether we are printing for sil.
@@ -294,6 +274,9 @@ struct PrintOptions {
 
   /// Whether to print the extensions from conforming protocols.
   bool PrintExtensionFromConformingProtocols = false;
+
+  std::shared_ptr<ShouldPrintChecker> CurrentPrintabilityChecker =
+    std::make_shared<ShouldPrintChecker>();
 
   enum class ArgAndParamPrintingMode {
     ArgumentOnly,
@@ -344,6 +327,24 @@ struct PrintOptions {
   /// \brief The information for converting archetypes to specialized types.
   llvm::Optional<TypeTransformContext> TransformContext;
 
+  bool PrintAsMember = false;
+  
+  /// Whether to print parameter specifiers as 'let' and 'var'.
+  bool PrintParameterSpecifiers = false;
+
+  /// \see ShouldQualifyNestedDeclarations
+  enum class QualifyNestedDeclarations {
+    Never,
+    TypesOnly,
+    Always
+  };
+
+  /// Controls when a nested declaration's name should be printed qualified with
+  /// its enclosing context, if it's being printed on its own (rather than as
+  /// part of the context).
+  QualifyNestedDeclarations ShouldQualifyNestedDeclarations =
+      QualifyNestedDeclarations::Never;
+
   /// \brief If this is not \c nullptr then functions (including accessors and
   /// constructors) will be printed with a body that is determined by this
   /// function.
@@ -388,6 +389,8 @@ struct PrintOptions {
     result.PrintOverrideKeyword = false;
     result.AccessibilityFilter = Accessibility::Public;
     result.PrintIfConfig = false;
+    result.ShouldQualifyNestedDeclarations =
+        QualifyNestedDeclarations::TypesOnly;
     return result;
   }
 
@@ -402,20 +405,26 @@ struct PrintOptions {
     result.ExcludeAttrList.push_back(DAK_DiscardableResult);
     result.EmptyLineBetweenMembers = true;
     result.ElevateDocCommentFromConformance = true;
+    result.ShouldQualifyNestedDeclarations =
+        QualifyNestedDeclarations::Always;
     return result;
   }
 
+  static PrintOptions printModuleInterface();
   static PrintOptions printTypeInterface(Type T);
 
-  void setArchetypeSelfTransform(Type T);
+  void setBaseType(Type T);
 
-  void setArchetypeSelfTransformForQuickHelp(Type T);
+  void initForSynthesizedExtension(NominalTypeDecl *D);
 
-  void setArchetypeAndDynamicSelfTransform(Type T);
+  void clearSynthesizedExtension();
 
-  void initArchetypeTransformerForSynthesizedExtensions(NominalTypeDecl *D);
-
-  void clearArchetypeTransformerForSynthesizedExtensions();
+  bool shouldPrint(const Decl* D) {
+    return CurrentPrintabilityChecker->shouldPrint(D, *this);
+  }
+  bool shouldPrint(const Pattern* P) {
+    return CurrentPrintabilityChecker->shouldPrint(P, *this);
+  }
 
   /// Retrieve the print options that are suitable to print the testable interface.
   static PrintOptions printTestableInterface() {
@@ -435,19 +444,7 @@ struct PrintOptions {
 
   /// Retrieve the set of options suitable for interface generation for
   /// documentation purposes.
-  static PrintOptions printDocInterface() {
-    PrintOptions result = PrintOptions::printInterface();
-    result.PrintAccessibility = false;
-    result.SkipUnavailable = false;
-    result.ExcludeAttrList.push_back(DAK_Available);
-    result.ArgAndParamPrinting =
-      PrintOptions::ArgAndParamPrintingMode::BothAlways;
-    result.PrintDocumentationComments = false;
-    result.PrintRegularClangComments = false;
-    result.PrintAccessibility = false;
-    result.PrintFunctionRepresentationAttrs = false;
-    return result;
-  }
+  static PrintOptions printDocInterface();
 
   /// Retrieve the set of options suitable for printing SIL functions.
   static PrintOptions printSIL() {
@@ -458,6 +455,12 @@ struct PrintOptions {
     result.PrintForSIL = true;
     result.PrintInSILBody = true;
     result.PreferTypeRepr = false;
+    return result;
+  }
+
+  static PrintOptions printQualifiedSILType() {
+    PrintOptions result = PrintOptions::printSIL();
+    result.FullyQualifiedTypesIfAmbiguous = true;
     return result;
   }
 
@@ -472,6 +475,7 @@ struct PrintOptions {
     result.AbstractAccessors = false;
     result.PrintAccessibility = true;
     result.SkipEmptyExtensionDecls = false;
+    result.SkipMissingMemberPlaceholders = false;
     return result;
   }
 
@@ -486,6 +490,8 @@ struct PrintOptions {
     PO.ExcludeAttrList.push_back(DAK_Available);
     PO.SkipPrivateStdlibDecls = true;
     PO.ExplodeEnumCaseDecls = true;
+    PO.ShouldQualifyNestedDeclarations = QualifyNestedDeclarations::TypesOnly;
+    PO.PrintParameterSpecifiers = true;
     return PO;
   }
 };

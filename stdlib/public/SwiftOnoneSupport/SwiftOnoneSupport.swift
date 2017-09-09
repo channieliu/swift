@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 // Pre-specialization of some popular generic classes and functions.
@@ -44,6 +44,12 @@ struct _Prespecialize {
 
       // Iterate over array
       for e in a {
+        print(e)
+        print("Value: \(e)")
+      }
+
+      // Iterate in reverse
+      for e in a.reversed() {
         print(e)
         print("Value: \(e)")
       }
@@ -96,6 +102,12 @@ struct _Prespecialize {
         print("Value: \(e)")
       }
 
+      // Iterate in reverse
+      for e in a.reversed() {
+        print(e)
+        print("Value: \(e)")
+      }
+
       print(a)
 
       // Reserve capacity
@@ -135,7 +147,7 @@ struct _Prespecialize {
     // Force pre-specialization of arrays with elements of different
     // character and unicode scalar types.
     _createArrayUser("a" as Character)
-    _createArrayUser("a" as UnicodeScalar)
+    _createArrayUser("a" as Unicode.Scalar)
     _createArrayUserWithoutSorting("a".utf8)
     _createArrayUserWithoutSorting("a".utf16)
     _createArrayUserWithoutSorting("a".unicodeScalars)

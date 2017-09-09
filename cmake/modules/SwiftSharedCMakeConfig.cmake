@@ -1,17 +1,4 @@
 include(CMakeParseArguments)
-
-# Use ${cmake_2_8_12_KEYWORD} instead of KEYWORD in target_link_libraries().
-# These variables are used by LLVM's CMake code.
-set(cmake_2_8_12_INTERFACE INTERFACE)
-set(cmake_2_8_12_PRIVATE PRIVATE)
-
-# Backwards compatible USES_TERMINAL, cargo culted from llvm's cmake configs.
-if(CMAKE_VERSION VERSION_LESS 3.1.20141117)
-  set(cmake_3_2_USES_TERMINAL)
-else()
-  set(cmake_3_2_USES_TERMINAL USES_TERMINAL)
-endif()
-
 include(SwiftXcodeSupport)
 
 macro(swift_common_standalone_build_config_llvm product is_cross_compiling)
@@ -81,9 +68,9 @@ macro(swift_common_standalone_build_config_llvm product is_cross_compiling)
     set(${product}_NATIVE_LLVM_TOOLS_PATH "${LLVM_TOOLS_BINARY_DIR}")
   endif()
 
-  find_program(SWIFT_TABLEGEN_EXE "llvm-tblgen" "${${product}_NATIVE_LLVM_TOOLS_PATH}"
+  find_program(LLVM_TABLEGEN_EXE "llvm-tblgen" "${${product}_NATIVE_LLVM_TOOLS_PATH}"
     NO_DEFAULT_PATH)
-  if ("${SWIFT_TABLEGEN_EXE}" STREQUAL "SWIFT_TABLEGEN_EXE-NOTFOUND")
+  if ("${LLVM_TABLEGEN_EXE}" STREQUAL "LLVM_TABLEGEN_EXE-NOTFOUND")
     message(FATAL_ERROR "Failed to find tablegen in ${${product}_NATIVE_LLVM_TOOLS_PATH}")
   endif()
 
@@ -196,6 +183,9 @@ macro(swift_common_standalone_build_config_cmark product)
   set(CMARK_BUILD_INCLUDE_DIR "${PATH_TO_CMARK_BUILD}/src")
   include_directories("${CMARK_MAIN_INCLUDE_DIR}"
                       "${CMARK_BUILD_INCLUDE_DIR}")
+
+  include(${${product}_PATH_TO_CMARK_BUILD}/src/CMarkExports.cmake)
+  add_definitions(-DCMARK_STATIC_DEFINE)
 endmacro()
 
 # Common cmake project config for standalone builds.
@@ -229,7 +219,6 @@ macro(swift_common_unified_build_config product)
   set(${product}_NATIVE_LLVM_TOOLS_PATH "${CMAKE_BINARY_DIR}/bin")
   set(${product}_NATIVE_CLANG_TOOLS_PATH "${CMAKE_BINARY_DIR}/bin")
   set(LLVM_PACKAGE_VERSION ${PACKAGE_VERSION})
-  set(SWIFT_TABLEGEN_EXE llvm-tblgen)
   set(LLVM_CMAKE_DIR "${CMAKE_SOURCE_DIR}/cmake/modules")
 
   # If cmark was checked out into tools/cmark, expect to build it as
@@ -284,6 +273,17 @@ macro(swift_common_cxx_warnings)
   # Check for '-fapplication-extension'.  On OS X/iOS we wish to link all
   # dynamic libraries with this flag.
   check_cxx_compiler_flag("-fapplication-extension" CXX_SUPPORTS_FAPPLICATION_EXTENSION)
+
+  # Disable C4068: unknown pragma. This means that MSVC doesn't report hundreds of warnings across
+  # the repository for IDE features such as #pragma mark "Title".
+  if("${CMAKE_C_COMPILER_ID}" STREQUAL "MSVC")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4068")
+    check_cxx_compiler_flag("/permissive-" CXX_SUPPORTS_PERMISSIVE_FLAG)
+    append_if(CXX_SUPPORTS_PERMISSIVE_FLAG "/permissive-" CMAKE_CXX_FLAGS)
+  endif()
+
+  # Disallow calls to objc_msgSend() with no function pointer cast.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DOBJC_OLD_DISPATCH_PROTOTYPES=0")
 endmacro()
 
 # Like 'llvm_config()', but uses libraries from the selected build

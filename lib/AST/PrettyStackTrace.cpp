@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,7 +15,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/AST/AST.h"
+#include "swift/AST/ASTContext.h"
+#include "swift/AST/Decl.h"
+#include "swift/AST/Expr.h"
+#include "swift/AST/Module.h"
+#include "swift/AST/Pattern.h"
+#include "swift/AST/Stmt.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/Basic/SourceManager.h"
@@ -39,7 +44,7 @@ void swift::printDeclDescription(llvm::raw_ostream &out, const Decl *D,
   bool hasPrintedName = false;
   if (auto *named = dyn_cast<ValueDecl>(D)) {
     if (named->hasName()) {
-      out << '\'' << named->getName() << '\'';
+      out << '\'' << named->getFullName() << '\'';
       hasPrintedName = true;
     } else if (auto *fn = dyn_cast<FuncDecl>(named)) {
       if (auto *ASD = fn->getAccessorStorageDecl()) {
@@ -165,7 +170,7 @@ namespace {
       return type->getDecl();
     }
   };
-}
+} // end anonymous namespace
 
 void PrettyStackTraceType::print(llvm::raw_ostream &out) const {
   out << "While " << Action << ' ';

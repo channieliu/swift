@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -29,10 +29,8 @@ public func run_MonteCarloE(scale: Int) {
   let numEmptyIntervals = intervals.filter{!$0}.count
   // If there are no empty intervals, then obviously the random generator is
   // not 'random' enough.
-  CheckResults(numEmptyIntervals != N,
-               "Incorrect results in MonteCarloE: no empty intervals.")
+  CheckResults(numEmptyIntervals != N)
   let e_estimate = Double(N)/Double(numEmptyIntervals)
   let e = 2.71828
-  CheckResults(abs(e_estimate - e) < 0.1,
-               "Incorrect results in MonteCarloE: e_estimate == \(e_estimate)")
+  CheckResults(abs(e_estimate - e) < 0.1)
 }

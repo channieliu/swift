@@ -2,16 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported import Foundation // Clang module
 import CoreFoundation
+import _SwiftCoreFoundationOverlayShims
 
 /**
  `Date` represents a single point in time.
@@ -232,8 +233,9 @@ extension Date : CustomDebugStringConvertible, CustomStringConvertible, CustomRe
     }
 
     public var customMirror: Mirror {
-        var c: [(label: String?, value: Any)] = []
-        c.append((label: "timeIntervalSinceReferenceDate", value: timeIntervalSinceReferenceDate))
+        let c: [(label: String?, value: Any)] = [
+          ("timeIntervalSinceReferenceDate", timeIntervalSinceReferenceDate)
+        ]
         return Mirror(self, children: c, displayStyle: Mirror.DisplayStyle.struct)
     }
 }
@@ -280,5 +282,45 @@ extension Date : CustomPlaygroundQuickLookable {
     
     public var customPlaygroundQuickLook: PlaygroundQuickLook {
         return .text(summary)
+    }
+}
+
+extension Date : Codable {
+    public init(from decoder: Decoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        let container = try decoder.singleValueContainer()
+        if let decoder = container as? _JSONDecoder {
+            switch decoder.options.dateDecodingStrategy {
+            case .deferredToDate:
+                break /* fall back to default implementation below; this would recurse */
+
+            default:
+                // _JSONDecoder has a hook for Dates; this won't recurse since we're not going to defer back to Date in _JSONDecoder.
+                self = try container.decode(Date.self)
+                return
+            }
+        }
+
+        let timestamp = try container.decode(Double.self)
+        self = Date(timeIntervalSinceReferenceDate: timestamp)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        // We are allowed to request this container as long as we don't encode anything through it when we need the keyed container below.
+        var container = encoder.singleValueContainer()
+        if let encoder = container as? _JSONEncoder {
+            switch encoder.options.dateEncodingStrategy {
+            case .deferredToDate:
+                break /* fall back to default implementation below; this would recurse */
+
+            default:
+                // _JSONEncoder has a hook for Dates; this won't recurse since we're not going to defer back to Date in _JSONEncoder.
+                try container.encode(self)
+                return
+            }
+        }
+
+        try container.encode(self.timeIntervalSinceReferenceDate)
     }
 }

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,8 @@
 #include "swift/AST/Availability.h"
 #include "swift/AST/AvailabilitySpec.h"
 #include "swift/AST/ASTNode.h"
+#include "swift/AST/Expr.h"
+#include "swift/AST/IfConfigClause.h"
 #include "swift/AST/TypeAlignments.h"
 #include "swift/Basic/NullablePtr.h"
 #include "llvm/Support/TrailingObjects.h"
@@ -653,69 +655,6 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Guard; }
 };
 
-  
-/// This represents one part of a #if block.  If the condition field is
-/// non-null, then this represents a #if or a #elseif, otherwise it represents
-/// an #else block.
-struct IfConfigStmtClause {
-  /// The location of the #if, #elseif, or #else keyword.
-  SourceLoc Loc;
-  
-  /// The condition guarding this #if or #elseif block.  If this is null, this
-  /// is a #else clause.
-  Expr *Cond;
-  
-  /// Elements inside the clause
-  ArrayRef<ASTNode> Elements;
-  
-  /// True if this is the active clause of the #if block.  Since this is
-  /// evaluated at parse time, this is always known.
-  bool isActive;
-  
-  IfConfigStmtClause(SourceLoc Loc, Expr *Cond,
-                     ArrayRef<ASTNode> Elements, bool isActive)
-    : Loc(Loc), Cond(Cond), Elements(Elements), isActive(isActive) {
-  }
-};
-
-/// IfConfigStmt - This class models the statement-side representation of
-/// #if/#else/#endif blocks.
-class IfConfigStmt : public Stmt {
-  /// An array of clauses controlling each of the #if/#elseif/#else conditions.
-  /// The array is ASTContext allocated.
-  ArrayRef<IfConfigStmtClause> Clauses;
-  SourceLoc EndLoc;
-  bool HadMissingEnd;
-
-public:
-  IfConfigStmt(ArrayRef<IfConfigStmtClause> Clauses, SourceLoc EndLoc,
-               bool HadMissingEnd)
-  : Stmt(StmtKind::IfConfig, /*implicit=*/false),
-    Clauses(Clauses), EndLoc(EndLoc), HadMissingEnd(HadMissingEnd) {}
-  
-  SourceLoc getIfLoc() const { return Clauses[0].Loc; }
-
-  SourceLoc getStartLoc() const { return getIfLoc(); }
-  SourceLoc getEndLoc() const { return EndLoc; }
-
-  bool hadMissingEnd() const { return HadMissingEnd; }
-
-  const ArrayRef<IfConfigStmtClause> &getClauses() const { return Clauses; }
-  
-  ArrayRef<ASTNode> getActiveClauseElements() const {
-    for (auto &Clause : Clauses)
-      if (Clause.isActive)
-        return Clause.Elements;
-    return ArrayRef<ASTNode>();
-  }
-
-  // Implement isa/cast/dyncast/etc.
-  static bool classof(const Stmt *S) {
-    return S->getKind() == StmtKind::IfConfig;
-  }
-};
-
-  
 /// WhileStmt - while statement. After type-checking, the condition is of
 /// type Builtin.Int1.
 class WhileStmt : public LabeledConditionalStmt {
@@ -993,7 +932,7 @@ public:
 
 /// Switch statement.
 class SwitchStmt final : public LabeledStmt,
-    private llvm::TrailingObjects<SwitchStmt, CaseStmt *> {
+    private llvm::TrailingObjects<SwitchStmt, ASTNode> {
   friend TrailingObjects;
 
   SourceLoc SwitchLoc, LBraceLoc, RBraceLoc;
@@ -1014,7 +953,7 @@ public:
   static SwitchStmt *create(LabeledStmtInfo LabelInfo, SourceLoc SwitchLoc,
                             Expr *SubjectExpr,
                             SourceLoc LBraceLoc,
-                            ArrayRef<CaseStmt*> Cases,
+                            ArrayRef<ASTNode> Cases,
                             SourceLoc RBraceLoc,
                             ASTContext &C);
   
@@ -1033,10 +972,28 @@ public:
   /// Get the subject expression of the switch.
   Expr *getSubjectExpr() const { return SubjectExpr; }
   void setSubjectExpr(Expr *e) { SubjectExpr = e; }
+
+  ArrayRef<ASTNode> getRawCases() const {
+    return {getTrailingObjects<ASTNode>(), CaseCount};
+  }
+
+private:
+  struct AsCaseStmtWithSkippingIfConfig {
+    AsCaseStmtWithSkippingIfConfig() {}
+    Optional<CaseStmt*> operator()(const ASTNode &N) const {
+      if (auto *CS = llvm::dyn_cast_or_null<CaseStmt>(N.dyn_cast<Stmt*>()))
+        return CS;
+      return None;
+    }
+  };
+
+public:
+  using AsCaseStmtRange = OptionalTransformRange<ArrayRef<ASTNode>,
+                                                AsCaseStmtWithSkippingIfConfig>;
   
   /// Get the list of case clauses.
-  ArrayRef<CaseStmt*> getCases() const {
-    return {getTrailingObjects<CaseStmt*>(), CaseCount};
+  AsCaseStmtRange getCases() const {
+    return AsCaseStmtRange(getRawCases(), AsCaseStmtWithSkippingIfConfig());
   }
   
   static bool classof(const Stmt *S) {

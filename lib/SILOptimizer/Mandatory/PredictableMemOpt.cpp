@@ -2,24 +2,26 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "predictable-memopt"
-#include "swift/Basic/Fallthrough.h"
+
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "DIMemoryUseCollector.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Compiler.h"
+#include "llvm/Support/Debug.h"
+
 using namespace swift;
 
 STATISTIC(NumLoadPromoted, "Number of loads promoted");
@@ -68,6 +70,10 @@ static SILValue getAccessPathRoot(SILValue Pointer) {
       Pointer = TEAI->getOperand();
     else if (auto SEAI = dyn_cast<StructElementAddrInst>(Pointer))
       Pointer = SEAI->getOperand();
+    else if (auto BAI = dyn_cast<BeginAccessInst>(Pointer))
+      Pointer = BAI->getSource();
+    else if (auto BUAI = dyn_cast<BeginUnpairedAccessInst>(Pointer))
+      Pointer = BUAI->getSource();
     else
       return Pointer;
   }
@@ -98,7 +104,19 @@ static unsigned computeSubelement(SILValue Pointer, SILInstruction *RootInst) {
     auto *Inst = cast<SILInstruction>(Pointer);
     if (auto *PBI = dyn_cast<ProjectBoxInst>(Inst)) {
       Pointer = PBI->getOperand();
-    } else if (auto *TEAI = dyn_cast<TupleElementAddrInst>(Inst)) {
+      continue;
+    }
+
+    if (auto *BAI = dyn_cast<BeginAccessInst>(Inst)) {
+      Pointer = BAI->getSource();
+      continue;
+    }
+    if (auto *BUAI = dyn_cast<BeginUnpairedAccessInst>(Inst)) {
+      Pointer = BUAI->getSource();
+      continue;
+    }
+
+    if (auto *TEAI = dyn_cast<TupleElementAddrInst>(Inst)) {
       SILType TT = TEAI->getOperand()->getType();
       
       // Keep track of what subelement is being referenced.
@@ -106,7 +124,10 @@ static unsigned computeSubelement(SILValue Pointer, SILInstruction *RootInst) {
         SubEltNumber += getNumSubElements(TT.getTupleElementType(i), M);
       }
       Pointer = TEAI->getOperand();
-    } else if (auto *SEAI = dyn_cast<StructElementAddrInst>(Inst)) {
+      continue;
+    }
+
+    if (auto *SEAI = dyn_cast<StructElementAddrInst>(Inst)) {
       SILType ST = SEAI->getOperand()->getType();
       
       // Keep track of what subelement is being referenced.
@@ -117,12 +138,14 @@ static unsigned computeSubelement(SILValue Pointer, SILInstruction *RootInst) {
       }
       
       Pointer = SEAI->getOperand();
-    } else {
-      assert((isa<InitExistentialAddrInst>(Inst) || isa<InjectEnumAddrInst>(Inst))&&
-             "Unknown access path instruction");
-      // Cannot promote loads and stores from within an existential projection.
-      return ~0U;
+      continue;
     }
+
+    
+    assert((isa<InitExistentialAddrInst>(Inst) || isa<InjectEnumAddrInst>(Inst))&&
+           "Unknown access path instruction");
+    // Cannot promote loads and stores from within an existential projection.
+    return ~0U;
   }
 }
 
@@ -247,9 +270,11 @@ AllocOptimize::AllocOptimize(SILInstruction *TheMemory,
   Releases(Releases) {
   
   // Compute the type of the memory object.
-  if (auto *ABI = dyn_cast<AllocBoxInst>(TheMemory))
-    MemoryType = ABI->getElementType();
-  else {
+  if (auto *ABI = dyn_cast<AllocBoxInst>(TheMemory)) {
+    assert(ABI->getBoxType()->getLayout()->getFields().size() == 1
+           && "optimizing multi-field boxes not implemented");
+    MemoryType = ABI->getBoxType()->getFieldType(ABI->getModule(), 0);
+  } else {
     assert(isa<AllocStackInst>(TheMemory));
     MemoryType = cast<AllocStackInst>(TheMemory)->getElementType();
   }
@@ -886,7 +911,7 @@ bool AllocOptimize::tryToRemoveDeadAllocation() {
            cast<CopyAddrInst>(U.Inst)->isTakeOfSrc()))
         break;
       // FALL THROUGH.
-     SWIFT_FALLTHROUGH;
+     LLVM_FALLTHROUGH;
     case DIUseKind::Load:
     case DIUseKind::IndirectIn:
     case DIUseKind::InOutUse:
@@ -980,7 +1005,8 @@ static bool optimizeMemoryAllocations(SILFunction &Fn) {
       SmallVector<SILInstruction*, 4> Releases;
       
       // Walk the use list of the pointer, collecting them.
-      collectDIElementUsesFrom(MemInfo, Uses, FailableInits, Releases, true);
+      collectDIElementUsesFrom(MemInfo, Uses, FailableInits, Releases, true,
+                               /*TreatAddressToPointerAsInout*/ false);
       
       Changed |= AllocOptimize(Inst, Uses, Releases).doIt();
       
@@ -1005,7 +1031,6 @@ class PredictableMemoryOptimizations : public SILFunctionTransform {
       invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
   }
 
-  StringRef getName() override { return "Predictable Memory Opts"; }
 };
 } // end anonymous namespace
 

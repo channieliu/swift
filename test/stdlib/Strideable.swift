@@ -2,14 +2,14 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
-// RUN: %target-run-simple-swift
+// RUN: %target-run-simple-swift -swift-version=3
 // REQUIRES: executable_test
 //
 
@@ -159,36 +159,24 @@ StrideTestSuite.test("OperatorOverloads") {
   var stride: Int = 5
 
   do {
-    var result = r1 + stride
+    var result = r1.advanced(by: stride)
     expectType(R.self, &result)
     expectEqual(55, result.x)
   }
   do {
-    var result = stride + r1
+    var result = r1.advanced(by: stride)
     expectType(R.self, &result)
     expectEqual(55, result.x)
   }
   do {
-    var result = r1 - stride
+    var result = r1.advanced(by: -stride)
     expectType(R.self, &result)
     expectEqual(45, result.x)
   }
   do {
-    var result = r1 - r2
+    var result = r2.distance(to: r1)
     expectType(Int.self, &result)
     expectEqual(-20, result)
-  }
-  do {
-    var result = r1
-    result += stride
-    expectType(R.self, &result)
-    expectEqual(55, result.x)
-  }
-  do {
-    var result = r1
-    result -= stride
-    expectType(R.self, &result)
-    expectEqual(45, result.x)
   }
 }
 

@@ -2,7 +2,7 @@
 
 // REQUIRES: objc_interop
 
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 
 // FIXME: BEGIN -enable-source-import hackaround
 // RUN:  %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -emit-module -o %t %S/../Inputs/clang-importer-sdk/swift-modules/ObjectiveC.swift
@@ -11,7 +11,7 @@
 // FIXME: END -enable-source-import hackaround
 
 // RUN: %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -import-objc-header %S/Inputs/circularity.h -emit-module -o %t %s
-// RUN: %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -import-objc-header %S/Inputs/circularity.h -parse-as-library %t/circularity.swiftmodule -parse -emit-objc-header-path %t/circularity.h
+// RUN: %target-swift-frontend(mock-sdk: -sdk %S/../Inputs/clang-importer-sdk -I %t) -import-objc-header %S/Inputs/circularity.h -parse-as-library %t/circularity.swiftmodule -typecheck -emit-objc-header-path %t/circularity.h
 
 // RUN: %FileCheck %s < %t/circularity.h
 
@@ -86,9 +86,9 @@ class E2: ProtoImpl {}
 // CHECK-LABEL: @interface F1 : ProtoImpl
 class F1: ProtoImpl {
 } // CHECK: @end
-// CHECK-LABEL @interface F2 : ProtoImpl
+// CHECK-LABEL: @interface F2 : ProtoImpl
 // CHECK: @end
-// CHECK-LABEL @interface F1 (SWIFT_EXTENSION(circularity))
+// CHECK-LABEL: @interface F1 (SWIFT_EXTENSION(circularity))
 extension F1 {
   // CHECK: - (void)test:
   func test(_: NeedsProto<F2>) {}
@@ -99,9 +99,9 @@ class F2: ProtoImpl {}
 // CHECK-LABEL: @interface G1 : ProtoImpl
 class G1: ProtoImpl {
 } // CHECK: @end
-// CHECK-LABEL @protocol G2 <Proto>
+// CHECK-LABEL: @protocol G2 <Proto>
 // CHECK: @end
-// CHECK-LABEL @interface G1 (SWIFT_EXTENSION(circularity))
+// CHECK-LABEL: @interface G1 (SWIFT_EXTENSION(circularity))
 extension G1 {
   // CHECK: - (void)test:
   func test(_: NeedsProto<G2>) {}

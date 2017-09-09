@@ -1,8 +1,9 @@
-// RUN: rm -rf %t && mkdir -p %t
+// REQUIRES: no_asan
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift %S/Inputs/TypeLowering.swift -parse-as-library -emit-module -emit-library -module-name TypeLowering -o %t/libTypesToReflect.%target-dylib-extension
 // RUN: %target-swift-reflection-dump -binary-filename %t/libTypesToReflect.%target-dylib-extension -binary-filename %platform-module-dir/libswiftCore.%target-dylib-extension -dump-type-lowering < %s | %FileCheck %s --check-prefix=CHECK-%target-ptrsize
 
-V12TypeLowering11BasicStruct
+12TypeLowering11BasicStructV
 // CHECK-64:      (struct TypeLowering.BasicStruct)
 
 // CHECK-64-NEXT: (struct size=16 alignment=4 stride=16 num_extra_inhabitants=0
@@ -70,7 +71,7 @@ V12TypeLowering11BasicStruct
 // CHECK-32-NEXT:           (field name=_value offset=0
 // CHECK-32-NEXT:             (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=0)))))))
 
-V12TypeLowering15AssocTypeStruct
+12TypeLowering05AssocA6StructV
 // CHECK-64:      (struct TypeLowering.AssocTypeStruct)
 // CHECK-64-NEXT: (struct size=36 alignment=2 stride=36 num_extra_inhabitants=0
 // CHECK-64-NEXT:   (field name=t1 offset=0
@@ -357,7 +358,7 @@ V12TypeLowering15AssocTypeStruct
 // CHECK-32-NEXT:                   (field name=_value offset=0
 // CHECK-32-NEXT:                     (builtin size=1 alignment=1 stride=1 num_extra_inhabitants=0)))))))))))
 
-TGV12TypeLowering3BoxVs5Int16_Vs5Int32_
+12TypeLowering3BoxVys5Int16VG_s5Int32Vt
 // CHECK-64-NEXT: (tuple
 // CHECK-64-NEXT:   (bound_generic_struct TypeLowering.Box
 // CHECK-64-NEXT:     (struct Swift.Int16))
@@ -393,7 +394,7 @@ TGV12TypeLowering3BoxVs5Int16_Vs5Int32_
 // CHECK-32-NEXT:         (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=0)))))
 
 
-V12TypeLowering15ReferenceStruct
+12TypeLowering15ReferenceStructV
 // CHECK-64:      (struct TypeLowering.ReferenceStruct)
 // CHECK-64-NEXT: (struct size=72 alignment=8 stride=72 num_extra_inhabitants=[[PTR_XI:2048|4096|2147483647]]
 // CHECK-64-NEXT:   (field name=strongRef offset=0
@@ -452,7 +453,7 @@ V12TypeLowering15ReferenceStruct
 // CHECK-32-NEXT:   (field name=unmanagedRef offset=32
 // CHECK-32-NEXT:     (reference kind=unmanaged refcounting=native)))
 
-V12TypeLowering14FunctionStruct
+12TypeLowering14FunctionStructV
 // CHECK-64:      (struct TypeLowering.FunctionStruct)
 // CHECK-64-NEXT: (struct size=64 alignment=8 stride=64 num_extra_inhabitants=[[PTR_XI_2:4096|2147483647]]
 // CHECK-64-NEXT:   (field name=thickFunction offset=0
@@ -511,9 +512,9 @@ V12TypeLowering14FunctionStruct
 // CHECK-32-NEXT:       (field name=some offset=0
 // CHECK-32-NEXT:         (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=4096)))))
 
-V12TypeLowering17ExistentialStruct
+12TypeLowering17ExistentialStructV
 // CHECK-64:      (struct TypeLowering.ExistentialStruct)
-// CHECK-64-NEXT: (struct size=448 alignment=8 stride=448 num_extra_inhabitants=0
+// CHECK-64-NEXT: (struct size=464 alignment=8 stride=464 num_extra_inhabitants=0
 // CHECK-64-NEXT:   (field name=any offset=0
 // CHECK-64-NEXT:     (opaque_existential size=32 alignment=8 stride=32 num_extra_inhabitants=0
 // CHECK-64-NEXT:       (field name=metadata offset=24
@@ -635,10 +636,16 @@ V12TypeLowering17ExistentialStruct
 // CHECK-64-NEXT:       (field name=object offset=0
 // CHECK-64-NEXT:         (reference kind=weak refcounting=unknown))
 // CHECK-64-NEXT:       (field name=wtable offset=8
+// CHECK-64-NEXT:         (builtin size=8 alignment=8 stride=8 num_extra_inhabitants=1))))
+// CHECK-64-NEXT:   (field name=classConstrainedP1 offset=448
+// CHECK-64-NEXT:     (class_existential size=16 alignment=8 stride=16 num_extra_inhabitants=[[PTR_XI]]
+// CHECK-64-NEXT:       (field name=object offset=0
+// CHECK-64-NEXT:         (reference kind=strong refcounting=native))
+// CHECK-64-NEXT:       (field name=wtable offset=8
 // CHECK-64-NEXT:         (builtin size=8 alignment=8 stride=8 num_extra_inhabitants=1)))))
 
 // CHECK-32: (struct TypeLowering.ExistentialStruct)
-// CHECK-32-NEXT: (struct size=224 alignment=4 stride=224 num_extra_inhabitants=0
+// CHECK-32-NEXT: (struct size=232 alignment=4 stride=232 num_extra_inhabitants=0
 // CHECK-32-NEXT:   (field name=any offset=0
 // CHECK-32-NEXT:     (opaque_existential size=16 alignment=4 stride=16 num_extra_inhabitants=0
 // CHECK-32-NEXT:       (field name=metadata offset=12
@@ -760,9 +767,15 @@ V12TypeLowering17ExistentialStruct
 // CHECK-32-NEXT:       (field name=object offset=0
 // CHECK-32-NEXT:         (reference kind=weak refcounting=unknown))
 // CHECK-32-NEXT:       (field name=wtable offset=4
+// CHECK-32-NEXT:         (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=1))))
+// CHECK-32-NEXT:   (field name=classConstrainedP1 offset=224
+// CHECK-32-NEXT:     (class_existential size=8 alignment=4 stride=8 num_extra_inhabitants=4096
+// CHECK-32-NEXT:       (field name=object offset=0
+// CHECK-32-NEXT:         (reference kind=strong refcounting=native))
+// CHECK-32-NEXT:       (field name=wtable offset=4
 // CHECK-32-NEXT:         (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=1)))))
 
-V12TypeLowering14MetatypeStruct
+12TypeLowering14MetatypeStructV
 // CHECK-64:      (struct TypeLowering.MetatypeStruct)
 // CHECK-64-NEXT: (struct size=152 alignment=8 stride=152 num_extra_inhabitants=[[PTR_XI]]
 // CHECK-64-NEXT:   (field name=any offset=0
@@ -909,15 +922,15 @@ V12TypeLowering14MetatypeStruct
 // CHECK-32-NEXT:       (field name=u offset=4
 // CHECK-32-NEXT:         (builtin size=4 alignment=4 stride=4 num_extra_inhabitants=4096)))))
 
-V12TypeLowering10EnumStruct
+12TypeLowering10EnumStructV
 // CHECK-64: (struct TypeLowering.EnumStruct)
 // CHECK-64-NEXT: (struct size=81 alignment=8 stride=88 num_extra_inhabitants=0
 // CHECK-64-NEXT:   (field name=empty offset=0
-// CHECK-64-NEXT:     (no_payload_enum size=0 alignment=0 stride=1 num_extra_inhabitants=0))
+// CHECK-64-NEXT:     (no_payload_enum size=0 alignment=1 stride=1 num_extra_inhabitants=0))
 // CHECK-64-NEXT:   (field name=noPayload offset=0
-// CHECK-64-NEXT:     (no_payload_enum size=1 alignment=0 stride=1 num_extra_inhabitants=0))
-// CHECK-64-NEXT:   (field name=sillyNoPayload offset=0
-// CHECK-64-NEXT:     (no_payload_enum size=1 alignment=0 stride=1 num_extra_inhabitants=0))
+// CHECK-64-NEXT:     (no_payload_enum size=1 alignment=1 stride=1 num_extra_inhabitants=0))
+// CHECK-64-NEXT:   (field name=sillyNoPayload offset=1
+// CHECK-64-NEXT:     (no_payload_enum size=1 alignment=1 stride=1 num_extra_inhabitants=0))
 // CHECK-64-NEXT:   (field name=singleton offset=8
 // CHECK-64-NEXT:     (reference kind=strong refcounting=native))
 // CHECK-64-NEXT:   (field name=singlePayload offset=16

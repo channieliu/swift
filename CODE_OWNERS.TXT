@@ -11,9 +11,13 @@ N: David Abrahams
 E: dabrahams@apple.com
 D: Swift standard library
 
-N: David Farler
-E: dfarler@apple.com
-D: Markup, Swift Linux port
+N: Erik Eckstein
+E: eeckstein@apple.com
+D: SILOptimizer
+
+N: Xi Ge
+E: xi_ge@apple.com
+D: Markup, Migrator, lib/Syntax
 
 N: Doug Gregor
 E: dgregor@apple.com
@@ -21,7 +25,7 @@ D: AST, Basic, Parse, Sema
 
 N: Joe Groff
 E: jgroff@apple.com
-D: SIL, SILGen
+D: SIL, SILGen, everything in Swift not covered by someone else
 
 N: Argyrios Kyrzidis
 E: kyrtzidis@apple.com
@@ -31,10 +35,6 @@ N: Luke Larson
 E: llarson@apple.com
 D: Swift Benchmark Suite
 
-N: Chris Lattner
-E: clattner@apple.com
-D: Everything in Swift not covered by someone else
-
 N: John McCall
 E: rjmccall@apple.com
 D: Demangler, IRGen, Runtime
@@ -42,10 +42,6 @@ D: Demangler, IRGen, Runtime
 N: Jordan Rose
 E: jordan_rose@apple.com
 D: ClangImporter, Serialization, (Objective-)C printer, Driver
-
-N: Erik Eckstein
-E: eeckstein@apple.com
-D: SILOptimizer
 
 N: Anna Zaks
 E: ganna@apple.com

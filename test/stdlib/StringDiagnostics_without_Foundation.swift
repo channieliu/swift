@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // Positive and negative tests for String index types
 func acceptsCollection<I: Collection>(_: I) {}
@@ -7,7 +7,7 @@ func acceptsRandomAccessCollection<I: RandomAccessCollection>(_: I) {}
 
 func testStringCollectionTypes(s: String) {
   acceptsCollection(s.utf8)
-  acceptsBidirectionalCollection(s.utf8) // expected-error{{argument type 'String.UTF8View' does not conform to expected type 'BidirectionalCollection'}}
+  acceptsBidirectionalCollection(s.utf8)
   acceptsRandomAccessCollection(s.utf8) // expected-error{{argument type 'String.UTF8View' does not conform to expected type 'RandomAccessCollection'}}
 
   // UTF16View is random-access with Foundation, bidirectional without

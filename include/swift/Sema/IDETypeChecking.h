@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -29,6 +29,11 @@ namespace swift {
   class LazyResolver;
   class ExtensionDecl;
   class ProtocolDecl;
+  class Type;
+  class DeclContext;
+  class ConcreteDeclRef;
+  class ValueDecl;
+  class DeclName;
 
   /// \brief Typecheck a declaration parsed during code completion.
   ///
@@ -55,13 +60,25 @@ namespace swift {
   bool typeCheckUnresolvedExpr(DeclContext &DC, Expr* E,
                                Expr *P, SmallVectorImpl<Type> &PossibleTypes);
 
-  struct ResolveMemberResult {
-    ValueDecl *Favored = nullptr;
-    std::vector<ValueDecl*> OtherViables;
-    operator bool() const { return Favored; }
+  enum InterestedMemberKind : uint8_t {
+    Viable,
+    Unviable,
+    All,
   };
 
-  ResolveMemberResult resolveValueMember(DeclContext &DC, Type BaseTy,
+  struct ResolvedMemberResult {
+    struct Implementation;
+    Implementation &Impl;
+
+    ResolvedMemberResult();
+    ~ResolvedMemberResult();
+    operator bool() const;
+    bool hasBestOverload() const;
+    ValueDecl* getBestOverload() const;
+    ArrayRef<ValueDecl*> getMemberDecls(InterestedMemberKind Kind);
+  };
+
+  ResolvedMemberResult resolveValueMember(DeclContext &DC, Type BaseTy,
                                          DeclName Name);
 
   /// \brief Given a type and an extension to the original type decl of that type,
@@ -76,7 +93,7 @@ namespace swift {
     Normal,
 
     /// Type check the argument to an Objective-C #keyPath.
-    ObjCKeyPath,
+    KeyPath,
   };
 
   /// \brief Return the type of an expression parsed during code completion, or
@@ -119,6 +136,33 @@ namespace swift {
 
   /// Creates a lazy type resolver for use in lookups.
   OwnedResolver createLazyResolver(ASTContext &Ctx);
+
+  typedef std::pair<ExtensionDecl*, bool> ExtensionAndIsSynthesized;
+
+  typedef llvm::function_ref<void(ArrayRef<ExtensionAndIsSynthesized>)>
+    ExtensionGroupOperation;
+
+  class SynthesizedExtensionAnalyzer {
+    struct Implementation;
+    Implementation &Impl;
+  public:
+    SynthesizedExtensionAnalyzer(NominalTypeDecl *Target,
+                                 PrintOptions Options,
+                                 bool IncludeUnconditional = true);
+    ~SynthesizedExtensionAnalyzer();
+
+    enum class MergeGroupKind : char {
+      All,
+      MergeableWithTypeDef,
+      UnmergeableWithTypeDef,
+    };
+
+    void forEachExtensionMergeGroup(MergeGroupKind Kind,
+                                    ExtensionGroupOperation Fn);
+    bool isInSynthesizedExtension(const ValueDecl *VD);
+    bool shouldPrintRequirement(ExtensionDecl *ED, StringRef Req);
+    bool hasMergeGroup(MergeGroupKind Kind);
+  };
 }
 
 #endif

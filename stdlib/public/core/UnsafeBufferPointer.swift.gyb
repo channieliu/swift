@@ -2,16 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-/// An iterator for the elements in the buffer referenced by
-/// `UnsafeBufferPointer` or `UnsafeMutableBufferPointer`.
+/// An iterator for the elements in the buffer referenced by an
+/// `UnsafeBufferPointer` or `UnsafeMutableBufferPointer` instance.
+@_fixed_layout
 public struct UnsafeBufferPointerIterator<Element>
   : IteratorProtocol, Sequence {
 
@@ -19,6 +20,7 @@ public struct UnsafeBufferPointerIterator<Element>
   /// exists.
   ///
   /// Once `nil` has been returned, all subsequent calls return `nil`.
+  @_inlineable
   public mutating func next() -> Element? {
     if _position == _end { return nil }
 
@@ -27,25 +29,50 @@ public struct UnsafeBufferPointerIterator<Element>
     return result
   }
 
+  @_versioned
   internal var _position, _end: UnsafePointer<Element>?
+
+  @_inlineable
+  public init(_position: UnsafePointer<Element>?, _end: UnsafePointer<Element>?) {
+      self._position = _position
+      self._end = _end
+  }
 }
 
-%for Mutable in ('Mutable', ''):
-/// A non-owning pointer to a buffer of ${Mutable.lower()} elements stored
-/// contiguously in memory, presenting a collection interface to the
-/// underlying elements.
+% for mutable in (True, False):
+%  Self = 'UnsafeMutableBufferPointer' if mutable else 'UnsafeBufferPointer'
+%  Mutable = 'Mutable' if mutable else ''
+/// A non-owning collection interface to a buffer of ${Mutable.lower()}
+/// elements stored contiguously in memory.
 ///
-/// The pointer should be aligned to `MemoryLayout<Element>.alignment`.
+/// You can use an `${Self}` instance in low level operations to eliminate
+/// uniqueness checks and, in release mode, bounds checks. Bounds checks are
+/// always performed in debug mode.
+///
+/// ${Self} Semantics
+/// =================
+///
+/// An `${Self}` instance is a view into memory and does not own the memory
+/// that it references. Copying a value of type `${Self}` does not copy the
+/// instances stored in the underlying memory. However, initializing another
+/// collection with an `${Self}` instance copies the instances out of the
+/// referenced memory and into the new collection.
+@_fixed_layout
 public struct Unsafe${Mutable}BufferPointer<Element>
   : _${Mutable}Indexable, ${Mutable}Collection, RandomAccessCollection {
+  // FIXME: rdar://18157434 - until this is fixed, this has to be fixed layout
+  // to avoid a hang in Foundation, which has the following setup:
+  // struct A { struct B { let x: UnsafeMutableBufferPointer<...> } let b: B }
 
   public typealias Index = Int
   public typealias IndexDistance = Int
-  public typealias Iterator =
-    IndexingIterator<Unsafe${Mutable}BufferPointer<Element>>
+  public typealias Iterator = UnsafeBufferPointerIterator<Element>
 
-  /// Always zero, which is the index of the first element in a
-  /// non-empty buffer.
+  /// The index of the first element in a nonempty buffer.
+  ///
+  /// The `startIndex` property of an `Unsafe${Mutable}BufferPointer` instance
+  /// is always zero.
+  @_inlineable
   public var startIndex: Int {
     return 0
   }
@@ -55,10 +82,12 @@ public struct Unsafe${Mutable}BufferPointer<Element>
   ///
   /// The `endIndex` property of an `Unsafe${Mutable}BufferPointer` instance is
   /// always identical to `count`.
+  @_inlineable
   public var endIndex: Int {
     return count
   }
 
+  @_inlineable
   public func index(after i: Int) -> Int {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -68,6 +97,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     return i + 1
   }
 
+  @_inlineable
   public func formIndex(after i: inout Int) {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -77,6 +107,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     i += 1
   }
 
+  @_inlineable
   public func index(before i: Int) -> Int {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -86,6 +117,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     return i - 1
   }
 
+  @_inlineable
   public func formIndex(before i: inout Int) {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -95,6 +127,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     i -= 1
   }
 
+  @_inlineable
   public func index(_ i: Int, offsetBy n: Int) -> Int {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -104,6 +137,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     return i + n
   }
 
+  @_inlineable
   public func index(
     _ i: Int, offsetBy n: Int, limitedBy limit: Int
   ) -> Int? {
@@ -119,6 +153,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     return i + n
   }
 
+  @_inlineable
   public func distance(from start: Int, to end: Int) -> Int {
     // NOTE: this is a manual specialization of index movement for a Strideable
     // index that is required for UnsafeBufferPointer performance. The
@@ -128,21 +163,76 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     return end - start
   }
 
+  @_inlineable
   public func _failEarlyRangeCheck(_ index: Int, bounds: Range<Int>) {
     // NOTE: This method is a no-op for performance reasons.
   }
 
+  @_inlineable
   public func _failEarlyRangeCheck(_ range: Range<Int>, bounds: Range<Int>) {
     // NOTE: This method is a no-op for performance reasons.
   }
 
   public typealias Indices = CountableRange<Int>
 
+  @_inlineable
   public var indices: Indices {
     return startIndex..<endIndex
   }
 
-  /// Accesses the `i`th element in the buffer.
+  /// Initializes the memory at `destination.baseAddress` with elements of `self`,
+  /// stopping when either `self` or `destination` is exhausted.
+  ///
+  /// - Returns: an iterator over any remaining elements of `self` and the
+  ///   number of elements initialized.
+  public func _copyContents(
+    initializing destination: UnsafeMutableBufferPointer<Element>
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    guard !isEmpty && !destination.isEmpty else { return (makeIterator(), 0) }
+    let s = self.baseAddress._unsafelyUnwrappedUnchecked
+    let d = destination.baseAddress._unsafelyUnwrappedUnchecked
+    let n = Swift.min(destination.count, self.count)
+    d.initialize(from: s, count: n)
+    return (Iterator(_position: s + n, _end: _end), n)
+  }
+
+  /// Accesses the element at the specified position.
+  ///
+%if Mutable:
+  /// The following example uses the buffer pointer's subscript to access and
+  /// modifying the elements of a mutable buffer pointing to the contiguous
+  /// contents of an array:
+  ///
+  ///     var numbers = [1, 2, 3, 4, 5]
+  ///     numbers.withUnsafeMutableBufferPointer { buffer in
+  ///         for i in stride(from: buffer.startIndex, to: buffer.endIndex - 1, by: 2) {
+  ///             let x = buffer[i]
+  ///             buffer[i + 1] = buffer[i]
+  ///             buffer[i] = x
+  ///         }
+  ///     }
+  ///     print(numbers)
+  ///     // Prints "[2, 1, 4, 3, 5]"
+%else:
+  /// The following example uses the buffer pointer's subscript to access every
+  /// other element of the buffer:
+  ///
+  ///     let numbers = [1, 2, 3, 4, 5]
+  ///     let sum = numbers.withUnsafeBufferPointer { buffer -> Int in
+  ///         var result = 0
+  ///         for i in stride(from: buffer.startIndex, to: buffer.endIndex, by: 2) {
+  ///             result += buffer[i]
+  ///         }
+  ///         return result
+  ///     }
+  ///     // 'sum' == 9
+%end
+  ///
+  /// - Note: Bounds checks for `i` are performed only in debug mode.
+  ///
+  /// - Parameter i: The position of the element to access. `i` must be in the
+  ///   range `0..<count`.
+  @_inlineable
   public subscript(i: Int) -> Element {
     get {
       _debugPrecondition(i >= 0)
@@ -158,6 +248,7 @@ public struct Unsafe${Mutable}BufferPointer<Element>
 %end
   }
 
+  @_inlineable
   public subscript(bounds: Range<Int>)
     -> ${Mutable}RandomAccessSlice<Unsafe${Mutable}BufferPointer<Element>>
   {
@@ -177,11 +268,17 @@ public struct Unsafe${Mutable}BufferPointer<Element>
 %  end
   }
 
-  /// Creates an Unsafe${Mutable}Pointer over the `count` contiguous
-  /// `Element` instances beginning at `start`.
+  /// Creates a new buffer pointer over the specified number of contiguous
+  /// instances beginning at the given pointer.
   ///
-  /// If `start` is nil, `count` must be 0. However, `count` may be 0 even for
-  /// a nonzero `start`.
+  /// - Parameters:
+  ///   - start: A pointer to the start of the buffer, or `nil`. If `start` is
+  ///     `nil`, `count` must be zero. However, `count` may be zero even for a
+  ///     non-`nil` `start`. The pointer passed as `start` must be aligned to
+  ///     `MemoryLayout<Element>.alignment`.
+  ///   - count: The number of instances in the buffer. `count` must not be
+  ///     negative.
+  @_inlineable
   public init(start: Unsafe${Mutable}Pointer<Element>?, count: Int) {
     _precondition(
       count >= 0, "Unsafe${Mutable}BufferPointer with negative count")
@@ -192,37 +289,123 @@ public struct Unsafe${Mutable}BufferPointer<Element>
     _end = start.map { $0 + count }
   }
 
-  /// Returns an iterator over the elements of this sequence.
+  /// Creates a buffer pointer starting at `start` and extending up to the last
+  /// addressable pointer to `Element` in the memory space
+  @_inlineable
+  public init(_unboundedStartingAt start: Unsafe${Mutable}Pointer<Element>) {
+    _position = start
+    _end = type(of: start)._max
+  }
+
+  @_inlineable
+  public init(_empty: ()) {
+    _position = Unsafe${Mutable}Pointer._max
+    _end = _position
+  }
+  
+%  if not Mutable:
+  /// Creates a buffer over the same memory as the given buffer slice.
   ///
-  /// - Complexity: O(1).
+  /// The new buffer will represent the same region of memory as the slice,
+  /// but it's indices will be rebased to zero. Given:
+  ///
+  ///   let slice = buffer[n..<m]
+  ///   let rebased = UnsafeBufferPointer(rebasing: slice)
+  ///
+  /// One may assume `rebased.startIndex == 0` and `rebased[0] == slice[n]`.
+  ///
+  /// - Parameter slice: the raw buffer slice to rebase.
+  @_inlineable
+  public init(rebasing slice: RandomAccessSlice<UnsafeBufferPointer<Element>>) {
+    self.init(start: slice.base.baseAddress! + slice.startIndex,
+      count: slice.count)
+  }
+%  end # !mutable
+
+  /// Creates a buffer over the same memory as the given buffer slice.
+  ///
+  /// The new buffer will represent the same region of memory as the slice,
+  /// but it's indices will be rebased to zero. Given:
+  ///
+  ///   let slice = buffer[n..<m]
+  ///   let rebased = UnsafeBufferPointer(rebasing: slice)
+  ///
+  /// One may assume `rebased.startIndex == 0` and `rebased[0] == slice[n]`.
+  ///
+  /// - Parameter slice: the buffer slice to rebase.
+  @_inlineable
+  public init(
+    rebasing slice:
+    MutableRandomAccessSlice<UnsafeMutableBufferPointer<Element>>
+  ) {
+    self.init(start: slice.base.baseAddress! + slice.startIndex,
+      count: slice.count)
+  }
+
+  /// Returns an iterator over the elements of this buffer.
+  ///
+  /// - Returns: An iterator over the elements of this buffer.
+  @_inlineable
   public func makeIterator() -> UnsafeBufferPointerIterator<Element> {
     return UnsafeBufferPointerIterator(_position: _position, _end: _end)
   }
 
   /// A pointer to the first element of the buffer.
+  ///
+  /// If the `baseAddress` of this buffer is `nil`, the count is zero. However,
+  /// a buffer can have a `count` of zero even with a non-`nil` base address.
+  @_inlineable
   public var baseAddress: Unsafe${Mutable}Pointer<Element>? {
     return _position
   }
 
   /// The number of elements in the buffer.
+  ///
+  /// If the `baseAddress` of this buffer is `nil`, the count is zero. However,
+  /// a buffer can have a `count` of zero even with a non-`nil` base address.
+  @_inlineable
   public var count: Int {
-    if let pos = _position {
-      return _end! - pos
+    switch(_position, _end) {
+    case (.some(let pos), .some(let end)):
+      return (end - pos)
+    case _:
+      return 0
     }
-    return 0
   }
 
+  @_versioned
   let _position, _end: Unsafe${Mutable}Pointer<Element>?
 }
 
 extension Unsafe${Mutable}BufferPointer : CustomDebugStringConvertible {
-  /// A textual representation of `self`, suitable for debugging.
+  /// A textual representation of the buffer, suitable for debugging.
   public var debugDescription: String {
     return "Unsafe${Mutable}BufferPointer"
       + "(start: \(_position.map(String.init(describing:)) ?? "nil"), count: \(count))"
   }
 }
 %end
+
+
+extension UnsafeMutableBufferPointer {
+  /// Initializes memory in the buffer with the elements of `source`.
+  /// Returns an iterator to any elements of `source` that didn't fit in the 
+  /// buffer, and an index to the point in the buffer one past the last element
+  /// written (so `startIndex` if no elements written, `endIndex` if the buffer 
+  /// was completely filled).
+  ///
+  /// - Precondition: The memory in `self` is uninitialized. The buffer must
+  ///   contain sufficient uninitialized memory to accommodate `source.underestimatedCount`.
+  ///
+  /// - Postcondition: The `Pointee`s at `self[startIndex..<returned index]` are
+  ///   initialized.
+  @_inlineable
+  public func initialize<S: Sequence>(from source: S) -> (S.Iterator, Index)
+    where S.Element == Element {
+    return source._copyContents(initializing: self)
+  }
+}
+
 
 @available(*, unavailable, renamed: "UnsafeBufferPointerIterator")
 public struct UnsafeBufferPointerGenerator<Element> {}

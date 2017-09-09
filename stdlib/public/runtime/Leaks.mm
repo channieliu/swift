@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -80,6 +80,7 @@ static id __swift_leaks_allocWithZone(id self, SEL _cmd, id zone) {
   return result;
 }
 
+SWIFT_CC(swift)
 extern "C" void swift_leaks_startTrackingObjects(const char *name) {
   pthread_mutex_lock(&LeaksMutex);
 
@@ -159,6 +160,7 @@ static void dumpObjCHeapObjects() {
   }
 }
 
+SWIFT_CC(swift)
 extern "C" int swift_leaks_stopTrackingObjects(const char *name) {
   pthread_mutex_lock(&LeaksMutex);
   unsigned Result = TrackedSwiftObjects->size() + TrackedObjCObjects->size();

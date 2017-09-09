@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,8 +18,8 @@
 
 #include "swift/ABI/Class.h"
 #include "swift/ABI/MetadataValues.h"
-#include "swift/AST/AttrKind.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/AttrKind.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/Module.h"
@@ -27,15 +27,17 @@
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/TypeMemberVisitor.h"
 #include "swift/AST/Types.h"
+#include "swift/IRGen/Linking.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILType.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/IR/CallSite.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/CallSite.h"
 
+#include "ConstantBuilder.h"
 #include "Explosion.h"
 #include "GenFunc.h"
 #include "GenMeta.h"
@@ -47,7 +49,6 @@
 #include "IRGenModule.h"
 #include "GenHeap.h"
 #include "HeapTypeInfo.h"
-#include "Linking.h"
 #include "MemberAccessStrategy.h"
 
 
@@ -62,20 +63,25 @@ static ClassDecl *getRootClass(ClassDecl *theClass) {
   return theClass;
 }
 
-/// What reference counting mechanism does a class have?
-ReferenceCounting irgen::getReferenceCountingForClass(IRGenModule &IGM,
-                                                      ClassDecl *theClass) {
+/// What reference counting mechanism does a class-like type have?
+ReferenceCounting irgen::getReferenceCountingForType(IRGenModule &IGM,
+                                                     CanType type) {
   // If ObjC interop is disabled, we have a Swift refcount.
   if (!IGM.ObjCInterop)
     return ReferenceCounting::Native;
 
-  // NOTE: if you change this, change Type::usesNativeReferenceCounting.
-  // If the root class is implemented in swift, then we have a swift
-  // refcount; otherwise, we have an ObjC refcount.
-  if (getRootClass(theClass)->hasKnownSwiftImplementation())
+  if (type->usesNativeReferenceCounting(ResilienceExpansion::Maximal))
     return ReferenceCounting::Native;
 
-  return ReferenceCounting::ObjC;
+  // Class-constrained archetypes and existentials that don't use
+  // native reference counting and yet have a superclass must be
+  // using ObjC reference counting.
+  auto superclass = type->getSuperclass();
+  if (superclass)
+    return ReferenceCounting::ObjC;
+
+  // Otherwise, it could be either one.
+  return ReferenceCounting::Unknown;
 }
 
 /// What isa encoding mechanism does a type have?
@@ -117,7 +123,7 @@ namespace {
       return Refcount;
     }
 
-    ~ClassTypeInfo() {
+    ~ClassTypeInfo() override {
       delete Layout;
     }
 
@@ -133,7 +139,7 @@ namespace {
       return getLayout(IGM, type).getElements();
     }
   };
-}  // end anonymous namespace.
+} // end anonymous namespace
 
 /// Return the lowered type for the class's 'self' type within its context.
 static SILType getSelfType(ClassDecl *base) {
@@ -175,14 +181,30 @@ namespace {
     // If not, we can have to access stored properties through the field
     // offset vector in the instantiated type metadata.
     bool ClassHasConcreteLayout = true;
-
+    
   public:
-    ClassLayoutBuilder(IRGenModule &IGM, SILType classType)
+    ClassLayoutBuilder(IRGenModule &IGM, SILType classType,
+                       ReferenceCounting refcounting)
       : StructLayoutBuilder(IGM)
     {
       // Start by adding a heap header.
-      addHeapHeader();
-
+      switch (refcounting) {
+      case swift::irgen::ReferenceCounting::Native:
+        // For native classes, place a full object header.
+        addHeapHeader();
+        break;
+      case swift::irgen::ReferenceCounting::ObjC:
+        // For ObjC-inheriting classes, we don't reliably know the size of the
+        // base class, but NSObject only has an `isa` pointer at most.
+        addNSObjectHeader();
+        break;
+      case swift::irgen::ReferenceCounting::Block:
+      case swift::irgen::ReferenceCounting::Unknown:
+      case swift::irgen::ReferenceCounting::Bridge:
+      case swift::irgen::ReferenceCounting::Error:
+        llvm_unreachable("not a class refcounting kind");
+      }
+      
       // Next, add the fields for the given class.
       auto theClass = classType.getClassOrBoundGenericClass();
       assert(theClass);
@@ -225,7 +247,7 @@ namespace {
       }
 
       if (theClass->hasSuperclass()) {
-        SILType superclassType = classType.getSuperclass(nullptr);
+        SILType superclassType = classType.getSuperclass();
         auto superclass = superclassType.getClassOrBoundGenericClass();
         assert(superclass);
 
@@ -237,6 +259,25 @@ namespace {
           // the field offset vector.
           ClassHasFixedSize = false;
 
+          // We can't use global offset variables if we are generic and layout
+          // dependent on a generic parameter because the objective-c layout might
+          // depend on the alignment of the generic stored property('t' in the
+          // example below).
+          //
+          // class Foo<T> : NSFoobar {
+          //   var x : AKlass = AKlass()
+          //   var y : AKlass = AKlass()
+          //   var t : T?
+          // }
+          if (classType.hasArchetype())
+            for (VarDecl *var : theClass->getStoredProperties()) {
+              SILType type = classType.getFieldType(var, IGM.getSILModule());
+              auto &eltType = IGM.getTypeInfo(type);
+              if (!eltType.isFixedSize()) {
+                if (type.hasArchetype())
+                  ClassHasConcreteLayout = false;
+              }
+            }
         } else if (IGM.isResilient(superclass, ResilienceExpansion::Maximal)) {
           ClassMetadataRequiresDynamicInitialization = true;
 
@@ -350,14 +391,14 @@ namespace {
       return FieldAccess::NonConstantIndirect;
     }
   };
-}
+} // end anonymous namespace
 
 void ClassTypeInfo::generateLayout(IRGenModule &IGM, SILType classType) const {
   assert(!Layout && FieldLayout.AllStoredProperties.empty() &&
          "already generated layout");
 
   // Add the heap header.
-  ClassLayoutBuilder builder(IGM, classType);
+  ClassLayoutBuilder builder(IGM, classType, Refcount);
 
   // generateLayout can call itself recursively in order to compute a layout
   // for the abstract type.  If classType shares an exemplar types with the
@@ -384,7 +425,8 @@ void ClassTypeInfo::generateLayout(IRGenModule &IGM, SILType classType) const {
 const StructLayout &
 ClassTypeInfo::getLayout(IRGenModule &IGM, SILType classType) const {
   // Return the cached layout if available.
-  if (Layout) return *Layout;
+  if (Layout)
+    return *Layout;
 
   generateLayout(IGM, classType);
   return *Layout;
@@ -433,6 +475,50 @@ static OwnedAddress emitAddressAtOffset(IRGenFunction &IGF,
   auto addr = IGF.emitByteOffsetGEP(base, offset, fieldTI,
                               base->getName() + "." + field->getName().str());
   return OwnedAddress(addr, base);
+}
+
+llvm::Constant *
+irgen::tryEmitConstantClassFragilePhysicalMemberOffset(IRGenModule &IGM,
+                                                       SILType baseType,
+                                                       VarDecl *field) {
+  auto fieldType = baseType.getFieldType(field, IGM.getSILModule());
+  // If the field is empty, its address doesn't matter.
+  auto &fieldTI = IGM.getTypeInfo(fieldType);
+  if (fieldTI.isKnownEmpty(ResilienceExpansion::Maximal)) {
+    return llvm::ConstantInt::get(IGM.SizeTy, 0);
+  }
+
+  auto &baseClassTI = IGM.getTypeInfo(baseType).as<ClassTypeInfo>();
+
+  auto &classLayout = baseClassTI.getClassLayout(IGM, baseType);
+  unsigned fieldIndex = classLayout.getFieldIndex(field);
+
+  switch (classLayout.AllFieldAccesses[fieldIndex]) {
+  case FieldAccess::ConstantDirect: {
+    auto &element = baseClassTI.getElements(IGM, baseType)[fieldIndex];
+    return llvm::ConstantInt::get(IGM.SizeTy,
+                                  element.getByteOffset().getValue());
+  }
+  case FieldAccess::NonConstantDirect:
+  case FieldAccess::ConstantIndirect:
+  case FieldAccess::NonConstantIndirect:
+    return nullptr;
+  }
+}
+
+unsigned
+irgen::getClassFieldIndex(IRGenModule &IGM, SILType baseType, VarDecl *field) {
+  auto &baseClassTI = IGM.getTypeInfo(baseType).as<ClassTypeInfo>();
+  auto &classLayout = baseClassTI.getClassLayout(IGM, baseType);
+  return classLayout.getFieldIndex(field);
+}
+
+FieldAccess
+irgen::getClassFieldAccess(IRGenModule &IGM, SILType baseType, VarDecl *field) {
+  auto &baseClassTI = IGM.getTypeInfo(baseType).as<ClassTypeInfo>();
+  auto &classLayout = baseClassTI.getClassLayout(IGM, baseType);
+  unsigned fieldIndex = classLayout.getFieldIndex(field);
+  return classLayout.AllFieldAccesses[fieldIndex];
 }
 
 OwnedAddress irgen::projectPhysicalClassMemberAddress(IRGenFunction &IGF,
@@ -677,7 +763,7 @@ llvm::Value *irgen::emitClassAllocation(IRGenFunction &IGF, SILType selfType,
       emitClassHeapMetadataRef(IGF, classType, MetadataValueType::ObjCClass,
                                /*allow uninitialized*/ true);
     StackAllocSize = -1;
-    return emitObjCAllocObjectCall(IGF, metadata, selfType.getSwiftRValueType());
+    return emitObjCAllocObjectCall(IGF, metadata, selfType);
   }
 
   llvm::Value *metadata =
@@ -713,8 +799,7 @@ llvm::Value *irgen::emitClassAllocationDynamic(IRGenFunction &IGF,
                                                TailArraysRef TailArrays) {
   // If we need to use Objective-C allocation, do so.
   if (objc) {
-    return emitObjCAllocObjectCall(IGF, metadata, 
-                                   selfType.getSwiftRValueType());
+    return emitObjCAllocObjectCall(IGF, metadata, selfType);
   }
 
   // Otherwise, allocate using Swift's routines.
@@ -756,24 +841,23 @@ static bool getInstanceSizeByMethod(IRGenFunction &IGF,
   }
 
   // Check whether the SIL module defines it.  (We need a type for it.)
-  SILDeclRef fnRef(fn, SILDeclRef::Kind::Func,
-                   ResilienceExpansion::Minimal,
-                   /*uncurryLevel*/ 1,
-                   /*foreign*/ false);
+  SILDeclRef fnRef(fn, SILDeclRef::Kind::Func);
   SILFunction *silFn = IGF.getSILModule().lookUpFunction(fnRef);
   if (!silFn)
     return false;
 
   // Check that it returns two size_t's and takes no other arguments.
   auto fnType = silFn->getLoweredFunctionType();
+  auto fnConv = silFn->getConventions();
   if (fnType->getParameters().size() != 1)
     return false;
-  if (fnType->getNumDirectResults() != 2 ||
-      fnType->getNumIndirectResults() != 0)
+  if (fnConv.getNumDirectSILResults() != 2
+      || fnConv.getNumIndirectSILResults() != 0)
     return false;
-  auto results = fnType->getDirectResults();
-  if (results[0].getConvention() != ResultConvention::Unowned ||
-      results[1].getConvention() != ResultConvention::Unowned)
+  if ((fnConv.getDirectSILResults().begin()->getConvention()
+       != ResultConvention::Unowned)
+      || (std::next(fnConv.getDirectSILResults().begin())->getConvention()
+          != ResultConvention::Unowned))
     return false;
   llvm::Function *llvmFn =
     IGF.IGM.getAddrOfSILFunction(silFn, NotForDefinition);
@@ -788,7 +872,7 @@ static bool getInstanceSizeByMethod(IRGenFunction &IGF,
 
   // Retain 'self' if necessary.
   if (fnType->getParameters()[0].isConsumed()) {
-    IGF.emitNativeStrongRetain(selfValue);
+    IGF.emitNativeStrongRetain(selfValue, IGF.getDefaultAtomicity());
   }
 
   // Adjust down to the defining subclass type if necessary.
@@ -916,17 +1000,15 @@ void IRGenModule::emitClassDecl(ClassDecl *D) {
   emitClassMetadata(*this, D,
                     classTI.getLayout(*this, selfType),
                     classTI.getClassLayout(*this, selfType));
+
+  IRGen.addClassForEagerInitialization(D);
+
   emitNestedTypeDecls(D->getMembers());
   emitFieldMetadataRecord(D);
 }
 
 namespace {
-  enum ForMetaClass_t : bool {
-    ForClass = false,
-    ForMetaClass = true
-  };
-
-  typedef std::pair<ClassDecl*, Module*> CategoryNameKey;
+  typedef std::pair<ClassDecl*, ModuleDecl*> CategoryNameKey;
   /// Used to provide unique names to ObjC categories generated by Swift
   /// extensions. The first category for a class in a module gets the module's
   /// name as its key, e.g., NSObject (MySwiftModule). Another extension of the
@@ -962,24 +1044,82 @@ namespace {
 
     bool HasNonTrivialDestructor = false;
     bool HasNonTrivialConstructor = false;
+
+    class MethodDescriptor {
+    public:
+      enum class Kind {
+        Method,
+        IVarInitializer,
+        IVarDestroyer,
+      };
+
+    private:
+      llvm::PointerIntPair<void*, 2, Kind> Data;
+      static_assert(llvm::PointerLikeTypeTraits<llvm::Function*>
+                      ::NumLowBitsAvailable >= 2,
+                    "llvm::Function* isn't adequately aligned");
+      static_assert(llvm::PointerLikeTypeTraits<AbstractFunctionDecl*>
+                      ::NumLowBitsAvailable >= 2,
+                    "AbstractFuncDecl* isn't adequately aligned");
+
+      MethodDescriptor(Kind kind, void *ptr) : Data(ptr, kind) {}
+
+    public:
+      MethodDescriptor(AbstractFunctionDecl *method)
+          : Data(method, Kind::Method) {
+        assert(method && "null method provided");
+      }
+      static MethodDescriptor getIVarInitializer(llvm::Function *fn) {
+        assert(fn && "null impl provided");
+        return MethodDescriptor(Kind::IVarInitializer, fn);
+      }
+      static MethodDescriptor getIVarDestroyer(llvm::Function *fn) {
+        assert(fn && "null impl provided");
+        return MethodDescriptor(Kind::IVarDestroyer, fn);
+      }
+
+      Kind getKind() const { return Data.getInt(); }
+      AbstractFunctionDecl *getMethod() {
+        assert(getKind() == Kind::Method);
+        return static_cast<AbstractFunctionDecl*>(Data.getPointer());
+      }
+      llvm::Function *getImpl() {
+        assert(getKind() != Kind::Method);
+        return static_cast<llvm::Function*>(Data.getPointer());
+      }
+    };
+
     llvm::SmallString<16> CategoryName;
-    SmallVector<llvm::Constant*, 8> Ivars;
-    SmallVector<llvm::Constant*, 16> InstanceMethods;
-    SmallVector<llvm::Constant*, 16> ClassMethods;
-    SmallVector<llvm::Constant*, 16> OptInstanceMethods;
-    SmallVector<llvm::Constant*, 16> OptClassMethods;
-    SmallVector<llvm::Constant*, 4> Protocols;
-    SmallVector<llvm::Constant*, 8> InstanceProperties;
-    SmallVector<llvm::Constant*, 8> ClassProperties;
-    SmallVector<llvm::Constant*, 8> InstanceMethodTypesExt;
-    SmallVector<llvm::Constant*, 8> ClassMethodTypesExt;
-    SmallVector<llvm::Constant*, 8> OptInstanceMethodTypesExt;
-    SmallVector<llvm::Constant*, 8> OptClassMethodTypesExt;
+    SmallVector<VarDecl*, 8> Ivars;
+    SmallVector<MethodDescriptor, 16> InstanceMethods;
+    SmallVector<MethodDescriptor, 16> ClassMethods;
+    SmallVector<MethodDescriptor, 16> OptInstanceMethods;
+    SmallVector<MethodDescriptor, 16> OptClassMethods;
+    SmallVector<ProtocolDecl*, 4> Protocols;
+    SmallVector<VarDecl*, 8> InstanceProperties;
+    SmallVector<VarDecl*, 8> ClassProperties;
     
     llvm::Constant *Name = nullptr;
     /// Index of the first non-inherited field in the layout.
     unsigned FirstFieldIndex;
     unsigned NextFieldIndex;
+
+    SmallVectorImpl<MethodDescriptor> &getMethodList(ValueDecl *decl) {
+      if (decl->getAttrs().hasAttribute<OptionalAttr>()) {
+        if (decl->isStatic()) {
+          return OptClassMethods;
+        } else {
+          return OptInstanceMethods;
+        }
+      } else {
+        if (decl->isStatic()) {
+          return ClassMethods;
+        } else {
+          return InstanceMethods;
+        }
+      }
+    }
+
   public:
     ClassDataBuilder(IRGenModule &IGM, ClassDecl *theClass,
                      const StructLayout &layout,
@@ -1019,17 +1159,23 @@ namespace {
     ClassDataBuilder(IRGenModule &IGM, ProtocolDecl *theProtocol)
       : IGM(IGM), TheEntity(theProtocol), TheExtension(nullptr)
     {
-      // Gather protocol references for all of the explicitly-specified
+      llvm::SmallSetVector<ProtocolDecl *, 2> protocols;
+
+      // Gather protocol references for all of the directly inherited
       // Objective-C protocol conformances.
-      // FIXME: We can't use visitConformances() because there are no
-      // conformances for protocols to protocols right now.
-      for (ProtocolDecl *p : theProtocol->getInheritedProtocols(nullptr)) {
-        if (!p->isObjC())
-          continue;
-        // Don't emit the magic AnyObject conformance.
-        if (p == IGM.Context.getProtocol(KnownProtocolKind::AnyObject))
-          continue;
-        Protocols.push_back(buildProtocolRef(p));
+      for (ProtocolDecl *p : theProtocol->getInheritedProtocols()) {
+        getObjCProtocols(p, protocols);
+      }
+
+      // Add any restated Objective-C protocol conformances.
+      for (auto *attr :
+             theProtocol
+               ->getAttrs().getAttributes<RestatedObjCConformanceAttr>()) {
+        getObjCProtocols(attr->Proto, protocols);
+      }
+
+      for (ProtocolDecl *proto : protocols) {
+        Protocols.push_back(proto);
       }
 
       for (Decl *member : theProtocol->getMembers())
@@ -1039,19 +1185,30 @@ namespace {
     /// Gather protocol records for all of the explicitly-specified Objective-C
     /// protocol conformances.
     void visitConformances(DeclContext *dc) {
+      llvm::SmallSetVector<ProtocolDecl *, 2> protocols;
       for (auto conformance : dc->getLocalConformances(
                                 ConformanceLookupKind::OnlyExplicit,
                                 nullptr, /*sorted=*/true)) {
         ProtocolDecl *proto = conformance->getProtocol();
-        if (!proto->isObjC())
-          continue;
+        getObjCProtocols(proto, protocols);
+      }
 
-        // Don't emit the magic AnyObject conformance.
-        if (auto known = proto->getKnownProtocolKind())
-          if (*known == KnownProtocolKind::AnyObject)
-            continue;
+      for (ProtocolDecl *proto : protocols) {
+        Protocols.push_back(proto);
+      }
+    }
 
-        Protocols.push_back(buildProtocolRef(proto));
+    /// Add the protocol to the vector, if it's Objective-C protocol,
+    /// or search its superprotocols.
+    void getObjCProtocols(ProtocolDecl *proto,
+                          llvm::SmallSetVector<ProtocolDecl *, 2> &result) {
+      if (proto->isObjC()) {
+        result.insert(proto);
+      } else {
+        for (ProtocolDecl *inherited : proto->getInheritedProtocols()) {
+          // Recursively check inherited protocol for objc conformance.
+          getObjCProtocols(inherited, result);
+        }
       }
     }
 
@@ -1106,7 +1263,7 @@ namespace {
     void buildCategoryName(SmallVectorImpl<char> &s) {
       llvm::raw_svector_ostream os(s);
       // Find the module the extension is declared in.
-      Module *TheModule = TheExtension->getParentModule();
+      ModuleDecl *TheModule = TheExtension->getParentModule();
 
       os << TheModule->getName();
       
@@ -1118,77 +1275,74 @@ namespace {
   public:
     llvm::Constant *emitCategory() {
       assert(TheExtension && "can't emit category data for a class");
-      llvm::Constant *fields[8];
+      ConstantInitBuilder builder(IGM);
+      auto fields = builder.beginStruct();
+
       // struct category_t {
       //   char const *name;
-      fields[0] = IGM.getAddrOfGlobalString(CategoryName);
+      fields.add(IGM.getAddrOfGlobalString(CategoryName));
       //   const class_t *theClass;
       if (getClass()->hasClangNode())
-        fields[1] = IGM.getAddrOfObjCClass(getClass(), NotForDefinition);
+        fields.add(IGM.getAddrOfObjCClass(getClass(), NotForDefinition));
       else {
         auto type = getSelfType(getClass()).getSwiftRValueType();
         llvm::Constant *metadata =
           tryEmitConstantHeapMetadataRef(IGM, type, /*allowUninit*/ true);
         assert(metadata &&
                "extended objc class doesn't have constant metadata?");
-        fields[1] = metadata;
+        fields.add(metadata);
       }
       //   const method_list_t *instanceMethods;
-      fields[2] = buildInstanceMethodList();
+      fields.add(buildInstanceMethodList());
       //   const method_list_t *classMethods;
-      fields[3] = buildClassMethodList();
+      fields.add(buildClassMethodList());
       //   const protocol_list_t *baseProtocols;
-      fields[4] = buildProtocolList();
+      fields.add(buildProtocolList());
       //   const property_list_t *properties;
-      fields[5] = buildPropertyList(ForClass);
+      fields.add(buildPropertyList(ForClass));
       //   const property_list_t *classProperties;
-      fields[6] = buildPropertyList(ForMetaClass);
+      fields.add(buildPropertyList(ForMetaClass));
       //   uint32_t size;
-      auto sizeofPointer = IGM.getPointerSize().getValue();
-      unsigned size = sizeofPointer * llvm::array_lengthof(fields);
-      // Adjust for 'size', which is always 32 bits rather than pointer-sized.
       // FIXME: Clang does this by using non-ad-hoc types for ObjC runtime
       // structures.
-      size -= (sizeofPointer - 4) * 1;
-      fields[7] = llvm::ConstantInt::get(IGM.Int32Ty, size);
+      Size size = 7 * IGM.getPointerSize() + Size(4);
+      fields.addInt32(size.getValue());
       // };
 
+      assert(fields.getNextOffsetFromGlobal() == size);
       return buildGlobalVariable(fields, "_CATEGORY_");
     }
     
     llvm::Constant *emitProtocol() {
-      llvm::Constant *fields[13];
+      ConstantInitBuilder builder(IGM);
+      auto fields = builder.beginStruct();
       llvm::SmallString<64> nameBuffer;
 
       assert(isBuildingProtocol() && "not emitting a protocol");
       
       // struct protocol_t {
       //   Class super;
-      fields[0] = null();
+      fields.addNullPointer(IGM.Int8PtrTy);
       //   char const *name;
-      fields[1] = IGM.getAddrOfGlobalString(getEntityName(nameBuffer));
+      fields.add(IGM.getAddrOfGlobalString(getEntityName(nameBuffer)));
       //   const protocol_list_t *baseProtocols;
-      fields[2] = buildProtocolList();
+      fields.add(buildProtocolList());
       //   const method_list_t *requiredInstanceMethods;
-      fields[3] = buildInstanceMethodList();
+      fields.add(buildInstanceMethodList());
       //   const method_list_t *requiredClassMethods;
-      fields[4] = buildClassMethodList();
+      fields.add(buildClassMethodList());
       //   const method_list_t *optionalInstanceMethods;
-      fields[5] = buildOptInstanceMethodList();
+      fields.add(buildOptInstanceMethodList());
       //   const method_list_t *optionalClassMethods;
-      fields[6] = buildOptClassMethodList();
+      fields.add(buildOptClassMethodList());
       //   const property_list_t *properties;
-      fields[7] = buildPropertyList(ForClass);
+      fields.add(buildPropertyList(ForClass));
 
       //   uint32_t size;
-      auto sizeofPointer = IGM.getPointerSize().getValue();
-      unsigned size = sizeofPointer * llvm::array_lengthof(fields);
-      // Adjust for 'size' and 'flags', which are always 32 bits rather than
-      // pointer-sized.
       // FIXME: Clang does this by using non-ad-hoc types for ObjC runtime
       // structures.
-      size -= (sizeofPointer - 4) * 2;
-      fields[8] = llvm::ConstantInt::get(IGM.Int32Ty, size);
+      Size size = 11 * IGM.getPointerSize() + 2 * Size(4);
+      fields.addInt32(size.getValue());
 
       //   uint32_t flags;
       auto flags = ProtocolDescriptorFlags()
@@ -1197,25 +1351,26 @@ namespace {
         .withDispatchStrategy(ProtocolDispatchStrategy::ObjC)
         .withSpecialProtocol(getSpecialProtocolID(getProtocol()));
       
-      fields[9] = llvm::ConstantInt::get(IGM.Int32Ty, flags.getIntValue());
+      fields.addInt32(flags.getIntValue());
       
       //   const char ** extendedMethodTypes;
-      fields[10] = buildOptExtendedMethodTypes();
+      fields.add(buildOptExtendedMethodTypes());
       //   const char *demangledName;
-      fields[11] = null();
+      fields.addNullPointer(IGM.Int8PtrTy);
       //   const property_list_t *classProperties;
-      fields[12] = buildPropertyList(ForMetaClass);
+      fields.add(buildPropertyList(ForMetaClass));
       // };
-      
+
+      assert(fields.getNextOffsetFromGlobal() == size);
       return buildGlobalVariable(fields, "_PROTOCOL_");
     }
 
-    llvm::Constant *emitRODataFields(ForMetaClass_t forMeta) {
+    void emitRODataFields(ConstantStructBuilder &b, ForMetaClass_t forMeta) {
       assert(Layout && "can't emit rodata for a category");
-      SmallVector<llvm::Constant*, 11> fields;
+
       // struct _class_ro_t {
       //   uint32_t flags;
-      fields.push_back(buildFlags(forMeta));
+      b.addInt32(unsigned(buildFlags(forMeta)));
 
       //   uint32_t instanceStart;
       //   uint32_t instanceSize;
@@ -1246,57 +1401,58 @@ namespace {
           instanceStart = Size(0);
         }
       }
-      fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty,
-                                              instanceStart.getValue()));
-      fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty,
-                                              instanceSize.getValue()));
+      b.addInt32(instanceStart.getValue());
+      b.addInt32(instanceSize.getValue());
 
       //   uint32_t reserved;  // only when building for 64bit targets
       if (IGM.getPointerAlignment().getValue() > 4) {
         assert(IGM.getPointerAlignment().getValue() == 8);
-        fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty, 0));
+        b.addInt32(0);
       }
 
       //   const uint8_t *ivarLayout;
       // GC/ARC layout.  TODO.
-      fields.push_back(null());
+      b.addNullPointer(IGM.Int8PtrTy);
 
       //   const char *name;
       // It is correct to use the same name for both class and metaclass.
-      fields.push_back(buildName());
+      b.add(buildName());
 
       //   const method_list_t *baseMethods;
-      fields.push_back(forMeta ? buildClassMethodList()
-                               : buildInstanceMethodList());
+      b.add(forMeta ? buildClassMethodList() : buildInstanceMethodList());
 
       //   const protocol_list_t *baseProtocols;
       // Apparently, this list is the same in the class and the metaclass.
-      fields.push_back(buildProtocolList());
+      b.add(buildProtocolList());
 
       //   const ivar_list_t *ivars;
-      fields.push_back(forMeta ? null() : buildIvarList());
+      if (forMeta) {
+        b.addNullPointer(IGM.Int8PtrTy);
+      } else {
+        b.add(buildIvarList());
+      }
 
       //   const uint8_t *weakIvarLayout;
       // More GC/ARC layout.  TODO.
-      fields.push_back(null());
+      b.addNullPointer(IGM.Int8PtrTy);
 
       //   const property_list_t *baseProperties;
-      fields.push_back(buildPropertyList(forMeta));
+      b.add(buildPropertyList(forMeta));
 
       // };
-
-      return llvm::ConstantStruct::getAnon(IGM.getLLVMContext(), fields);
     }
     
     llvm::Constant *emitROData(ForMetaClass_t forMeta) {
-      auto fields = emitRODataFields(forMeta);
+      ConstantInitBuilder builder(IGM);
+      auto fields = builder.beginStruct();
+      emitRODataFields(fields, forMeta);
       
       auto dataSuffix = forMeta ? "_METACLASS_DATA_" : "_DATA_";
       return buildGlobalVariable(fields, dataSuffix);
     }
 
   private:
-    llvm::Constant *buildFlags(ForMetaClass_t forMeta) {
+    ObjCClassFlags buildFlags(ForMetaClass_t forMeta) {
       ObjCClassFlags flags = ObjCClassFlags::CompiledByARC;
 
       // Mark metaclasses as appropriate.
@@ -1312,7 +1468,7 @@ namespace {
       }
 
       // FIXME: set ObjCClassFlags::Hidden when appropriate
-      return llvm::ConstantInt::get(IGM.Int32Ty, uint32_t(flags));
+      return flags;
     }
 
     llvm::Constant *buildName() {
@@ -1346,58 +1502,16 @@ namespace {
       if (method->isAccessor()) return;
 
       // Don't emit getters/setters for @NSManaged methods.
-      if (method->getAttrs().hasAttribute<NSManagedAttr>())
-        return;
+      if (method->getAttrs().hasAttribute<NSManagedAttr>()) return;
 
-      llvm::Constant *entry = emitObjCMethodDescriptor(IGM, method);
-      // This pointer will be set if we need to store the extended method type
-      // encoding.
-      SmallVectorImpl<llvm::Constant *> *ExtMethodTypesList = nullptr;
-      if (!method->isStatic()) {
-        if (method->getAttrs().hasAttribute<OptionalAttr>()) {
-          OptInstanceMethods.push_back(entry);
-          if (isBuildingProtocol())
-            ExtMethodTypesList = &OptInstanceMethodTypesExt;
-        }
-        else {
-          InstanceMethods.push_back(entry);
-          if (isBuildingProtocol())
-            ExtMethodTypesList = &InstanceMethodTypesExt;
-        }
-      } else {
-        if (method->getAttrs().hasAttribute<OptionalAttr>()) {
-          OptClassMethods.push_back(entry);
-          if (isBuildingProtocol())
-            ExtMethodTypesList = &OptClassMethodTypesExt;
-        }
-        else {
-          ClassMethods.push_back(entry);
-          if (isBuildingProtocol())
-            ExtMethodTypesList = &ClassMethodTypesExt;
-        }
-      }
-      if (ExtMethodTypesList) {
-        ExtMethodTypesList->push_back(
-                                getMethodTypeExtendedEncoding(IGM, method));
-      }
+      getMethodList(method).push_back(method);
     }
 
     /// Constructors need to be collected into the appropriate methods list.
     void visitConstructorDecl(ConstructorDecl *constructor) {
       if (!isBuildingProtocol() &&
           !requiresObjCMethodDescriptor(constructor)) return;
-      llvm::Constant *entry = emitObjCMethodDescriptor(IGM, constructor);
-      if (constructor->getAttrs().hasAttribute<OptionalAttr>()) {
-        OptInstanceMethods.push_back(entry);
-        if (isBuildingProtocol())
-          OptInstanceMethodTypesExt.push_back(
-                              getMethodTypeExtendedEncoding(IGM, constructor));
-      } else {
-        InstanceMethods.push_back(entry);
-        if (isBuildingProtocol())
-          InstanceMethodTypesExt.push_back(
-                              getMethodTypeExtendedEncoding(IGM, constructor));
-      }
+      getMethodList(constructor).push_back(constructor);
     }
 
     /// Determine whether the given destructor has an Objective-C
@@ -1410,10 +1524,8 @@ namespace {
 
       // We don't have a destructor body, so hunt for the SIL function
       // for it.
-      SILDeclRef dtorRef(destructor, SILDeclRef::Kind::Deallocator,
-                         ResilienceExpansion::Minimal,
-                         SILDeclRef::ConstructAtNaturalUncurryLevel,
-                         /*isForeign=*/true);
+      auto dtorRef = SILDeclRef(destructor, SILDeclRef::Kind::Deallocator)
+        .asForeign();
       if (auto silFn = IGM.getSILModule().lookUpFunction(dtorRef))
         return silFn->isDefinition();
 
@@ -1427,27 +1539,77 @@ namespace {
       auto classDecl = cast<ClassDecl>(destructor->getDeclContext());
       if (Lowering::usesObjCAllocator(classDecl) &&
           hasObjCDeallocDefinition(destructor)) {
-        llvm::Constant *entry = emitObjCMethodDescriptor(IGM, destructor);
-        InstanceMethods.push_back(entry);
+        InstanceMethods.push_back(destructor);
       }
     }
 
-    void addIVarInitializer() {
-      if (auto entry = emitObjCIVarInitDestroyDescriptor(IGM, getClass(),
-                                                         false)) {
-        InstanceMethods.push_back(*entry);
+    void visitMissingMemberDecl(MissingMemberDecl *placeholder) {
+      llvm_unreachable("should not IRGen classes with missing members");
+    }
 
+    void addIVarInitializer() {
+      if (auto fn = IGM.getAddrOfIVarInitDestroy(getClass(),
+                                                 /*destroy*/ false,
+                                                 /*isForeign=*/ true,
+                                                 NotForDefinition)) {
+        InstanceMethods.push_back(MethodDescriptor::getIVarInitializer(*fn));
         HasNonTrivialConstructor = true;
       }
     }
 
     void addIVarDestroyer() {
-      if (auto entry = emitObjCIVarInitDestroyDescriptor(IGM, getClass(),
-                                                         true)) {
-        InstanceMethods.push_back(*entry);
-
+      if (auto fn = IGM.getAddrOfIVarInitDestroy(getClass(),
+                                                 /*destroy*/ true,
+                                                 /*isForeign=*/ true,
+                                                 NotForDefinition)) {
+        InstanceMethods.push_back(MethodDescriptor::getIVarDestroyer(*fn));
         HasNonTrivialDestructor = true;
       }
+    }
+
+    void buildMethod(ConstantArrayBuilder &descriptors,
+                     MethodDescriptor descriptor) {
+      switch (descriptor.getKind()) {
+      case MethodDescriptor::Kind::Method:
+        return buildMethod(descriptors, descriptor.getMethod());
+      case MethodDescriptor::Kind::IVarInitializer:
+        emitObjCIVarInitDestroyDescriptor(IGM, descriptors, getClass(),
+                                          descriptor.getImpl(), false);
+        return;
+      case MethodDescriptor::Kind::IVarDestroyer:
+        emitObjCIVarInitDestroyDescriptor(IGM, descriptors, getClass(),
+                                          descriptor.getImpl(), true);
+        return;
+      }
+      llvm_unreachable("bad method descriptor kind");
+    }
+
+    void buildMethod(ConstantArrayBuilder &descriptors,
+                     AbstractFunctionDecl *method) {
+      auto func = dyn_cast<FuncDecl>(method);
+      if (!func)
+        return emitObjCMethodDescriptor(IGM, descriptors, method);
+
+      switch (func->getAccessorKind()) {
+      case AccessorKind::NotAccessor:
+        return emitObjCMethodDescriptor(IGM, descriptors, method);
+
+      case AccessorKind::IsGetter:
+        return emitObjCGetterDescriptor(IGM, descriptors,
+                                        func->getAccessorStorageDecl());
+
+      case AccessorKind::IsSetter:
+        return emitObjCSetterDescriptor(IGM, descriptors,
+                                        func->getAccessorStorageDecl());
+
+      case AccessorKind::IsWillSet:
+      case AccessorKind::IsDidSet:
+      case AccessorKind::IsMaterializeForSet:
+      case AccessorKind::IsAddressor:
+      case AccessorKind::IsMutableAddressor:
+        llvm_unreachable("shouldn't be trying to build this accessor");
+      }
+      llvm_unreachable("bad accessor kind");
     }
 
   private:
@@ -1489,25 +1651,32 @@ namespace {
     }
 
     llvm::Constant *buildOptExtendedMethodTypes() {
-      SmallVector<llvm::Constant*, 16> AllMethodTypesExt;
-      assert(InstanceMethodTypesExt.size() == InstanceMethods.size()
-             && "number of instance methods does not match extended types");
-      assert(ClassMethodTypesExt.size() == ClassMethods.size()
-             && "number of class methods does not match extended types");
-      assert(OptInstanceMethodTypesExt.size() == OptInstanceMethods.size()
-             && "number of optional instance methods does not match extended types");
-      assert(OptClassMethodTypesExt.size() == OptClassMethods.size()
-             && "number of optional class methods does not match extended types");
-      AllMethodTypesExt.insert(AllMethodTypesExt.end(),
-                 InstanceMethodTypesExt.begin(), InstanceMethodTypesExt.end());
-      AllMethodTypesExt.insert(AllMethodTypesExt.end(),
-                 ClassMethodTypesExt.begin(), ClassMethodTypesExt.end());
-      AllMethodTypesExt.insert(AllMethodTypesExt.end(),
-           OptInstanceMethodTypesExt.begin(), OptInstanceMethodTypesExt.end());
-      AllMethodTypesExt.insert(AllMethodTypesExt.end(),
-           OptClassMethodTypesExt.begin(), OptClassMethodTypesExt.end());
-      return buildMethodList(AllMethodTypesExt,
-                             "_PROTOCOL_METHOD_TYPES_");
+      if (!isBuildingProtocol()) return null();
+
+      ConstantInitBuilder builder(IGM);
+      auto array = builder.beginArray();
+
+      buildExtMethodTypes(array, InstanceMethods);
+      buildExtMethodTypes(array, ClassMethods);
+      buildExtMethodTypes(array, OptInstanceMethods);
+      buildExtMethodTypes(array, OptClassMethods);
+
+      if (array.empty()) {
+        array.abandon();
+        return null();
+      }
+
+      return buildGlobalVariable(array, "_PROTOCOL_METHOD_TYPES_");
+    }
+
+    void buildExtMethodTypes(ConstantArrayBuilder &array,
+                             ArrayRef<MethodDescriptor> methods) {
+      for (auto descriptor : methods) {
+        assert(descriptor.getKind() == MethodDescriptor::Kind::Method &&
+               "cannot emit descriptor for non-method");
+        auto method = descriptor.getMethod();
+        array.add(getMethodTypeExtendedEncoding(IGM, method));
+      }
     }
 
     /// struct method_list_t {
@@ -1517,9 +1686,13 @@ namespace {
     /// };
     ///
     /// This method does not return a value of a predictable type.
-    llvm::Constant *buildMethodList(ArrayRef<llvm::Constant*> methods,
+    llvm::Constant *buildMethodList(ArrayRef<MethodDescriptor> methods,
                                     StringRef name) {
-      return buildOptionalList(methods, 3 * IGM.getPointerSize(), name);
+      return buildOptionalList(methods, 3 * IGM.getPointerSize(), name,
+                               [&](ConstantArrayBuilder &descriptors,
+                                   MethodDescriptor descriptor) {
+        buildMethod(descriptors, descriptor);
+      });
     }
 
     /*** Protocols *********************************************************/
@@ -1540,7 +1713,15 @@ namespace {
       return buildOptionalList(Protocols, Size(0),
                                chooseNamePrefix("_PROTOCOLS_",
                                                 "_CATEGORY_PROTOCOLS_",
-                                                "_PROTOCOL_PROTOCOLS_"));
+                                                "_PROTOCOL_PROTOCOLS_"),
+                               [&](ConstantArrayBuilder &descriptors,
+                                   ProtocolDecl *protocol) {
+        buildProtocol(descriptors, protocol);
+      });
+    }
+
+    void buildProtocol(ConstantArrayBuilder &array, ProtocolDecl *protocol) {
+      array.add(buildProtocolRef(protocol));
     }
 
     /*** Ivars *************************************************************/
@@ -1562,13 +1743,7 @@ namespace {
       if (!Layout)
         return;
 
-      // For now, we never try to emit specialized versions of the
-      // metadata statically, so compute the field layout using the
-      // originally-declared type.
-      SILType fieldType =
-        IGM.getLoweredType(IGM.getSILTypes().getAbstractionPattern(var),
-                           var->getType());
-      Ivars.push_back(buildIvar(var, fieldType));
+      Ivars.push_back(var);
 
       // Build property accessors for the ivar if necessary.
       visitProperty(var);
@@ -1581,11 +1756,22 @@ namespace {
     ///   uint32_t alignment;    // actually the log2 of the alignment
     ///   uint32_t size;
     /// };
-    llvm::Constant *buildIvar(VarDecl *ivar, SILType loweredType) {
+    void buildIvar(ConstantArrayBuilder &ivars, VarDecl *ivar) {
+      auto fields = ivars.beginStruct();
+
+      // For now, we never try to emit specialized versions of the
+      // metadata statically, so compute the field layout using the
+      // originally-declared type.
+      SILType fieldType =
+          IGM.getLoweredType(IGM.getSILTypes().getAbstractionPattern(ivar),
+                             ivar->getDeclContext()
+                                 ->mapTypeIntoContext(ivar->getInterfaceType())
+                                 ->getCanonicalType());
+
       assert(Layout && "can't build ivar for category");
       // FIXME: this is not always the right thing to do!
       //auto &elt = Layout->getElement(NextFieldIndex++);
-      auto &ivarTI = IGM.getTypeInfo(loweredType);
+      auto &ivarTI = IGM.getTypeInfo(fieldType);
 
       llvm::Constant *offsetPtr;
       switch (FieldLayout->AllFieldAccesses[NextFieldIndex++]) {
@@ -1609,11 +1795,13 @@ namespace {
         break;
       }
 
+      fields.add(offsetPtr);
+
       // TODO: clang puts this in __TEXT,__objc_methname,cstring_literals
-      auto name = IGM.getAddrOfGlobalString(ivar->getName().str());
+      fields.add(IGM.getAddrOfGlobalString(ivar->getName().str()));
 
       // TODO: clang puts this in __TEXT,__objc_methtype,cstring_literals
-      auto typeEncode = IGM.getAddrOfGlobalString("");
+      fields.add(IGM.getAddrOfGlobalString(""));
 
       Size size;
       Alignment alignment;
@@ -1634,15 +1822,10 @@ namespace {
                   " bytes) overflows Objective-C ivar layout");
         size = Size(0);
       }
+      fields.addInt32(alignment.log2());
+      fields.addInt32(size.getValue());
 
-      llvm::Constant *fields[] = {
-        offsetPtr,
-        name,
-        typeEncode,
-        llvm::ConstantInt::get(IGM.Int32Ty, alignment.log2()),
-        llvm::ConstantInt::get(IGM.Int32Ty, size.getValue()),
-      };
-      return llvm::ConstantStruct::getAnon(IGM.getLLVMContext(), fields);
+      fields.finishAndAddTo(ivars);
     }
 
     /// struct ivar_list_t {
@@ -1654,7 +1837,11 @@ namespace {
     /// This method does not return a value of a predictable type.
     llvm::Constant *buildIvarList() {
       Size eltSize = 3 * IGM.getPointerSize() + Size(8);
-      return buildOptionalList(Ivars, eltSize, "_IVARS_");
+      return buildOptionalList(Ivars, eltSize, "_IVARS_",
+                               [&](ConstantArrayBuilder &descriptors,
+                                   VarDecl *ivar) {
+        buildIvar(descriptors, ivar);
+      });
     }
 
     /*** Properties ********************************************************/
@@ -1662,58 +1849,26 @@ namespace {
     /// Properties need to be collected in the properties list.
     void visitProperty(VarDecl *var) {
       if (requiresObjCPropertyDescriptor(IGM, var)) {
-        if (llvm::Constant *prop = buildProperty(var)) {
-          auto &properties =
-              (var->isStatic() ? ClassProperties : InstanceProperties);
-          properties.push_back(prop);
+        if (var->isStatic()) {
+          ClassProperties.push_back(var);
+        } else {
+          InstanceProperties.push_back(var);
         }
+
+        // Don't emit descriptors for properties without accessors.
+        auto getter = var->getGetter();
+        if (!getter)
+          return;
 
         // Don't emit getter/setter descriptors for @NSManaged properties.
-        if (var->getAttrs().hasAttribute<NSManagedAttr>() ||
-            // Don't emit descriptors for properties without accessors.
-            var->getGetter() == nullptr)
+        if (var->getAttrs().hasAttribute<NSManagedAttr>())
           return;
-        
-        SmallVectorImpl<llvm::Constant *> *methods;
-        SmallVectorImpl<llvm::Constant *> *extMethodTypes = nullptr;
-        if (var->getAttrs().hasAttribute<OptionalAttr>()) {
-          if (var->isStatic()) {
-            methods = &OptClassMethods;
-            if (isBuildingProtocol())
-              extMethodTypes = &OptClassMethodTypesExt;
-          } else {
-            methods = &OptInstanceMethods;
-            if (isBuildingProtocol())
-              extMethodTypes = &OptInstanceMethodTypesExt;
-          }
-        } else {
-          if (var->isStatic()) {
-            methods = &ClassMethods;
-            if (isBuildingProtocol())
-              extMethodTypes = &ClassMethodTypesExt;
-          } else {
-            methods = &InstanceMethods;
-            if (isBuildingProtocol())
-              extMethodTypes = &InstanceMethodTypesExt;
-          }
-        }
 
-        auto getter_setter = emitObjCPropertyMethodDescriptors(IGM, var);
-        methods->push_back(getter_setter.first);
+        auto &methods = getMethodList(var);
+        methods.push_back(getter);
 
-        if (getter_setter.second)
-          methods->push_back(getter_setter.second);
-        
-        // Get the getter and setter extended encodings, if needed.
-        if (extMethodTypes) {
-          extMethodTypes->push_back(
-                          getMethodTypeExtendedEncoding(IGM, var->getGetter()));
-          if (auto setter = var->getSetter()) {
-            assert(getter_setter.second && "no descriptor for setter?!");
-            extMethodTypes->push_back(
-                          getMethodTypeExtendedEncoding(IGM, setter));
-          }
-        }
+        if (auto setter = var->getSetter())
+          methods.push_back(setter);
       }
     }
     
@@ -1721,8 +1876,8 @@ namespace {
     void buildPropertyAttributes(VarDecl *prop, SmallVectorImpl<char> &out) {
       llvm::raw_svector_ostream outs(out);
 
-      auto propTy = prop->getType()->getReferenceStorageReferent();
-      
+      auto propTy = prop->getInterfaceType()->getReferenceStorageReferent();
+
       // Emit the type encoding for the property.
       outs << 'T';
       
@@ -1739,7 +1894,8 @@ namespace {
       if (prop->getAttrs().hasAttribute<NSManagedAttr>())
         outs << ",D";
       
-      auto isObject = propTy->hasRetainablePointerRepresentation();
+      auto isObject = prop->getDeclContext()->mapTypeIntoContext(propTy)
+          ->hasRetainablePointerRepresentation();
       auto hasObjectEncoding = typeEnc[0] == '@';
       
       // Determine the assignment semantics.
@@ -1771,15 +1927,14 @@ namespace {
     ///   const char *name;
     ///   const char *attributes;
     /// };
-    llvm::Constant *buildProperty(VarDecl *prop) {
+    void buildProperty(ConstantArrayBuilder &properties, VarDecl *prop) {
       llvm::SmallString<16> propertyAttributes;
       buildPropertyAttributes(prop, propertyAttributes);
       
-      llvm::Constant *fields[] = {
-        IGM.getAddrOfGlobalString(prop->getObjCPropertyName().str()),
-        IGM.getAddrOfGlobalString(propertyAttributes)
-      };
-      return llvm::ConstantStruct::getAnon(IGM.getLLVMContext(), fields);
+      auto fields = properties.beginStruct();
+      fields.add(IGM.getAddrOfGlobalString(prop->getObjCPropertyName().str()));
+      fields.add(IGM.getAddrOfGlobalString(propertyAttributes));
+      fields.finishAndAddTo(properties);
     }
 
     /// struct property_list_t {
@@ -1790,11 +1945,8 @@ namespace {
     ///
     /// This method does not return a value of a predictable type.
     llvm::Constant *buildPropertyList(ForMetaClass_t classOrMeta) {
-      Size eltSize = 2 * IGM.getPointerSize();
-      StringRef namePrefix;
-
       if (classOrMeta == ForClass) {
-        return buildOptionalList(InstanceProperties, eltSize,
+        return buildPropertyList(InstanceProperties,
                                  chooseNamePrefix("_PROPERTIES_",
                                                   "_CATEGORY_PROPERTIES_",
                                                   "_PROTOCOL_PROPERTIES_"));
@@ -1806,10 +1958,20 @@ namespace {
         return null();
       }
 
-      return buildOptionalList(ClassProperties, eltSize,
+      return buildPropertyList(ClassProperties,
                                chooseNamePrefix("_CLASS_PROPERTIES_",
                                                 "_CATEGORY_CLASS_PROPERTIES_",
                                                 "_PROTOCOL_CLASS_PROPERTIES_"));
+    }
+
+    llvm::Constant *buildPropertyList(ArrayRef<VarDecl*> properties,
+                                      StringRef namePrefix) {
+      Size eltSize = 2 * IGM.getPointerSize();
+      return buildOptionalList(properties, eltSize, namePrefix,
+                               [&](ConstantArrayBuilder &descriptors,
+                                   VarDecl *property) {
+        buildProperty(descriptors, property);
+      });
     }
 
     /*** General ***********************************************************/
@@ -1820,32 +1982,47 @@ namespace {
     ///
     /// \param optionalEltSize - if non-zero, a size which needs
     ///   to be placed in the list header
-    llvm::Constant *buildOptionalList(ArrayRef<llvm::Constant*> objects,
+    template <class C, class Fn>
+    llvm::Constant *buildOptionalList(const C &objects,
                                       Size optionalEltSize,
-                                      StringRef nameBase) {
+                                      StringRef nameBase,
+                                      Fn &&buildElement) {
       if (objects.empty())
-        return llvm::ConstantPointerNull::get(IGM.Int8PtrTy);
+        return null();
 
-      SmallVector<llvm::Constant*, 3> fields;
+      ConstantInitBuilder builder(IGM);
+      auto fields = builder.beginStruct();
 
-      // FIXME. _PROTOCOL_METHOD_TYPES_ does not have the first two entries.
-      // May want to pull this into its own routine for performance; if needed.
-      if (!nameBase.equals("_PROTOCOL_METHOD_TYPES_")) {
-        // In all of the foo_list_t structs, either:
-        //   - there's a 32-bit entry size and a 32-bit count or
-        //   - there's no entry size and a uintptr_t count.
-        if (!optionalEltSize.isZero()) {
-          fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty,
-                                                  optionalEltSize.getValue()));
-          fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty, objects.size()));
-        } else {
-          fields.push_back(llvm::ConstantInt::get(IGM.IntPtrTy, objects.size()));
-        }
+      llvm::IntegerType *countType;
+      // In all of the foo_list_t structs, either:
+      //   - there's a 32-bit entry size and a 32-bit count or
+      //   - there's no entry size and a uintptr_t count.
+      if (!optionalEltSize.isZero()) {
+        fields.addInt32(optionalEltSize.getValue());
+        countType = IGM.Int32Ty;
+      } else {
+        countType = IGM.IntPtrTy;
+      }
+      auto countPosition = fields.addPlaceholder();
+
+      auto array = fields.beginArray();
+      for (auto &element : objects) {
+        buildElement(array, element);
       }
 
-      auto arrayTy =
-        llvm::ArrayType::get(objects[0]->getType(), objects.size());
-      fields.push_back(llvm::ConstantArray::get(arrayTy, objects));
+      // If we didn't actually make anything, declare that we're done.
+      if (array.empty()) {
+        array.abandon();
+        fields.abandon();
+        return null();
+      }
+
+      // Otherwise, remember the size of the array and fill the
+      // placeholder with it.
+      auto count = array.size();
+      array.finishAndAddTo(fields);
+
+      fields.fillPlaceholderWithInt(countPosition, countType, count);
 
       return buildGlobalVariable(fields, nameBase);
     }
@@ -1866,19 +2043,18 @@ namespace {
 
     /// Build a private global variable as a structure containing the
     /// given fields.
-    llvm::Constant *buildGlobalVariable(llvm::Constant *init,
-                                        StringRef nameBase) {
+    template <class B>
+    llvm::Constant *buildGlobalVariable(B &fields, StringRef nameBase) {
       llvm::SmallString<64> nameBuffer;
-      auto var = new llvm::GlobalVariable(IGM.Module, init->getType(),
-                                        /*constant*/ true,
-                                        llvm::GlobalVariable::PrivateLinkage,
-                                        init,
-                                        Twine(nameBase) 
-                                          + getEntityName(nameBuffer)
-                                          + (TheExtension
-                                             ? Twine("_$_") + CategoryName.str()
-                                             : Twine()));
-      var->setAlignment(IGM.getPointerAlignment().getValue());
+      auto var =
+        fields.finishAndCreateGlobal(Twine(nameBase) 
+                                      + getEntityName(nameBuffer)
+                                      + (TheExtension
+                                           ? Twine("_$_") + CategoryName.str()
+                                           : Twine()),
+                                     IGM.getPointerAlignment(),
+                                     /*constant*/ true,
+                                     llvm::GlobalVariable::PrivateLinkage);
       switch (IGM.TargetInfo.OutputObjectFormat) {
       case llvm::Triple::MachO:
         var->setSection("__DATA, __objc_const");
@@ -1893,12 +2069,6 @@ namespace {
       return var;
     }
 
-    llvm::Constant *buildGlobalVariable(ArrayRef<llvm::Constant*> fields,
-                                        StringRef nameBase) {
-      auto init = llvm::ConstantStruct::getAnon(IGM.getLLVMContext(), fields);
-      return buildGlobalVariable(init, nameBase);
-    }
-    
   public:
     /// Member types don't get any representation.
     /// Maybe this should change for reflection purposes?
@@ -1912,36 +2082,18 @@ namespace {
     /// Subscripts should probably be collected in extended metadata.
     void visitSubscriptDecl(SubscriptDecl *subscript) {
       if (!requiresObjCSubscriptDescriptor(IGM, subscript)) return;
-      auto getter_setter = emitObjCSubscriptMethodDescriptors(IGM, subscript);
-      if (subscript->getAttrs().hasAttribute<OptionalAttr>()) {
-        OptInstanceMethods.push_back(getter_setter.first);
-        if (isBuildingProtocol())
-          OptInstanceMethodTypesExt.push_back(
-                    getMethodTypeExtendedEncoding(IGM, subscript->getGetter()));
-      } else {
-        InstanceMethods.push_back(getter_setter.first);
-        if (isBuildingProtocol())
-          InstanceMethodTypesExt.push_back(
-                    getMethodTypeExtendedEncoding(IGM, subscript->getGetter()));
-      }
 
-      if (getter_setter.second) {
-        assert(subscript->getSetter() && "no descriptor for setter?!");
-        if (subscript->getAttrs().hasAttribute<OptionalAttr>()) {
-          OptInstanceMethods.push_back(getter_setter.second);
-          if (isBuildingProtocol())
-            OptInstanceMethodTypesExt.push_back(
-                    getMethodTypeExtendedEncoding(IGM, subscript->getSetter()));
-        } else {
-          InstanceMethods.push_back(getter_setter.second);
-          if (isBuildingProtocol())
-            InstanceMethodTypesExt.push_back(
-                    getMethodTypeExtendedEncoding(IGM, subscript->getSetter()));
-        }
-      }
+      auto getter = subscript->getGetter();
+      if (!getter) return;
+
+      auto &methods = getMethodList(subscript);
+      methods.push_back(getter);
+
+      if (auto setter = subscript->getSetter())
+        methods.push_back(setter);
     }
   };
-}
+} // end anonymous namespace
 
 /// Emit the private data (RO-data) associated with a class.
 llvm::Constant *irgen::emitClassPrivateData(IRGenModule &IGM,
@@ -1959,24 +2111,39 @@ llvm::Constant *irgen::emitClassPrivateData(IRGenModule &IGM,
   // Then build the class RO-data.
   return builder.emitROData(ForClass);
 }
-  
-std::tuple<llvm::Constant * /*classData*/,
-           llvm::Constant * /*metaclassData*/,
-           Size>
-irgen::emitClassPrivateDataFields(IRGenModule &IGM, ClassDecl *cls) {
+
+std::pair<Size, Size>
+irgen::emitClassPrivateDataFields(IRGenModule &IGM,
+                                  ConstantStructBuilder &init,
+                                  ClassDecl *cls) {
   assert(IGM.ObjCInterop && "emitting RO-data outside of interop mode");
+
   SILType selfType = getSelfType(cls);
   auto &classTI = IGM.getTypeInfo(selfType).as<ClassTypeInfo>();
   auto &layout = classTI.getLayout(IGM, selfType);
   auto &fieldLayout = classTI.getClassLayout(IGM, selfType);
+
   ClassDataBuilder builder(IGM, cls, layout, fieldLayout);
 
-  auto classFields = builder.emitRODataFields(ForClass);
-  auto metaclassFields = builder.emitRODataFields(ForMetaClass);
-  Size size(IGM.DataLayout.getTypeAllocSize(classFields->getType()));
-  return std::make_tuple(classFields, metaclassFields, size);
+  Size startOfClassRO = init.getNextOffsetFromGlobal();
+  assert(startOfClassRO.isMultipleOf(IGM.getPointerSize()));
+  {
+    auto classRO = init.beginStruct();
+    builder.emitRODataFields(classRO, ForClass);
+    classRO.finishAndAddTo(init);
+  }
+
+  Size startOfMetaclassRO = init.getNextOffsetFromGlobal();
+  assert(startOfMetaclassRO.isMultipleOf(IGM.getPointerSize()));
+  {
+    auto classRO = init.beginStruct();
+    builder.emitRODataFields(classRO, ForMetaClass);
+    classRO.finishAndAddTo(init);
+  }
+
+  return std::make_pair(startOfClassRO, startOfMetaclassRO);
 }
-  
+
 /// Emit the metadata for an ObjC category.
 llvm::Constant *irgen::emitCategoryData(IRGenModule &IGM,
                                         ExtensionDecl *ext) {
@@ -2001,7 +2168,7 @@ const TypeInfo *
 TypeConverter::convertClassType(CanType type, ClassDecl *D) {
   llvm::StructType *ST = IGM.createNominalType(type);
   llvm::PointerType *irType = ST->getPointerTo();
-  ReferenceCounting refcount = ::getReferenceCountingForClass(IGM, D);
+  ReferenceCounting refcount = ::getReferenceCountingForType(IGM, type);
   
   SpareBitVector spareBits;
   
@@ -2034,7 +2201,7 @@ ClassDecl *IRGenModule::getObjCRuntimeBaseClass(Identifier name,
   SwiftRootClass->computeType();
   SwiftRootClass->setIsObjC(true);
   SwiftRootClass->getAttrs().add(ObjCAttr::createNullary(Context, objcName,
-                                                         /*implicit=*/true));
+    /*isNameImplicit=*/true));
   SwiftRootClass->setImplicit();
   SwiftRootClass->setAccessibility(Accessibility::Open);
   
@@ -2097,3 +2264,17 @@ bool irgen::doesClassMetadataRequireDynamicInitialization(IRGenModule &IGM,
   auto &layout = selfTI.getClassLayout(IGM, selfType);
   return layout.MetadataRequiresDynamicInitialization;
 }
+
+bool irgen::doesConformanceReferenceNominalTypeDescriptor(IRGenModule &IGM,
+                                                       CanType conformingType) {
+  NominalTypeDecl *nom = conformingType->getAnyNominal();
+  auto *clas = dyn_cast<ClassDecl>(nom);
+  if (nom->isGenericContext() && (!clas || !clas->usesObjCGenericsModel()))
+    return true;
+
+  if (clas && doesClassMetadataRequireDynamicInitialization(IGM, clas))
+    return true;
+
+  return false;
+}
+

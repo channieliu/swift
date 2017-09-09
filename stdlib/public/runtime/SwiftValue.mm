@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,9 +18,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Runtime/Config.h"
+
+#if SWIFT_OBJC_INTEROP
 #include "SwiftObject.h"
 #include "SwiftValue.h"
 #include "swift/Basic/Lazy.h"
+#include "swift/Runtime/Casting.h"
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Metadata.h"
 #include "swift/Runtime/ObjCBridge.h"
@@ -29,10 +33,6 @@
 #include "SwiftHashableSupport.h"
 #include <objc/runtime.h>
 #include <Foundation/Foundation.h>
-
-#if !SWIFT_OBJC_INTEROP
-#error "This file should only be compiled when ObjC interop is enabled."
-#endif
 
 using namespace swift;
 using namespace swift::hashable_support;
@@ -213,8 +213,14 @@ _SwiftValue *swift::getAsSwiftValue(id object) {
 }
 
 bool
-swift::findSwiftValueConformances(const ProtocolDescriptorList &protocols,
+swift::findSwiftValueConformances(const ExistentialTypeMetadata *existentialType,
                                   const WitnessTable **tablesBuffer) {
+  // _SwiftValue never satisfies a superclass constraint.
+  if (existentialType->getSuperclassConstraint() != nullptr)
+    return false;
+
+  auto &protocols = existentialType->Protocols;
+
   Class cls = nullptr;
 
   // Note that currently we never modify tablesBuffer because
@@ -223,19 +229,7 @@ swift::findSwiftValueConformances(const ProtocolDescriptorList &protocols,
   for (size_t i = 0, e = protocols.NumProtocols; i != e; ++i) {
     auto protocol = protocols[i];
 
-    // _SwiftValue does conform to AnyObject.
-    switch (protocol->Flags.getSpecialProtocol()) {
-    case SpecialProtocol::AnyObject:
-      continue;
-
-    case SpecialProtocol::Error:
-      return false;
-
-    case SpecialProtocol::None:
-      break;
-    }
-
-    // Otherwise, it only conforms to ObjC protocols.  We specifically
+    // _SwiftValue only conforms to ObjC protocols.  We specifically
     // don't want to say that _SwiftValue conforms to the Swift protocols
     // that NSObject conforms to because that would create a situation
     // where arguably an arbitrary type would conform to those protocols
@@ -350,10 +344,12 @@ static NSString *getValueDescription(_SwiftValue *self) {
 
   // Copy the value, since it will be consumed by getSummary.
   ValueBuffer copyBuf;
-  auto copy = type->vw_initializeBufferWithCopy(&copyBuf,
-                                              const_cast<OpaqueValue*>(value));
+  auto copy = type->allocateBufferIn(&copyBuf);
+  type->vw_initializeWithCopy(copy, const_cast<OpaqueValue *>(value));
+
   swift_getSummary(&tmp, copy, type);
-  type->vw_deallocateBuffer(&copyBuf);
+
+  type->deallocateBufferIn(&copyBuf);
   return convertStringToNSString(&tmp);
 }
 
@@ -380,6 +376,7 @@ static NSString *getValueDescription(_SwiftValue *self) {
 }
 
 @end
+#endif
 
 // TODO: We could pick specialized _SwiftValue subclasses for trivial types
 // or for types with known size and alignment characteristics. Probably

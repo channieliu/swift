@@ -368,7 +368,7 @@ class LazyProperties {
 // CHECK-EXPANDED: {{^}}  `-BraceStmt {{.*}} [142:41 - 155:1] expanded
 // CHECK-EXPANDED-NEXT: {{^}} `-PatternBinding {{.*}} entry 0 [143:7 - 155:1] expanded
 // CHECK-EXPANDED-NEXT: {{^}}    `-AfterPatternBinding {{.*}} entry 0 [143:17 - 155:1] expanded
-// CHECK-EXPANDED-NEXT: {{^}}      |-Accessors {{.*}} scope_map.(file).func decl.computed@{{.*}}scope_map.swift:143:7 [143:21 - 149:3] expanded
+// CHECK-EXPANDED-NEXT: {{^}}      |-Accessors {{.*}} scope_map.(file).funcWithComputedProperties(i:).computed@{{.*}}scope_map.swift:143:7 [143:21 - 149:3] expanded
 // CHECK-EXPANDED-NEXT: {{^}}       |-AbstractFunctionDecl {{.*}} _ [144:5 - 145:5] expanded
 // CHECK-EXPANDED-NEXT: {{^}}        `-AbstractFunctionParams {{.*}} _ param 0:0 [144:5 - 145:5] expanded
 // CHECK-EXPANDED: {{^}}          `-BraceStmt {{.*}} [144:9 - 145:5] expanded
@@ -460,8 +460,7 @@ class LazyProperties {
 // CHECK-SEARCHES-NEXT:     ClassDecl name=LazyProperties
 // CHECK-SEARCHES-NEXT:       Initializer PatternBinding {{.*}} #0
 
-// FIXME: Re-enable the binding below
-// CHECK-SEARCHES-NOT: Local bindings: self
+// CHECK-SEARCHES-NEXT: Local bindings: self
 
 // CHECK-SEARCHES-LABEL: ***Complete scope map***
 // CHECK-SEARCHES-NEXT: SourceFile {{.*}} '{{.*}}scope_map.swift' [1:1 - [[EOF:[0-9]+:[0-9]+]]] unexpanded

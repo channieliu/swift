@@ -1,8 +1,8 @@
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -61,7 +61,10 @@ class TestAffineTransform : TestAffineTransformSuper {
     }
     
     func test_BasicConstruction() {
+        let defaultAffineTransform = AffineTransform()
         let identityTransform = AffineTransform.identity
+
+        expectEqual(defaultAffineTransform, identityTransform)
         
         // The diagonal entries (1,1) and (2,2) of the identity matrix are ones. The other entries are zeros.
         // TODO: These should use DBL_MAX but it's not available as part of Glibc on Linux
@@ -166,20 +169,24 @@ class TestAffineTransform : TestAffineTransformSuper {
         checkPointTransformation(noop, point: point, expectedPoint: point)
         
         var tenEighty = AffineTransform.identity
-        tenEighty.rotate(byRadians: CGFloat(6 * M_PI))
+        tenEighty.rotate(byRadians: 6 * .pi)
         checkPointTransformation(tenEighty, point: point, expectedPoint: point)
         
         var rotateCounterClockwise = AffineTransform.identity
-        rotateCounterClockwise.rotate(byRadians: CGFloat(M_PI_2))
+        rotateCounterClockwise.rotate(byRadians: .pi / 2)
         checkPointTransformation(rotateCounterClockwise, point: point, expectedPoint: NSPoint(x: CGFloat(-10.0), y: CGFloat(10.0)))
         
         var rotateClockwise = AffineTransform.identity
-        rotateClockwise.rotate(byRadians: CGFloat(-M_PI_2))
+        rotateClockwise.rotate(byRadians: -.pi / 2)
         checkPointTransformation(rotateClockwise, point: point, expectedPoint: NSPoint(x: CGFloat(10.0), y: CGFloat(-10.0)))
         
         var reflectAboutOrigin = AffineTransform.identity
-        reflectAboutOrigin.rotate(byRadians: CGFloat(M_PI))
+        reflectAboutOrigin.rotate(byRadians: .pi)
         checkPointTransformation(reflectAboutOrigin, point: point, expectedPoint: NSPoint(x: CGFloat(-10.0), y: CGFloat(-10.0)))
+        
+        var scaleThenRotate = AffineTransform(scale: 2)
+        scaleThenRotate.rotate(byRadians: .pi / 2)
+        checkPointTransformation(scaleThenRotate, point: point, expectedPoint: NSPoint(x: CGFloat(-20.0), y: CGFloat(20.0)))
     }
     
     func test_Inversion() {
@@ -324,8 +331,7 @@ class TestAffineTransform : TestAffineTransformSuper {
             AffineTransform(m11: 0.498, m12: -0.284, m21: -0.742, m22: 0.3248, tX: 12, tY: 44)
         ]
         for val in values {
-            let ref = NSAffineTransform()
-            ref.transformStruct = val
+            let ref = val as NSAffineTransform
             expectEqual(ref.hashValue, val.hashValue)
         }
     }
@@ -362,6 +368,10 @@ class TestAffineTransform : TestAffineTransformSuper {
         expectNotEqual(anyHashables[0], anyHashables[1])
         expectEqual(anyHashables[1], anyHashables[2])
     }
+
+    func test_unconditionallyBridgeFromObjectiveC() {
+        expectEqual(AffineTransform(), AffineTransform._unconditionallyBridgeFromObjectiveC(nil))
+    }
 }
 
 #if !FOUNDATION_XCTEST
@@ -384,6 +394,7 @@ AffineTransformTests.test("test_hashing_identity") { TestAffineTransform().test_
 AffineTransformTests.test("test_hashing_values") { TestAffineTransform().test_hashing_values() }
 AffineTransformTests.test("test_AnyHashableContainingAffineTransform") { TestAffineTransform().test_AnyHashableContainingAffineTransform() }
 AffineTransformTests.test("test_AnyHashableCreatedFromNSAffineTransform") { TestAffineTransform().test_AnyHashableCreatedFromNSAffineTransform() }
+AffineTransformTests.test("test_unconditionallyBridgeFromObjectiveC") { TestAffineTransform().test_unconditionallyBridgeFromObjectiveC() }
 runAllTests()
 #endif
     

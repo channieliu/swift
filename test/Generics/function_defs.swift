@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 //===----------------------------------------------------------------------===//
 // Type-check function definitions
@@ -46,7 +46,7 @@ protocol OtherEqualComparable {
 }
 
 func otherExistential<T : EqualComparable>(_ t1: T) {
-  var otherEqComp : OtherEqualComparable = t1 // expected-error{{value of type 'T' does not conform to specified type 'OtherEqualComparable'}} expected-error{{protocol 'OtherEqualComparable' can only be used as a generic constraint}}
+  var otherEqComp : OtherEqualComparable = t1 // expected-error{{value of type 'T' does not conform to specified type 'OtherEqualComparable'}}
   otherEqComp = t1 // expected-error{{value of type 'T' does not conform to 'OtherEqualComparable' in assignment}}
   _ = otherEqComp
   
@@ -244,7 +244,7 @@ protocol GeneratesMetaAssoc2 {
 
 func recursiveSameType
        <T : GeneratesMetaAssoc1, U : GeneratesMetaAssoc2, V : GeneratesAssoc1>
-       (_ t: T, u: U)
+       (_ t: T, u: U, v: V)
   where T.MetaAssoc1 == V.Assoc1, V.Assoc1 == U.MetaAssoc2
 {
   t.get().accept(t.get().makeIterator())
@@ -289,10 +289,11 @@ func badProtocolReq<T>(_: T) where T : Int {} // expected-error{{type 'T' constr
 func nonTypeSameType<T>(_: T) where T == Wibble {} // expected-error{{use of undeclared type 'Wibble'}}
 func nonTypeSameType2<T>(_: T) where Wibble == T {} // expected-error{{use of undeclared type 'Wibble'}}
 func sameTypeEq<T>(_: T) where T = T {} // expected-error{{use '==' for same-type requirements rather than '='}} {{34-35===}}
+// expected-warning@-1{{redundant same-type constraint 'T' == 'T'}}
 
 func badTypeConformance1<T>(_: T) where Int : EqualComparable {} // expected-error{{type 'Int' in conformance requirement does not refer to a generic parameter or associated type}}
 
 func badTypeConformance2<T>(_: T) where T.Blarg : EqualComparable { } // expected-error{{'Blarg' is not a member type of 'T'}}
 
-func badSameType<T, U : GeneratesAnElement, V>(_ : T)
+func badSameType<T, U : GeneratesAnElement, V>(_ : T, _ : U)
   where T == U.Element, U.Element == V {} // expected-error{{same-type requirement makes generic parameters 'T' and 'V' equivalent}}

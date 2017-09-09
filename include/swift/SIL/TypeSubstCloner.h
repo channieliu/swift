@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,6 +19,7 @@
 #define SWIFT_SIL_TYPESUBSTCLONER_H
 
 #include "swift/AST/GenericEnvironment.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/Type.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/DynamicCasts.h"
@@ -40,11 +41,91 @@ class TypeSubstCloner : public SILClonerWithScopes<ImplClass> {
   }
 
   void computeSubsMap() {
-    if (auto *env = Original.getGenericEnvironment()) {
-      auto sig = Original.getLoweredFunctionType()->getGenericSignature();
-      SubsMap = env->getSubstitutionMap(SwiftMod, sig, ApplySubs);
+    if (auto genericSig = Original.getLoweredFunctionType()
+          ->getGenericSignature()) {
+      SubsMap = genericSig->getSubstitutionMap(ApplySubs);
     }
   }
+
+  // A helper class for cloning different kinds of apply instructions.
+  // Supports cloning of self-recursive functions.
+  class ApplySiteCloningHelper {
+    SILValue Callee;
+    SubstitutionList Subs;
+    SmallVector<SILValue, 8> Args;
+    SmallVector<Substitution, 8> NewSubsList;
+    SmallVector<Substitution, 8> RecursiveSubsList;
+
+  public:
+    ApplySiteCloningHelper(ApplySite AI, TypeSubstCloner &Cloner)
+        : Callee(Cloner.getOpValue(AI.getCallee())) {
+      SILType SubstCalleeSILType = Cloner.getOpType(AI.getSubstCalleeSILType());
+
+      Args = Cloner.template getOpValueArray<8>(AI.getArguments());
+      SILBuilder &Builder = Cloner.getBuilder();
+      Builder.setCurrentDebugScope(Cloner.super::getOpScope(AI.getDebugScope()));
+
+      // Remap substitutions.
+      NewSubsList = Cloner.getOpSubstitutions(AI.getSubstitutions());
+      Subs = NewSubsList;
+
+      if (!Cloner.Inlining) {
+        FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(AI.getCallee());
+        if (FRI && FRI->getReferencedFunction() == AI.getFunction() &&
+            Subs == Cloner.ApplySubs) {
+          // Handle recursions by replacing the apply to the callee with an
+          // apply to the newly specialized function, but only if substitutions
+          // are the same.
+          auto LoweredFnTy = Builder.getFunction().getLoweredFunctionType();
+          auto RecursiveSubstCalleeSILType = LoweredFnTy;
+          auto GenSig = LoweredFnTy->getGenericSignature();
+          if (GenSig) {
+            // Compute substitutions for the specialized function. These
+            // substitutions may be different from the original ones, e.g.
+            // there can be less substitutions.
+            GenSig->getSubstitutions(AI.getFunction()
+                                         ->getLoweredFunctionType()
+                                         ->getGenericSignature()
+                                         ->getSubstitutionMap(Subs),
+                                     RecursiveSubsList);
+            // Use the new set of substitutions to compute the new
+            // substituted callee type.
+            RecursiveSubstCalleeSILType = LoweredFnTy->substGenericArgs(
+                AI.getModule(), RecursiveSubsList);
+          }
+
+          // The specialized recursive function may have different calling
+          // convention for parameters. E.g. some of former indirect parameters
+          // may become direct. Some of indirect return values may become
+          // direct. Do not replace the callee in that case.
+          if (SubstCalleeSILType.getSwiftRValueType() ==
+              RecursiveSubstCalleeSILType) {
+            Subs = RecursiveSubsList;
+            Callee = Builder.createFunctionRef(
+                Cloner.getOpLocation(AI.getLoc()), &Builder.getFunction());
+            SubstCalleeSILType =
+                SILType::getPrimitiveObjectType(RecursiveSubstCalleeSILType);
+          }
+        }
+      }
+
+      assert(Subs.empty() ||
+             SubstCalleeSILType ==
+                 Callee->getType().substGenericArgs(AI.getModule(), Subs));
+    }
+
+    ArrayRef<SILValue> getArguments() const {
+      return Args;
+    }
+
+    SILValue getCallee() const {
+      return Callee;
+    }
+
+    SubstitutionList getSubstitutions() const {
+      return Subs;
+    }
+  };
 
 public:
   using SILClonerWithScopes<ImplClass>::asImpl;
@@ -63,7 +144,7 @@ public:
 
   TypeSubstCloner(SILFunction &To,
                   SILFunction &From,
-                  ArrayRef<Substitution> ApplySubs,
+                  SubstitutionList ApplySubs,
                   SILOpenedArchetypesTracker &OpenedArchetypesTracker,
                   bool Inlining = false)
     : SILClonerWithScopes<ImplClass>(To, OpenedArchetypesTracker, Inlining),
@@ -76,7 +157,7 @@ public:
 
   TypeSubstCloner(SILFunction &To,
                   SILFunction &From,
-                  ArrayRef<Substitution> ApplySubs,
+                  SubstitutionList ApplySubs,
                   bool Inlining = false)
     : SILClonerWithScopes<ImplClass>(To, Inlining),
       SwiftMod(From.getModule().getSwiftModule()),
@@ -89,158 +170,47 @@ public:
 
 protected:
   SILType remapType(SILType Ty) {
-    return SILType::substType(Original.getModule(), SwiftMod,
-                              SubsMap.getMap(), Ty);
+    return Ty.subst(Original.getModule(), SubsMap);
   }
 
   CanType remapASTType(CanType ty) {
-    return ty.subst(SubsMap, None)->getCanonicalType();
+    return ty.subst(SubsMap)->getCanonicalType();
   }
 
-  Substitution remapSubstitution(Substitution sub) {
-    sub = sub.subst(SwiftMod, SubsMap);
-
-    // Remap opened archetypes into the cloned context.
-    return Substitution(getASTTypeInClonedContext(sub.getReplacement()
-                                                    ->getCanonicalType()),
-                        sub.getConformances());
-  }
-
-  ProtocolConformanceRef remapConformance(CanType type,
+  ProtocolConformanceRef remapConformance(Type type,
                                           ProtocolConformanceRef conf) {
-    Substitution sub(type, conf);
-    return remapSubstitution(sub).getConformances()[0];
+    return conf.subst(type,
+                      QuerySubstitutionMap{SubsMap},
+                      LookUpConformanceInSubstitutionMap(SubsMap));
   }
 
-  void visitClassMethodInst(ClassMethodInst *Inst) {
-    getBuilder().setCurrentDebugScope(super::getOpScope(Inst->getDebugScope()));
-    doPostProcess(Inst,
-                  getBuilder().createClassMethod(getOpLocation(Inst->getLoc()),
-                                                 getOpValue(Inst->getOperand()),
-                                                 Inst->getMember(),
-                                                 // No need to
-                                                 // translate the
-                                                 // return type
-                                                 // because this is
-                                                 // the type of the
-                                                 // fetched method.
-                                                 Inst->getType(),
-                                                 Inst->isVolatile()));
-  }
-  
-  void visitBuiltinInst(BuiltinInst *Inst) {
-    auto Args = this->template getOpValueArray<8>(Inst->getArguments());
-
-    SmallVector<Substitution, 16> TempSubstList;
-    for (auto &Sub : Inst->getSubstitutions()) {
-      TempSubstList.push_back(asImpl().getOpSubstitution(Sub));
-    }
-
-    getBuilder().setCurrentDebugScope(super::getOpScope(Inst->getDebugScope()));
-    auto N = getBuilder().createBuiltin(getOpLocation(Inst->getLoc()),
-                                        Inst->getName(),
-                                        getOpType(Inst->getType()),
-                                        TempSubstList, Args);
+  void visitApplyInst(ApplyInst *Inst) {
+    ApplySiteCloningHelper Helper(ApplySite::isa(Inst), *this);
+    ApplyInst *N =
+        getBuilder().createApply(getOpLocation(Inst->getLoc()),
+                                 Helper.getCallee(), Helper.getSubstitutions(),
+                                 Helper.getArguments(), Inst->isNonThrowing());
     doPostProcess(Inst, N);
   }
-  
-  void visitApplyInst(ApplyInst *Inst) {
-    auto Args = this->template getOpValueArray<8>(Inst->getArguments());
 
-    // Handle recursions by replacing the apply to the callee with an apply to
-    // the newly specialized function, but only if substitutions are the same.
-    SILBuilder &Builder = getBuilder();
-    Builder.setCurrentDebugScope(super::getOpScope(Inst->getDebugScope()));
-    SILValue CalleeVal = Inst->getCallee();
-    if (!Inlining) {
-      FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(CalleeVal);
-      if (FRI && FRI->getReferencedFunction() == Inst->getFunction() &&
-          Inst->getSubstitutions() == this->ApplySubs) {
-        FRI = Builder.createFunctionRef(getOpLocation(Inst->getLoc()),
-                                        &Builder.getFunction());
-        ApplyInst *NAI =
-          Builder.createApply(getOpLocation(Inst->getLoc()), FRI, Args, Inst->isNonThrowing());
-        doPostProcess(Inst, NAI);
-        return;
-      }
-    }
-
-    SmallVector<Substitution, 16> TempSubstList;
-    for (auto &Sub : Inst->getSubstitutions()) {
-      TempSubstList.push_back(asImpl().getOpSubstitution(Sub));
-    }
-
-    ApplyInst *N = Builder.createApply(
-      getOpLocation(Inst->getLoc()), getOpValue(CalleeVal),
-        getOpType(Inst->getSubstCalleeSILType()), getOpType(Inst->getType()),
-        TempSubstList, Args, Inst->isNonThrowing());
+  void visitTryApplyInst(TryApplyInst *Inst) {
+    ApplySiteCloningHelper Helper(ApplySite::isa(Inst), *this);
+    TryApplyInst *N = getBuilder().createTryApply(
+        getOpLocation(Inst->getLoc()), Helper.getCallee(),
+        Helper.getSubstitutions(), Helper.getArguments(),
+        getOpBasicBlock(Inst->getNormalBB()),
+        getOpBasicBlock(Inst->getErrorBB()));
     doPostProcess(Inst, N);
   }
 
   void visitPartialApplyInst(PartialApplyInst *Inst) {
-    auto Args = this->template getOpValueArray<8>(Inst->getArguments());
-
-    // Handle recursions by replacing the apply to the callee with an apply to
-    // the newly specialized function.
-    SILValue CalleeVal = Inst->getCallee();
-    SILBuilderWithPostProcess<TypeSubstCloner, 4> Builder(this, Inst);
-    Builder.setCurrentDebugScope(super::getOpScope(Inst->getDebugScope()));
-    if (!Inlining) {
-      FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(CalleeVal);
-      if (FRI && FRI->getReferencedFunction() == Inst->getFunction()) {
-        FRI = Builder.createFunctionRef(getOpLocation(Inst->getLoc()),
-                                        &Builder.getFunction());
-        Builder.createPartialApply(getOpLocation(Inst->getLoc()), FRI,
-                                   getOpType(Inst->getSubstCalleeSILType()),
-                                   ArrayRef<Substitution>(),
-                                   Args,
-                                   getOpType(Inst->getType()));
-        return;
-      }
-    }
-
-    SmallVector<Substitution, 16> TempSubstList;
-    for (auto &Sub : Inst->getSubstitutions()) {
-      TempSubstList.push_back(asImpl().getOpSubstitution(Sub));
-    }
-    
-    Builder.createPartialApply(
-      getOpLocation(Inst->getLoc()), getOpValue(CalleeVal),
-        getOpType(Inst->getSubstCalleeSILType()), TempSubstList, Args,
-        getOpType(Inst->getType()));
-  }
-
-  void visitWitnessMethodInst(WitnessMethodInst *Inst) {
-    // Specialize the Self substitution of the witness_method.
-    auto sub = Inst->getSelfSubstitution();
-    sub = sub.subst(Inst->getModule().getSwiftModule(), SubsMap);
-
-    assert(sub.getConformances().size() == 1 &&
-           "didn't get conformance from substitution?!");
-
-    auto Conformance = sub.getConformances()[0];
-
-    auto newLookupType = getOpASTType(Inst->getLookupType());
-    if (Conformance.isConcrete()) {
-      CanType Ty = Conformance.getConcrete()->getType()->getCanonicalType();
-
-      if (Ty != newLookupType) {
-        assert(Ty->isExactSuperclassOf(newLookupType, nullptr) &&
-               "Should only create upcasts for sub class.");
-
-        // We use the super class as the new look up type.
-        newLookupType = Ty;
-      }
-    }
-
-    // We already subst so getOpConformance is not needed.
-    getBuilder().setCurrentDebugScope(super::getOpScope(Inst->getDebugScope()));
-    doPostProcess(
-        Inst,
-        getBuilder().createWitnessMethod(
-            getOpLocation(Inst->getLoc()), newLookupType, Conformance,
-            Inst->getMember(), getOpType(Inst->getType()),
-            Inst->isVolatile()));
+    ApplySiteCloningHelper Helper(ApplySite::isa(Inst), *this);
+    auto ParamConvention =
+        Inst->getType().getAs<SILFunctionType>()->getCalleeConvention();
+    PartialApplyInst *N = getBuilder().createPartialApply(
+        getOpLocation(Inst->getLoc()), Helper.getCallee(),
+        Helper.getSubstitutions(), Helper.getArguments(), ParamConvention);
+    doPostProcess(Inst, N);
   }
 
   /// Attempt to simplify a conditional checked cast.
@@ -287,13 +257,13 @@ protected:
   }
 
   /// The Swift module that the cloned function belongs to.
-  Module *SwiftMod;
+  ModuleDecl *SwiftMod;
   /// The substitutions list for the specialization.
   SubstitutionMap SubsMap;
   /// The original function to specialize.
   SILFunction &Original;
   /// The substitutions used at the call site.
-  ArrayRef<Substitution> ApplySubs;
+  SubstitutionList ApplySubs;
   /// True, if used for inlining.
   bool Inlining;
 };

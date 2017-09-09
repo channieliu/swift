@@ -2,18 +2,19 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/USRGeneration.h"
-#include "swift/AST/Mangle.h"
+#include "swift/AST/ASTMangler.h"
+#include "swift/AST/SwiftNameTranslation.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
@@ -32,30 +33,146 @@ static inline StringRef getUSRSpacePrefix() {
 
 bool ide::printTypeUSR(Type Ty, raw_ostream &OS) {
   assert(!Ty->hasArchetype() && "cannot have contextless archetypes mangled.");
-  using namespace Mangle;
-  Mangler Mangler(true);
-  Mangler.mangleTypeForDebugger(Ty->getRValueType(), nullptr);
-  Mangler.finalize(OS);
+  Mangle::ASTMangler Mangler;
+  OS << Mangler.mangleTypeForDebugger(Ty->getRValueType(), nullptr, nullptr);
   return false;
 }
 
 bool ide::printDeclTypeUSR(const ValueDecl *D, raw_ostream &OS) {
-  using namespace Mangle;
-  Mangler Mangler(true);
-  Mangler.mangleDeclTypeForDebugger(D);
-  Mangler.finalize(OS);
+  Mangle::ASTMangler Mangler;
+  std::string MangledName = Mangler.mangleDeclType(D);
+  OS << MangledName;
+  return false;
+}
+
+static bool printObjCUSRFragment(const ValueDecl *D, StringRef ObjCName,
+                                 const ExtensionDecl *ExtContextD,
+                                 raw_ostream &OS) {
+  if (!D)
+    return true;
+
+  // The Swift module name that the decl originated from. If the decl is
+  // originating from ObjC code (ObjC module or the bridging header) then this
+  // will be empty.
+  StringRef ModuleName;
+  if (!D->hasClangNode())
+    ModuleName = D->getModuleContext()->getNameStr();
+
+  if (isa<ClassDecl>(D)) {
+    StringRef extContextName;
+    if (ExtContextD) {
+      extContextName = ExtContextD->getModuleContext()->getNameStr();
+    }
+    clang::index::generateUSRForObjCClass(ObjCName, OS,
+                                          ModuleName, extContextName);
+  } else if (isa<ProtocolDecl>(D)) {
+    clang::index::generateUSRForObjCProtocol(ObjCName, OS, ModuleName);
+  } else if (isa<VarDecl>(D)) {
+    clang::index::generateUSRForObjCProperty(ObjCName, D->isStatic(), OS);
+  } else if (isa<ConstructorDecl>(D)) {
+    // init() is a class member in Swift, but an instance method in ObjC.
+    clang::index::generateUSRForObjCMethod(ObjCName, /*IsInstanceMethod=*/true,
+                                           OS);
+  } else if (isa<AbstractFunctionDecl>(D)) {
+    clang::index::generateUSRForObjCMethod(ObjCName, D->isInstanceMember(), OS);
+  } else if (isa<EnumDecl>(D)) {
+    clang::index::generateUSRForGlobalEnum(ObjCName, OS, ModuleName);
+  } else if (isa<EnumElementDecl>(D)) {
+    clang::index::generateUSRForEnumConstant(ObjCName, OS);
+  } else {
+    llvm_unreachable("Unexpected value decl");
+  }
+  return false;
+}
+
+static bool printObjCUSRContext(const Decl *D, raw_ostream &OS) {
+  OS << clang::index::getUSRSpacePrefix();
+  auto *DC = D->getDeclContext();
+  if (auto *Parent = DC->getAsNominalTypeOrNominalTypeExtensionContext()) {
+    auto *extContextD = dyn_cast<ExtensionDecl>(DC);
+    auto ObjCName = objc_translation::getObjCNameForSwiftDecl(Parent);
+    if (printObjCUSRFragment(Parent, ObjCName.first.str(), extContextD, OS))
+      return true;
+  }
+  return false;
+}
+
+static bool printObjCUSRForAccessor(const AbstractStorageDecl *ASD,
+                                    AccessorKind Kind,
+                                    raw_ostream &OS) {
+  if (printObjCUSRContext(ASD, OS))
+    return true;
+
+  ObjCSelector Selector;
+  switch (Kind) {
+    case swift::AccessorKind::IsGetter:
+      Selector = ASD->getObjCGetterSelector();
+      break;
+    case swift::AccessorKind::IsSetter:
+      Selector = ASD->getObjCSetterSelector();
+      break;
+    default:
+      llvm_unreachable("invalid accessor kind");
+  }
+  assert(Selector);
+  llvm::SmallString<128> Buf;
+  clang::index::generateUSRForObjCMethod(Selector.getString(Buf),
+                                         ASD->isInstanceMember(), OS);
+  return false;
+}
+
+static bool printObjCUSR(const ValueDecl *D, raw_ostream &OS) {
+  if (printObjCUSRContext(D, OS))
+    return true;
+  auto *extContextD = dyn_cast<ExtensionDecl>(D->getDeclContext());
+
+  auto ObjCName = objc_translation::getObjCNameForSwiftDecl(D);
+
+  if (!ObjCName.first.empty())
+    return printObjCUSRFragment(D, ObjCName.first.str(), extContextD, OS);
+
+  assert(ObjCName.second);
+  llvm::SmallString<128> Buf;
+  return printObjCUSRFragment(D, ObjCName.second.getString(Buf),
+                              extContextD, OS);
+}
+
+static bool shouldUseObjCUSR(const Decl *D) {
+  // Only the subscript getter/setter are visible to ObjC rather than the
+  // subscript itself
+  if (isa<SubscriptDecl>(D))
+    return false;
+
+  auto Parent = D->getDeclContext()->getInnermostDeclarationDeclContext();
+  if (Parent && (!shouldUseObjCUSR(Parent) || // parent should be visible too
+                 !D->getDeclContext()->isTypeContext() || // no local decls
+                 isa<TypeDecl>(D))) // nested types aren't supported
+    return false;
+
+  if (const auto *VD = dyn_cast<ValueDecl>(D)) {
+    if (isa<EnumElementDecl>(VD))
+      return true;
+    return objc_translation::isVisibleToObjC(VD, Accessibility::Internal);
+  }
+
+  if (const auto *ED = dyn_cast<ExtensionDecl>(D)) {
+    if (auto ExtendedType = ED->getExtendedType()) {
+      auto baseClass = ExtendedType->getClassOrBoundGenericClass();
+      return baseClass && shouldUseObjCUSR(baseClass) && !baseClass->isForeign();
+    }
+  }
   return false;
 }
 
 bool ide::printDeclUSR(const ValueDecl *D, raw_ostream &OS) {
-  using namespace Mangle;
-
-  if (!isa<FuncDecl>(D) && !D->hasName())
+  if (!D->hasName() && !isa<ParamDecl>(D) &&
+      (!isa<FuncDecl>(D) ||
+       cast<FuncDecl>(D)->getAccessorKind() == AccessorKind::NotAccessor))
     return true; // Ignore.
   if (D->getModuleContext()->isBuiltinModule())
     return true; // Ignore.
-
-  ValueDecl *VD = const_cast<ValueDecl *>(D);
+  if (isa<ModuleDecl>(D))
+    return true; // Ignore.
 
   auto interpretAsClangNode = [](const ValueDecl *D)->ClangNode {
     ClangNode ClangN = D->getClangNode();
@@ -71,15 +188,12 @@ bool ide::printDeclUSR(const ValueDecl *D, raw_ostream &OS) {
       //     static var errSecond: MyError.Code { get }
       // }
       //
-      // The clang enum and enum constants are associated with both the
-      // struct/nested enum, and the static vars/enum cases.
+      // The clang enum constants are associated with both the static vars and
+      // the enum cases.
       // But we want unique USRs for the above symbols, so use the clang USR
-      // for the enum and enum cases, and the Swift USR for the struct and vars.
+      // for the enum cases, and the Swift USR for the vars.
       //
-      if (isa<clang::EnumDecl>(ClangD)) {
-        if (ClangD->hasAttr<clang::NSErrorDomainAttr>() && isa<StructDecl>(D))
-          return ClangNode();
-      } else if (auto *ClangEnumConst = dyn_cast<clang::EnumConstantDecl>(ClangD)) {
+      if (auto *ClangEnumConst = dyn_cast<clang::EnumConstantDecl>(ClangD)) {
         if (auto *ClangEnum = dyn_cast<clang::EnumDecl>(ClangEnumConst->getDeclContext())) {
           if (ClangEnum->hasAttr<clang::NSErrorDomainAttr>() && isa<VarDecl>(D))
             return ClangNode();
@@ -101,52 +215,38 @@ bool ide::printDeclUSR(const ValueDecl *D, raw_ostream &OS) {
     auto &Importer = *D->getASTContext().getClangModuleLoader();
 
     auto ClangMacroInfo = ClangN.getAsMacro();
-    auto PPRecord = Importer.getClangPreprocessor().getPreprocessingRecord();
-    assert(PPRecord && "Clang importer should be created with "
-                       "-detailed-preprocessing-record option");
-    auto ClangMacroDef = PPRecord->findMacroDefinition(ClangMacroInfo);
-
     bool Ignore = clang::index::generateUSRForMacro(
-        ClangMacroDef, Importer.getClangASTContext().getSourceManager(), Buf);
+        D->getBaseName().getIdentifier().str(),
+        ClangMacroInfo->getDefinitionLoc(),
+        Importer.getClangASTContext().getSourceManager(), Buf);
     if (!Ignore)
       OS << Buf.str();
     return Ignore;
   }
 
-  if (!D->hasType())
-    return true;
-
-  // FIXME: mangling 'self' in destructors crashes in mangler.
-  if (isa<ParamDecl>(VD) && isa<DestructorDecl>(VD->getDeclContext()))
-    return true;
-
-  OS << getUSRSpacePrefix();
-  Mangler Mangler;
-
-  Mangler.bindGenericParameters(VD->getDeclContext());
-
-  if (auto Ctor = dyn_cast<ConstructorDecl>(VD)) {
-    Mangler.mangleConstructorEntity(Ctor, /*isAllocating=*/false,
-                                    /*uncurryingLevel=*/0);
-  } else if (auto Dtor = dyn_cast<DestructorDecl>(VD)) {
-    Mangler.mangleDestructorEntity(Dtor, /*isDeallocating=*/false);
-  } else if (auto NTD = dyn_cast<NominalTypeDecl>(VD)) {
-    Mangler.mangleNominalType(NTD);
-  } else if (isa<TypeAliasDecl>(VD) || isa<AssociatedTypeDecl>(VD)) {
-    Mangler.mangleContextOf(VD);
-    Mangler.mangleDeclName(VD);
-  } else {
-    Mangler.mangleEntity(VD, /*uncurryingLevel=*/0);
+  if (shouldUseObjCUSR(D)) {
+    return printObjCUSR(D, OS);
   }
 
-  Mangler.finalize(OS);
+  if (!D->hasInterfaceType())
+    return true;
+
+  // Invalid code.
+  if (D->getInterfaceType().findIf([](Type t) -> bool {
+        return t->is<ModuleType>();
+      }))
+    return true;
+
+  Mangle::ASTMangler NewMangler;
+  std::string Mangled = NewMangler.mangleDeclAsUSR(D, getUSRSpacePrefix());
+
+  OS << Mangled;
+
   return false;
 }
 
 bool ide::printAccessorUSR(const AbstractStorageDecl *D, AccessorKind AccKind,
                            llvm::raw_ostream &OS) {
-  using namespace Mangle;
-
   // AccKind should always be either IsGetter or IsSetter here, based
   // on whether a reference is a mutating or non-mutating use.  USRs
   // aren't supposed to reflect implementation differences like stored
@@ -160,10 +260,16 @@ bool ide::printAccessorUSR(const AbstractStorageDecl *D, AccessorKind AccKind,
   // addressor.
 
   AbstractStorageDecl *SD = const_cast<AbstractStorageDecl*>(D);
-  OS << getUSRSpacePrefix();
-  Mangler Mangler;
-  Mangler.mangleAccessorEntity(AccKind, AddressorKind::NotAddressor, SD);
-  Mangler.finalize(OS);
+  if (shouldUseObjCUSR(SD)) {
+    return printObjCUSRForAccessor(SD, AccKind, OS);
+  }
+
+  Mangle::ASTMangler NewMangler;
+  std::string Mangled = NewMangler.mangleAccessorEntityAsUSR(AccKind,
+                          AddressorKind::NotAddressor, SD, getUSRSpacePrefix());
+
+  OS << Mangled;
+
   return false;
 }
 

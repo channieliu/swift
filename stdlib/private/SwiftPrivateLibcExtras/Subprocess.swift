@@ -2,24 +2,25 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import SwiftPrivate
 #if os(OSX) || os(iOS) || os(watchOS) || os(tvOS)
 import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android)
+#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin)
 import Glibc
 #endif
 
 
-#if !os(Windows) || CYGWIN
-// posix_spawn is not available on Android or Windows.
+#if !os(Windows)
+// posix_spawn is not available on Windows.
+// posix_spawn is not available on Android.
 #if !os(Android)
 // swift_posix_spawn isn't available in the public watchOS SDK, we sneak by the
 // unavailable attribute declaration here of the APIs that we need.
@@ -264,13 +265,27 @@ public enum ProcessTerminationStatus : CustomStringConvertible {
 
 public func posixWaitpid(_ pid: pid_t) -> ProcessTerminationStatus {
   var status: CInt = 0
-  if waitpid(pid, &status, 0) < 0 {
-    preconditionFailure("waitpid() failed")
+#if os(Cygwin)
+  withUnsafeMutablePointer(to: &status) {
+    statusPtr in
+    let statusPtrWrapper = __wait_status_ptr_t(__int_ptr: statusPtr)
+    while waitpid(pid, statusPtrWrapper, 0) < 0 {
+      if errno != EINTR {
+        preconditionFailure("waitpid() failed")
+      }
+    }
   }
-  if (WIFEXITED(status)) {
+#else
+  while waitpid(pid, &status, 0) < 0 {
+    if errno != EINTR {
+      preconditionFailure("waitpid() failed")
+    }
+  }
+#endif
+  if WIFEXITED(status) {
     return .exit(Int(WEXITSTATUS(status)))
   }
-  if (WIFSIGNALED(status)) {
+  if WIFSIGNALED(status) {
     return .signal(Int(WTERMSIG(status)))
   }
   preconditionFailure("did not understand what happened to child process")
@@ -289,6 +304,8 @@ internal func _getEnviron() -> UnsafeMutablePointer<UnsafeMutablePointer<CChar>?
 #elseif os(PS4)
   return environ
 #elseif os(Android)
+  return environ
+#elseif os(Cygwin)
   return environ
 #else
   return __environ

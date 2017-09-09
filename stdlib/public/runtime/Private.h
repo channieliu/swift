@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,7 +17,7 @@
 #ifndef SWIFT_RUNTIME_PRIVATE_H
 #define SWIFT_RUNTIME_PRIVATE_H
 
-#include "swift/Basic/Demangle.h"
+#include "swift/Demangling/Demangler.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Metadata.h"
 #include "llvm/Support/Compiler.h"
@@ -31,7 +31,7 @@ namespace swift {
 
 #if SWIFT_HAS_ISA_MASKING
   SWIFT_RUNTIME_EXPORT
-  extern "C" uintptr_t swift_isaMask;
+  uintptr_t swift_isaMask;
 #endif
 
 #if SWIFT_OBJC_INTEROP
@@ -41,9 +41,6 @@ namespace swift {
   bool classConformsToObjCProtocol(const void *theClass,
                                     const ProtocolDescriptor *theProtocol);
 #endif
-
-  extern "C" LLVM_LIBRARY_VISIBILITY LLVM_ATTRIBUTE_NORETURN
-  void _swift_abortRetainUnowned(const void *object);
 
   /// Is the given value a valid alignment mask?
   static inline bool isAlignmentMask(size_t mask) {
@@ -127,6 +124,23 @@ namespace swift {
   LLVM_LIBRARY_VISIBILITY
   bool usesNativeSwiftReferenceCounting(const ClassMetadata *theClass);
 
+  static inline
+  bool objectUsesNativeSwiftReferenceCounting(const void *object) {
+    assert(!isObjCTaggedPointerOrNull(object));
+#if SWIFT_HAS_OPAQUE_ISAS
+    // Fast path for opaque ISAs.  We don't want to call
+    // _swift_getClassOfAllocated as that will call object_getClass.
+    // Instead we can look at the bits in the ISA and tell if its a
+    // non-pointer opaque ISA which means it is definitely an ObjC
+    // object and doesn't use native swift reference counting.
+    if (_swift_isNonPointerIsaObjCClass(object))
+      return false;
+    return usesNativeSwiftReferenceCounting(_swift_getClassOfAllocatedFromPointer(object));
+#else
+    return usesNativeSwiftReferenceCounting(_swift_getClassOfAllocated(object));
+#endif
+  }
+
   /// Get the superclass pointer value used for Swift root classes.
   /// Note that this function may return a nullptr on non-objc platforms,
   /// where there is no common root class. rdar://problem/18987058
@@ -156,9 +170,8 @@ namespace swift {
   const Metadata *
   _searchConformancesByMangledTypeName(const llvm::StringRef typeName);
 
-#if SWIFT_OBJC_INTEROP
-  Demangle::NodePointer _swift_buildDemanglingForMetadata(const Metadata *type);
-#endif
+  Demangle::NodePointer _swift_buildDemanglingForMetadata(const Metadata *type,
+                                                      Demangle::Demangler &Dem);
 
   /// A helper function which avoids performing a store if the destination
   /// address already contains the source value.  This is useful when
@@ -172,18 +185,6 @@ namespace swift {
       dest = newValue;
   }
 
-#if defined(__CYGWIN__) || defined(_MSC_VER)
-  struct dl_phdr_info {
-    void *dlpi_addr;
-    const char *dlpi_name;
-  };
-
-  int _swift_dl_iterate_phdr(int (*Callback)(struct dl_phdr_info *info,
-                                             size_t size, void *data),
-                             void *data);
-  uint8_t *_swift_getSectionDataPE(void *handle, const char *sectionName,
-                                   unsigned long *sectionSize);
-#endif
 #if defined(__CYGWIN__)
   void _swift_once_f(uintptr_t *predicate, void *context,
                      void (*function)(void *));

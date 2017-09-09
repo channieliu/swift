@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 func f0(_ x: Float) -> Float {}
 func f1(_ x: Float) -> Float {}
@@ -36,7 +36,7 @@ var s: String = optFunc("hi")
 // <rdar://problem/17652759> Default arguments cause crash with tuple permutation
 func testArgumentShuffle(_ first: Int = 7, third: Int = 9) {
 }
-testArgumentShuffle(third: 1, 2) // expected-error {{unnamed argument #2 must precede argument 'third'}} {{21-29=2}} {{31-32=third: 1}}
+testArgumentShuffle(third: 1, 2) // expected-error {{unnamed argument #2 must precede argument 'third'}} {{21-21=2, }} {{29-32=}}
 
 
 
@@ -83,3 +83,19 @@ sr590() // expected-error {{missing argument for parameter #1 in call}}
 // Make sure calling with structural tuples still works.
 sr590(())
 sr590((1, 2))
+
+// SR-2657: Poor diagnostics when function arguments should be '@escaping'.
+private class SR2657BlockClass<T> {
+  let f: T
+  init(f: T) { self.f = f }
+}
+
+func foo(block: () -> ()) { // expected-note 2 {{parameter 'block' is implicitly non-escaping}}
+  let a = SR2657BlockClass(f: block) // No error
+  let b = SR2657BlockClass<()->()>(f: block)
+  // expected-error@-1 {{passing non-escaping parameter 'block' to function expecting an @escaping closure}}
+  let c: SR2657BlockClass<()->()> = SR2657BlockClass(f: block)
+  // expected-error@-1 {{cannot convert value of type 'SR2657BlockClass<() -> ()>' to specified type 'SR2657BlockClass<() -> ()>'}}
+  let d: SR2657BlockClass<()->()> = SR2657BlockClass<()->()>(f: block)
+  // expected-error@-1 {{passing non-escaping parameter 'block' to function expecting an @escaping closure}}
+}

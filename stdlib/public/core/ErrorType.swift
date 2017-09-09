@@ -2,16 +2,15 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 import SwiftShims
 
-// TODO: API review
 /// A type representing an error value that can be thrown.
 ///
 /// Any type that declares conformance to the `Error` protocol can be used to
@@ -167,7 +166,7 @@ public func _stdlib_getErrorEmbeddedNSError<T : Error>(_ x: T)
 }
 
 @_silgen_name("swift_stdlib_getErrorDefaultUserInfo")
-public func _stdlib_getErrorDefaultUserInfo(_ error: Error) -> AnyObject?
+public func _stdlib_getErrorDefaultUserInfo<T: Error>(_ error: T) -> AnyObject?
 
 // Known function for the compiler to use to coerce `Error` instances
 // to `NSError`.

@@ -1,4 +1,12 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift -typo-correction-limit 20
+// RUN: not %target-swift-frontend -typecheck -disable-typo-correction %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// RUN: not %target-swift-frontend -typecheck -typo-correction-limit 0 %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// RUN: not %target-swift-frontend -typecheck -DIMPORT_FAIL %s 2>&1 | %FileCheck %s -check-prefix=DISABLED
+// DISABLED-NOT: did you mean
+
+#if IMPORT_FAIL
+import NoSuchModule
+#endif
 
 // This is close enough to get typo-correction.
 func test_short_and_close() {
@@ -68,4 +76,47 @@ func test_too_many_but_some_better() {
   let match5 = 0
   let match6 = 0
   let x = mtch // expected-error {{use of unresolved identifier 'mtch'}}
+}
+
+// rdar://problem/28387684
+// Don't crash performing typo correction on bound generic types with
+// type variables.
+_ = [Any]().withUnsafeBufferPointer { (buf) -> [Any] in
+  guard let base = buf.baseAddress else { return [] }
+  return (base ..< base + buf.count).m // expected-error {{value of type 'CountableRange<UnsafePointer<Any>>' has no member 'm'}}
+}
+
+// Typo correction with class-bound archetypes.
+class SomeClass {
+  func match1() {}
+  // expected-note@-1 {{did you mean 'match1'?}}
+}
+
+func takesSomeClassArchetype<T : SomeClass>(_ t: T) {
+  t.match0()
+  // expected-error@-1 {{value of type 'T' has no member 'match0'}}
+}
+
+// Typo correction of unqualified lookup from generic context.
+struct Generic<T> {
+  func match1() {}
+  // expected-note@-1 {{did you mean 'match1'?}}
+
+  class Inner {
+    func doStuff() {
+      match0()
+      // expected-error@-1 {{use of unresolved identifier 'match0'}}
+    }
+  }
+}
+
+// Typo correction with AnyObject.
+func takesAnyObject(_ t: AnyObject) {
+  _ = t.rawPointer
+  // expected-error@-1 {{value of type 'AnyObject' has no member 'rawPointer'}}
+}
+
+func takesAnyObjectArchetype<T : AnyObject>(_ t: T) {
+  _ = t.rawPointer
+  // expected-error@-1 {{value of type 'T' has no member 'rawPointer'}}
 }

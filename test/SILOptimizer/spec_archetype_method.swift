@@ -28,11 +28,11 @@ func useFoo<T>(x x: T) {
   generic_call(x: a)
 }
 
-//CHECK-LABEL: sil @_TF21spec_archetype_method21interesting_code_hereFT_T_
-//CHECK: function_ref @_TTSg5C21spec_archetype_method3ABCS0_S_8pingableS____TF21spec_archetype_method12generic_call
+//CHECK-LABEL: sil @_T021spec_archetype_method21interesting_code_hereyyF
+//CHECK: function_ref @_T021spec_archetype_method12generic_call{{[_0-9a-zA-Z]*}}FAA3ABCC_Tg5
 //CHECK-NEXT: retain
 //CHECK-NEXT: apply
-//CHECK:  function_ref @_TTSg5C21spec_archetype_method3ABC___TF21spec_archetype_method6useFoo{{.*}} : $@convention(thin) (@owned ABC) -> ()
+//CHECK:  function_ref @_T021spec_archetype_method6useFoo{{[_0-9a-zA-Z]*}}FAA3ABCC_Tg5 : $@convention(thin) (@owned ABC) -> ()
 //CHECK-NEXT: apply
 //CHECK: return
 public

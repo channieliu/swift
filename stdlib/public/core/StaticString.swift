@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,10 +38,12 @@ public struct StaticString
 
   /// Either a pointer to the start of UTF-8 data, represented as an integer,
   /// or an integer representation of a single Unicode scalar.
+  @_versioned
   internal var _startPtrOrData: Builtin.Word
 
   /// If `_startPtrOrData` is a pointer, contains the length of the UTF-8 data
   /// in bytes.
+  @_versioned
   internal var _utf8CodeUnitCount: Builtin.Word
 
   /// Extra flags:
@@ -51,6 +53,7 @@ public struct StaticString
   ///
   /// - bit 1: set to 1 if `_startPtrOrData` is a pointer and string data is
   ///   ASCII.
+  @_versioned
   internal var _flags: Builtin.Int8
 
   /// A pointer to the beginning of the string's UTF-8 encoded representation.
@@ -72,11 +75,11 @@ public struct StaticString
   /// this property when `hasPointerRepresentation` is `true` triggers a
   /// runtime error.
   @_transparent
-  public var unicodeScalar: UnicodeScalar {
+  public var unicodeScalar: Unicode.Scalar {
     _precondition(
       !hasPointerRepresentation,
       "StaticString should have Unicode scalar representation")
-    return UnicodeScalar(UInt32(UInt(_startPtrOrData)))!
+    return Unicode.Scalar(UInt32(UInt(_startPtrOrData)))!
   }
 
   /// The length in bytes of the static string's ASCII or UTF-8 representation.
@@ -118,16 +121,20 @@ public struct StaticString
   /// This method works regardless of whether the static string stores a
   /// pointer or a single Unicode scalar value.
   ///
+  /// The pointer argument to `body` is valid only during the execution of
+  /// `withUTF8Buffer(_:)`. Do not store or return the pointer for later use.
+  ///
   /// - Parameter body: A closure that takes a buffer pointer to the static
   ///   string's UTF-8 code unit sequence as its sole argument. If the closure
-  ///   has a return value, it is used as the return value of the
-  ///   `withUTF8Buffer(invoke:)` method.
-  /// - Returns: The return value of the `body` closure, if any.
+  ///   has a return value, that value is also used as the return value of the
+  ///   `withUTF8Buffer(invoke:)` method. The pointer argument is valid only
+  ///   for the duration of the method's execution.
+  /// - Returns: The return value, if any, of the `body` closure.
   public func withUTF8Buffer<R>(
     _ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
     if hasPointerRepresentation {
       return body(UnsafeBufferPointer(
-        start: utf8Start, count: Int(utf8CodeUnitCount)))
+        start: utf8Start, count: utf8CodeUnitCount))
     } else {
       var buffer: UInt64 = 0
       var i = 0
@@ -164,7 +171,9 @@ public struct StaticString
     // unrelated buffer is not accessed or freed.
     self._startPtrOrData = Builtin.ptrtoint_Word(_start)
     self._utf8CodeUnitCount = utf8CodeUnitCount
-    self._flags = Bool(isASCII) ? (0x2 as UInt8)._value : (0x0 as UInt8)._value
+    self._flags = Bool(isASCII)
+      ? (0x2 as UInt8)._value
+      : (0x0 as UInt8)._value
   }
 
   @_versioned
@@ -174,7 +183,7 @@ public struct StaticString
   ) {
     self._startPtrOrData = UInt(UInt32(unicodeScalar))._builtinWordValue
     self._utf8CodeUnitCount = 0._builtinWordValue
-    self._flags = UnicodeScalar(_builtinUnicodeScalarLiteral: unicodeScalar).isASCII
+    self._flags = Unicode.Scalar(_builtinUnicodeScalarLiteral: unicodeScalar).isASCII
       ? (0x3 as UInt8)._value
       : (0x1 as UInt8)._value
   }

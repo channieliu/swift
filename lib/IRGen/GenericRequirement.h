@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -33,7 +33,7 @@ class CanGenericSignature;
 class ModuleDecl;
 class NominalTypeDecl;
 class ProtocolDecl;
-class Substitution;
+class SubstitutionMap;
 
 namespace irgen {
 class Address;
@@ -46,6 +46,13 @@ struct GenericRequirement {
   ProtocolDecl *Protocol;
 };
 
+using RequirementCallback =
+  llvm::function_ref<void(GenericRequirement requirement)>;
+
+/// Enumerate the generic requirements imposed by a generic signature.
+void enumerateGenericSignatureRequirements(CanGenericSignature signature,
+                                           const RequirementCallback &callback);
+
 /// Given an array of substitutions that parallel the dependent
 /// signature for which a requirement was emitted, emit the required
 /// value.
@@ -54,7 +61,7 @@ emitGenericRequirementFromSubstitutions(IRGenFunction &IGF,
                                         CanGenericSignature signature,
                                         ModuleDecl &module,
                                         GenericRequirement requirement,
-                                        ArrayRef<Substitution> subs);
+                                        const SubstitutionMap &subs);
 
 using EmitGenericRequirementFn =
   llvm::function_ref<llvm::Value*(GenericRequirement reqt)>;
@@ -141,10 +148,10 @@ public:
     llvm::function_ref<void(unsigned requirementIndex,
                             CanType type,
                             Optional<ProtocolConformanceRef> conf)>;
-  void enumerateFulfillments(IRGenModule &IGM, ArrayRef<Substitution> subs,
+  void enumerateFulfillments(IRGenModule &IGM, const SubstitutionMap &subs,
                              FulfillmentCallback callback);
 
-  void emitInitOfBuffer(IRGenFunction &IGF, ArrayRef<Substitution> subs,
+  void emitInitOfBuffer(IRGenFunction &IGF, const SubstitutionMap &subs,
                         Address buffer);
 
   void bindFromBuffer(IRGenFunction &IGF, Address buffer,

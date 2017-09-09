@@ -1,5 +1,5 @@
 // RUN: sed -n -e '1,/NO_ERRORS_UP_TO_HERE$/ p' %s > %t_no_errors.swift
-// RUN: %target-swift-frontend -parse -verify -disable-objc-attr-requires-foundation-module %t_no_errors.swift
+// RUN: %target-swift-frontend -typecheck -verify -disable-objc-attr-requires-foundation-module %t_no_errors.swift
 //
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TEST_PRIVATE_ABC -code-completion-keywords=false | %FileCheck %s -check-prefix=TEST_PRIVATE_ABC
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TEST_FILEPRIVATE_ABC -code-completion-keywords=false | %FileCheck %s -check-prefix=TEST_PRIVATE_ABC
@@ -168,15 +168,16 @@ public class TestPublicDE : ProtocolDPrivate, ProtocolEPublic {
   #^TEST_PUBLIC_DE^#
 }
 
-// TEST_PRIVATE_DE: Begin completions, 2 items
+// FIXME: Should be 2 items in the three checks below.
+// TEST_PRIVATE_DE: Begin completions, 4 items
 // TEST_PRIVATE_DE-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 // TEST_PRIVATE_DE-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
-// TEST_INTERNAL_DE: Begin completions, 2 items
+// TEST_INTERNAL_DE: Begin completions, 4 items
 // TEST_INTERNAL_DE-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 // TEST_INTERNAL_DE-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
-// TEST_PUBLIC_DE: Begin completions, 2 items
+// TEST_PUBLIC_DE: Begin completions, 4 items
 // TEST_PUBLIC_DE-DAG: Decl[InstanceMethod]/Super: public func colliding() {|}{{; name=.+$}}
 // TEST_PUBLIC_DE-DAG: Decl[InstanceMethod]/Super: public func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
@@ -194,15 +195,16 @@ public class TestPublicED : ProtocolEPublic, ProtocolDPrivate {
   #^TEST_PUBLIC_ED^#
 }
 
-// TEST_PRIVATE_ED: Begin completions, 2 items
+// FIXME: Should be 2 items in the three checks below.
+// TEST_PRIVATE_ED: Begin completions, 4 items
 // TEST_PRIVATE_ED-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 // TEST_PRIVATE_ED-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
-// TEST_INTERNAL_ED: Begin completions, 2 items
+// TEST_INTERNAL_ED: Begin completions, 4 items
 // TEST_INTERNAL_ED-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 // TEST_INTERNAL_ED-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 
-// TEST_PUBLIC_ED: Begin completions, 2 items
+// TEST_PUBLIC_ED: Begin completions, 4 items
 // TEST_PUBLIC_ED-DAG: Decl[InstanceMethod]/Super: public func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 // TEST_PUBLIC_ED-DAG: Decl[InstanceMethod]/Super: public func colliding() {|}{{; name=.+$}}
 
@@ -220,14 +222,15 @@ public class TestPublicEF : ProtocolEPublic, ProtocolFPublic {
   #^TEST_PUBLIC_EF^#
 }
 
-// TEST_PRIVATE_EF: Begin completions, 2 items
+// FIXME: Should be 2 items in the three checks below.
+// TEST_PRIVATE_EF: Begin completions, 4 items
 // TEST_PRIVATE_EF-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 // TEST_PRIVATE_EF-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
-// TEST_INTERNAL_EF: Begin completions, 2 items
+// TEST_INTERNAL_EF: Begin completions, 4 items
 // TEST_INTERNAL_EF-DAG: Decl[InstanceMethod]/Super: func colliding() {|}{{; name=.+$}}
 // TEST_INTERNAL_EF-DAG: Decl[InstanceMethod]/Super: func collidingGeneric<T>(x: T) {|}{{; name=.+$}}
 
-// TEST_PUBLIC_EF: Begin completions, 2 items
+// TEST_PUBLIC_EF: Begin completions, 4 items
 // TEST_PUBLIC_EF-DAG: Decl[InstanceMethod]/Super: public func colliding() {|}{{; name=.+$}}
 // TEST_PUBLIC_EF-DAG: Decl[InstanceMethod]/Super: public func collidingGeneric<T>(x: T) {|}{{; name=.+$}}

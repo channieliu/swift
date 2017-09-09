@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -32,7 +32,9 @@ namespace swift {
   class Substitution;
 
 namespace irgen {
-  class CallEmission;
+  class Callee;
+  class CalleeInfo;
+  class ConstantArrayBuilder;
   class IRGenFunction;
   class IRGenModule;
 
@@ -82,18 +84,9 @@ namespace irgen {
     }
   };
 
-  CallEmission prepareObjCMethodRootCall(IRGenFunction &IGF,
-                                         SILDeclRef method,
-                                         CanSILFunctionType origFnType,
-                                         CanSILFunctionType substFnType,
-                                         ArrayRef<Substitution> subs,
-                                         ObjCMessageKind kind);
-
-  void addObjCMethodCallImplicitArguments(IRGenFunction &IGF,
-                                          Explosion &emission,
-                                          SILDeclRef method,
-                                          llvm::Value *self,
-                                          SILType superSearchType);
+  /// Prepare a callee for an Objective-C method.
+  Callee getObjCMethodCallee(IRGenFunction &IGF, const ObjCMethod &method,
+                             llvm::Value *selfValue, CalleeInfo &&info);
 
   /// Emit a partial application of an Objective-C method to its 'self'
   /// argument.
@@ -169,17 +162,17 @@ namespace irgen {
 
   /// Build an Objective-C method descriptor for the given method,
   /// constructor, or destructor implementation.
-  llvm::Constant *emitObjCMethodDescriptor(IRGenModule &IGM,
-                                           AbstractFunctionDecl *method);
+  void emitObjCMethodDescriptor(IRGenModule &IGM,
+                                ConstantArrayBuilder &descriptors,
+                                AbstractFunctionDecl *method);
 
   /// Build an Objective-C method descriptor for the ivar initializer
   /// or destroyer of a class (-.cxx_construct or -.cxx_destruct).
-  ///
-  /// \returns the method destructor, or an empty optional if there is
-  /// no corresponding SIL function.
-  Optional<llvm::Constant*> emitObjCIVarInitDestroyDescriptor(IRGenModule &IGM,
-                                                              ClassDecl *cd,
-                                                              bool isDestroyer);
+  void emitObjCIVarInitDestroyDescriptor(IRGenModule &IGM,
+                                         ConstantArrayBuilder &descriptors,
+                                         ClassDecl *cd,
+                                         llvm::Function *impl,
+                                         bool isDestroyer);
 
   /// Get the type encoding for an ObjC property.
   void getObjCEncodingForPropertyType(IRGenModule &IGM, VarDecl *property,
@@ -195,16 +188,15 @@ namespace irgen {
   llvm::Constant *getMethodTypeExtendedEncoding(IRGenModule &IGM,
                                                 AbstractFunctionDecl *method);
   
-  /// Build an Objective-C method descriptor for the given property's
-  /// getter and setter methods.
-  std::pair<llvm::Constant *, llvm::Constant *>
-  emitObjCPropertyMethodDescriptors(IRGenModule &IGM, VarDecl *property);
+  /// Build an Objective-C method descriptor for the given getter method.
+  void emitObjCGetterDescriptor(IRGenModule &IGM,
+                                ConstantArrayBuilder &descriptors,
+                                AbstractStorageDecl *storage);
 
-  /// Build an Objective-C method descriptor for the given subscript's
-  /// getter and setter methods.
-  std::pair<llvm::Constant *, llvm::Constant *>
-  emitObjCSubscriptMethodDescriptors(IRGenModule &IGM, 
-                                     SubscriptDecl *subscript);
+  /// Build an Objective-C method descriptor for the given setter method.
+  void emitObjCSetterDescriptor(IRGenModule &IGM,
+                                ConstantArrayBuilder &descriptors,
+                                AbstractStorageDecl *storage);
 
   /// True if the FuncDecl requires an ObjC method descriptor.
   bool requiresObjCMethodDescriptor(FuncDecl *method);
@@ -224,7 +216,7 @@ namespace irgen {
   /// Allocate an Objective-C object.
   llvm::Value *emitObjCAllocObjectCall(IRGenFunction &IGF,
                                        llvm::Value *classPtr,
-                                       CanType resultType);
+                                       SILType resultType);
 
 } // end namespace irgen
 } // end namespace swift

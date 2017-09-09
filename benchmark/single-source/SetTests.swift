@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -34,7 +34,7 @@ public func run_SetIsSubsetOf(_ N: Int) {
     }
   }
 
-  CheckResults(!isSubset, "Incorrect results in SetIsSubsetOf")
+  CheckResults(!isSubset)
 }
 
 @inline(never)
@@ -115,7 +115,7 @@ class Box<T : Hashable> : Hashable {
     return value.hashValue
   }
 
-  static func ==<T: Equatable>(lhs: Box<T>, rhs: Box<T>) -> Bool {
+  static func ==(lhs: Box, rhs: Box) -> Bool {
     return lhs.value == rhs.value
   }
 }
@@ -142,7 +142,7 @@ public func run_SetIsSubsetOf_OfObjects(_ N: Int) {
     }
   }
 
-  CheckResults(!isSubset, "Incorrect results in SetIsSubsetOf")
+  CheckResults(!isSubset)
 }
 
 @inline(never)

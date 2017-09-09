@@ -2,16 +2,24 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-/// Evaluate `f()` and return its result, ensuring that `x` is not
-/// destroyed before f returns.
+/// Evaluates a closure while ensuring that the given instance is not destroyed
+/// before the closure returns.
+///
+/// - Parameters:
+///   - x: An instance to preserve until the execution of `body` is completed.
+///   - body: A closure to execute that depends on the lifetime of `x` being
+///     extended. If `body` has a return value, that value is also used as the
+///     return value for the `withExtendedLifetime(_:_:)` method.
+/// - Returns: The return value, if any, of the `body` closure parameter.
+@_inlineable
 public func withExtendedLifetime<T, Result>(
   _ x: T, _ body: () throws -> Result
 ) rethrows -> Result {
@@ -19,8 +27,16 @@ public func withExtendedLifetime<T, Result>(
   return try body()
 }
 
-/// Evaluate `f(x)` and return its result, ensuring that `x` is not
-/// destroyed before f returns.
+/// Evaluates a closure while ensuring that the given instance is not destroyed
+/// before the closure returns.
+///
+/// - Parameters:
+///   - x: An instance to preserve until the execution of `body` is completed.
+///   - body: A closure to execute that depends on the lifetime of `x` being
+///     extended. If `body` has a return value, that value is also used as the
+///     return value for the `withExtendedLifetime(_:_:)` method.
+/// - Returns: The return value, if any, of the `body` closure parameter.
+@_inlineable
 public func withExtendedLifetime<T, Result>(
   _ x: T, _ body: (T) throws -> Result
 ) rethrows -> Result {
@@ -30,16 +46,20 @@ public func withExtendedLifetime<T, Result>(
 
 extension String {
 
-  /// Invokes the given closure on the contents of the string, represented as a
-  /// pointer to a null-terminated sequence of UTF-8 code units.
+  /// Calls the given closure with a pointer to the contents of the string,
+  /// represented as a null-terminated sequence of UTF-8 code units.
   ///
-  /// The `withCString(_:)` method ensures that the sequence's lifetime extends
-  /// through the execution of `f`.
+  /// The pointer passed as an argument to `body` is valid only during the
+  /// execution of `withCString(_:)`. Do not store or return the pointer for
+  /// later use.
   ///
-  /// - Parameter f: A closure that takes a pointer to the string's UTF-8 code
-  ///   unit sequence as its sole argument. If the closure has a return value,
-  ///   it is used as the return value of the `withCString(_:)` method.
-  /// - Returns: The return value of the `f` closure, if any.
+  /// - Parameter body: A closure with a pointer parameter that points to a
+  ///   null-terminated sequence of UTF-8 code units. If `body` has a return
+  ///   value, that value is also used as the return value for the
+  ///   `withCString(_:)` method. The pointer argument is valid only for the
+  ///   duration of the method's execution.
+  /// - Returns: The return value, if any, of the `body` closure parameter.
+  @_inlineable
   public func withCString<Result>(
     _ body: (UnsafePointer<Int8>) throws -> Result
   ) rethrows -> Result {
@@ -56,9 +76,25 @@ public func _fixLifetime<T>(_ x: T) {
   Builtin.fixLifetime(x)
 }
 
-/// Invokes `body` with an `UnsafeMutablePointer` to `arg` and returns the
-/// result. Useful for calling Objective-C APIs that take "in/out"
-/// parameters (and default-constructible "out" parameters) by pointer.
+/// Calls the given closure with a mutable pointer to the given argument.
+///
+/// The `withUnsafeMutablePointer(to:_:)` function is useful for calling
+/// Objective-C APIs that take in/out parameters (and default-constructible
+/// out parameters) by pointer.
+///
+/// The pointer argument to `body` is valid only during the execution of
+/// `withUnsafeMutablePointer(to:_:)`. Do not store or return the pointer for
+/// later use.
+///
+/// - Parameters:
+///   - arg: An instance to temporarily use via pointer.
+///   - body: A closure that takes a mutable pointer to `arg` as its sole
+///     argument. If the closure has a return value, that value is also used
+///     as the return value of the `withUnsafeMutablePointer(to:_:)` function.
+///     The pointer argument is valid only for the duration of the function's
+///     execution.
+/// - Returns: The return value, if any, of the `body` closure.
+@_inlineable
 public func withUnsafeMutablePointer<T, Result>(
   to arg: inout T,
   _ body: (UnsafeMutablePointer<T>) throws -> Result
@@ -67,9 +103,24 @@ public func withUnsafeMutablePointer<T, Result>(
   return try body(UnsafeMutablePointer<T>(Builtin.addressof(&arg)))
 }
 
-/// Invokes `body` with an `UnsafePointer` to `arg` and returns the
-/// result. Useful for calling Objective-C APIs that take "in/out"
-/// parameters (and default-constructible "out" parameters) by pointer.
+/// Invokes the given closure with a pointer to the given argument.
+///
+/// The `withUnsafePointer(to:_:)` function is useful for calling Objective-C
+/// APIs that take in/out parameters (and default-constructible out
+/// parameters) by pointer.
+///
+/// The pointer argument to `body` is valid only during the execution of
+/// `withUnsafePointer(to:_:)`. Do not store or return the pointer for later
+/// use.
+///
+/// - Parameters:
+///   - arg: An instance to temporarily use via pointer.
+///   - body: A closure that takes a pointer to `arg` as its sole argument. If
+///     the closure has a return value, that value is also used as the return
+///     value of the `withUnsafePointer(to:_:)` function. The pointer argument
+///     is valid only for the duration of the function's execution.
+/// - Returns: The return value, if any, of the `body` closure.
+@_inlineable
 public func withUnsafePointer<T, Result>(
   to arg: inout T,
   _ body: (UnsafePointer<T>) throws -> Result

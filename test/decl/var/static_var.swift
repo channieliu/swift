@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift -parse-as-library
+// RUN: %target-typecheck-verify-swift -parse-as-library
 
 // See also rdar://15626843.
 static var gvu1: Int // expected-error {{static properties may only be declared on a type}}{{1-8=}}
@@ -257,7 +257,7 @@ extension ProtoAdopter : ProtosEvilTwin {}
 
 // rdar://18990358
 public struct Foo { // expected-note {{to match this opening '{'}}}
-  public static let S { a // expected-error{{computed property must have an explicit type}}
+  public static let S { a // expected-error{{computed property must have an explicit type}} {{22-22=: <# Type #>}}
     // expected-error@-1{{type annotation missing in pattern}}
     // expected-error@-2{{'let' declarations cannot be computed properties}}
     // expected-error@-3{{use of unresolved identifier 'a'}}

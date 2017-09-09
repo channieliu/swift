@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,10 +21,12 @@
 
 using namespace swift;
 
+bool swift::_swift_reportFatalErrorsToDebugger = false;
+
 static int swift_asprintf(char **strp, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   int len = _vscprintf(fmt, args);
   if (len < 0) {
     va_end(args);
@@ -49,6 +51,24 @@ static int swift_asprintf(char **strp, const char *fmt, ...) {
   return result;
 }
 
+static void logPrefixAndMessageToDebugger(
+    const unsigned char *prefix, int prefixLength,
+    const unsigned char *message, int messageLength
+) {
+  if (!_swift_reportFatalErrorsToDebugger)
+    return;
+
+  char *debuggerMessage;
+  if (messageLength) {
+    swift_asprintf(&debuggerMessage, "%.*s: %.*s", prefixLength, prefix,
+        messageLength, message);
+  } else {
+    swift_asprintf(&debuggerMessage, "%.*s", prefixLength, prefix);
+  }
+  _swift_reportToDebugger(RuntimeErrorFlagFatal, debuggerMessage);
+  free(debuggerMessage);
+}
+
 void swift::_swift_stdlib_reportFatalErrorInFile(
     const unsigned char *prefix, int prefixLength,
     const unsigned char *message, int messageLength,
@@ -56,6 +76,8 @@ void swift::_swift_stdlib_reportFatalErrorInFile(
     uint32_t line,
     uint32_t flags
 ) {
+  logPrefixAndMessageToDebugger(prefix, prefixLength, message, messageLength);
+
   char *log;
   swift_asprintf(
       &log, "%.*s: %.*s%sfile %.*s, line %" PRIu32 "\n",
@@ -74,6 +96,8 @@ void swift::_swift_stdlib_reportFatalError(
     const unsigned char *message, int messageLength,
     uint32_t flags
 ) {
+  logPrefixAndMessageToDebugger(prefix, prefixLength, message, messageLength);
+
   char *log;
   swift_asprintf(
       &log, "%.*s: %.*s\n",

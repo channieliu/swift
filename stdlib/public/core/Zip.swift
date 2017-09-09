@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -41,7 +41,7 @@
 ///   - sequence2: The second sequence or collection to zip.
 /// - Returns: A sequence of tuple pairs, where the elements of each pair are
 ///   corresponding elements of `sequence1` and `sequence2`.
-public func zip<Sequence1 : Sequence, Sequence2 : Sequence>(
+public func zip<Sequence1, Sequence2>(
   _ sequence1: Sequence1, _ sequence2: Sequence2
 ) -> Zip2Sequence<Sequence1, Sequence2> {
   return Zip2Sequence(_sequence1: sequence1, _sequence2: sequence2)
@@ -107,17 +107,18 @@ public struct Zip2Iterator<
 ///     // Prints "two: 2
 ///     // Prints "three: 3"
 ///     // Prints "four: 4"
-///
-/// - SeeAlso: `zip(_:_:)`
 public struct Zip2Sequence<Sequence1 : Sequence, Sequence2 : Sequence>
   : Sequence {
 
+    
+  @available(*, deprecated, renamed: "Sequence1.Iterator")
   public typealias Stream1 = Sequence1.Iterator
+  @available(*, deprecated, renamed: "Sequence2.Iterator")
   public typealias Stream2 = Sequence2.Iterator
 
   /// A type whose instances can produce the elements of this
   /// sequence, in order.
-  public typealias Iterator = Zip2Iterator<Stream1, Stream2>
+  public typealias Iterator = Zip2Iterator<Sequence1.Iterator, Sequence2.Iterator>
 
   @available(*, unavailable, renamed: "Iterator")
   public typealias Generator = Iterator

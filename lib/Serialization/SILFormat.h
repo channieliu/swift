@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -67,6 +67,20 @@ enum CastConsumptionKindEncoding : uint8_t {
   SIL_CAST_CONSUMPTION_TAKE_ALWAYS,
   SIL_CAST_CONSUMPTION_TAKE_ON_SUCCESS,
   SIL_CAST_CONSUMPTION_COPY_ON_SUCCESS,
+};
+
+enum class KeyPathComponentKindEncoding : uint8_t {
+  StoredProperty,
+  GettableProperty,
+  SettableProperty,
+  OptionalChain,
+  OptionalForce,
+  OptionalWrap,
+};
+enum class KeyPathComputedComponentIdKindEncoding : uint8_t {
+  Property,
+  Function,
+  DeclRef,
 };
 
 // Constants for packing an encoded CheckedCastKind and
@@ -155,6 +169,7 @@ namespace sil_block {
       = decls_block::INHERITED_PROTOCOL_CONFORMANCE,
     GENERIC_PARAM = decls_block::GENERIC_PARAM,
     GENERIC_REQUIREMENT = decls_block::GENERIC_REQUIREMENT,
+    LAYOUT_REQUIREMENT = decls_block::LAYOUT_REQUIREMENT,
   };
 
   using SILInstNoOperandLayout = BCRecordLayout<
@@ -170,6 +185,7 @@ namespace sil_block {
   using VTableEntryLayout = BCRecordLayout<
     SIL_VTABLE_ENTRY,
     DeclIDField,  // SILFunction name
+    SILLinkageField,      // Linkage
     BCArray<ValueIDField> // SILDeclRef
   >;
 
@@ -179,7 +195,7 @@ namespace sil_block {
     BCFixed<1>,          // Is this a declaration. We represent this separately
                          // from whether or not we have entries since we can
                          // have empty witness tables.
-    BCFixed<1>           // IsFragile.
+    BCFixed<1>           // IsSerialized.
     // Conformance follows
     // Witness table entries will be serialized after.
   >;
@@ -198,7 +214,7 @@ namespace sil_block {
 
   using WitnessAssocProtocolLayout = BCRecordLayout<
     SIL_WITNESS_ASSOC_PROTOCOL,
-    DeclIDField, // ID of AssociatedTypeDecl
+    TypeIDField, // ID of associated type
     DeclIDField  // ID of ProtocolDecl
     // Trailed by the conformance itself if appropriate.
   >;
@@ -229,7 +245,7 @@ namespace sil_block {
   using SILGlobalVarLayout = BCRecordLayout<
     SIL_GLOBALVAR,
     SILLinkageField,
-    BCFixed<1>,          // fragile
+    BCFixed<1>,          // serialized
     BCFixed<1>,          // Is this a declaration.
     BCFixed<1>,          // Is this a let variable.
     TypeIDField,
@@ -239,7 +255,7 @@ namespace sil_block {
   using SILFunctionLayout =
       BCRecordLayout<SIL_FUNCTION, SILLinkageField,
                      BCFixed<1>,  // transparent
-                     BCFixed<1>,  // fragile
+                     BCFixed<2>,  // serialized
                      BCFixed<2>,  // thunk/reabstraction_thunk
                      BCFixed<1>,  // global_init
                      BCFixed<2>,  // inlineStrategy
@@ -247,6 +263,7 @@ namespace sil_block {
                      BCFixed<2>,  // number of specialize attributes
                      BCFixed<1>,  // has qualified ownership
                      TypeIDField, // SILFunctionType
+                     GenericEnvironmentIDField,
                      DeclIDField, // ClangNode owner
                      BCArray<IdentifierIDField> // Semantics Attribute
                      // followed by specialize attributes
@@ -255,8 +272,8 @@ namespace sil_block {
 
   using SILSpecializeAttrLayout =
       BCRecordLayout<SIL_SPECIALIZE_ATTR,
-                     BCFixed<5> // number of substitutions
-                     // followed by bound generic substitutions
+                     BCFixed<1>, // exported
+                     BCFixed<1> // specialization kind
                      >;
 
   // Has an optional argument list where each argument is a typed valueref.
@@ -354,7 +371,7 @@ namespace sil_block {
   using SILOneOperandLayout = BCRecordLayout<
     SIL_ONE_OPERAND,
     SILInstOpCodeField,
-    BCFixed<3>,          // Optional attributes
+    BCFixed<4>,          // Optional attributes
     TypeIDField,
     SILTypeCategoryField,
     ValueIDField
@@ -364,7 +381,7 @@ namespace sil_block {
   using SILTwoOperandsLayout = BCRecordLayout<
     SIL_TWO_OPERANDS,
     SILInstOpCodeField,
-    BCFixed<2>,          // Optional attributes
+    BCFixed<4>,          // Optional attributes
     TypeIDField,
     SILTypeCategoryField,
     ValueIDField,

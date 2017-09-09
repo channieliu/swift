@@ -7,14 +7,14 @@
 
 import gizmo
 
-// CHECK-LABEL: define hidden i64 @_TFC12clang_inline16CallStaticInline10ReturnZerofT_Vs5Int64(%C12clang_inline16CallStaticInline*) {{.*}} {
+// CHECK-LABEL: define hidden swiftcc i64 @_T012clang_inline16CallStaticInlineC10ReturnZeros5Int64VyF(%T12clang_inline16CallStaticInlineC* swiftself) {{.*}} {
 class CallStaticInline {
   func ReturnZero() -> Int64 { return Int64(wrappedZero()) }
 }
 
 // CHECK-LABEL: define internal i32 @wrappedZero() {{#[0-9]+}} {
 
-// CHECK-LABEL: define hidden i64 @_TFC12clang_inline17CallStaticInline210ReturnZerofT_Vs5Int64(%C12clang_inline17CallStaticInline2*) {{.*}} {
+// CHECK-LABEL: define hidden swiftcc i64 @_T012clang_inline17CallStaticInline2C10ReturnZeros5Int64VyF(%T12clang_inline17CallStaticInline2C* swiftself) {{.*}} {
 class CallStaticInline2 {
   func ReturnZero() -> Int64 { return Int64(zero()) }
 }

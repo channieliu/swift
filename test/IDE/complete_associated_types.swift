@@ -1,5 +1,5 @@
 // RUN: sed -n -e '1,/NO_ERRORS_UP_TO_HERE$/ p' %s > %t_no_errors.swift
-// RUN: %target-swift-frontend -parse -verify %t_no_errors.swift
+// RUN: %target-swift-frontend -typecheck -verify %t_no_errors.swift
 
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=STRUCT_AS_TYPE > %t.types.txt
 // RUN: %FileCheck %s -check-prefix=STRUCT_TYPE_COUNT < %t.types.txt
@@ -32,8 +32,8 @@ protocol FooBaseProtocolWithAssociatedTypes {
   associatedtype FooBaseDefaultedTypeB = Int
   associatedtype FooBaseDefaultedTypeC = Int
 
-  associatedtype DeducedTypeCommonA
-  associatedtype DeducedTypeCommonB
+  associatedtype DeducedTypeCommonA // expected-note{{declared here}}
+  associatedtype DeducedTypeCommonB // expected-note{{declared here}}
   associatedtype DeducedTypeCommonC
   associatedtype DeducedTypeCommonD
   func deduceCommonA() -> DeducedTypeCommonA
@@ -57,8 +57,8 @@ protocol FooProtocolWithAssociatedTypes : FooBaseProtocolWithAssociatedTypes {
 
   associatedtype FooBaseDefaultedTypeB = Double
 
-  associatedtype DeducedTypeCommonA
-  associatedtype DeducedTypeCommonB
+  associatedtype DeducedTypeCommonA // expected-warning{{redeclaration of associated type}}
+  associatedtype DeducedTypeCommonB // expected-warning{{redeclaration of associated type}}
   func deduceCommonA() -> DeducedTypeCommonA
   func deduceCommonB() -> DeducedTypeCommonB
 
@@ -79,7 +79,7 @@ protocol BarBaseProtocolWithAssociatedTypes {
   associatedtype DefaultedTypeCommonA = Int
   associatedtype DefaultedTypeCommonC = Int
 
-  associatedtype DeducedTypeCommonA
+  associatedtype DeducedTypeCommonA // expected-note{{'DeducedTypeCommonA' declared here}}
   associatedtype DeducedTypeCommonC
   func deduceCommonA() -> DeducedTypeCommonA
   func deduceCommonC() -> DeducedTypeCommonC
@@ -102,7 +102,7 @@ protocol BarProtocolWithAssociatedTypes : BarBaseProtocolWithAssociatedTypes {
   associatedtype DefaultedTypeCommonA = Int
   associatedtype DefaultedTypeCommonD = Int
 
-  associatedtype DeducedTypeCommonA
+  associatedtype DeducedTypeCommonA // expected-warning{{redeclaration of associated type}}
   associatedtype DeducedTypeCommonD
   func deduceCommonA() -> DeducedTypeCommonA
   func deduceCommonD() -> DeducedTypeCommonD

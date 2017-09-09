@@ -11,15 +11,15 @@
 
 // Verify that the mangled names end up in the debug info.
 // CHECK-DWARF: TAG_module
-// CHECK-DWARF: AT_name( "main" )
+// CHECK-DWARF-NEXT: AT_name( "main" )
 // CHECK-DWARF: TAG_structure_type
 // CHECK-DWARF-NEXT: AT_name( "foo" )
-// CHECK-DWARF-NEXT: AT_linkage_name( "_TtC4main3foo" )
+// CHECK-DWARF-NEXT: AT_linkage_name( "_T04main3fooCD" )
 
 // Verify the IR interface:
 // CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "foo"
 // CHECK-SAME:             line: [[@LINE+2]]
-// CHECK-SAME:             identifier: "_TtC4main3foo"
+// CHECK-SAME:             identifier: "_T04main3fooCD"
 class foo {
 	var x : Int64 = 1
 }

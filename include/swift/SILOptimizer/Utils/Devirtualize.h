@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -43,9 +43,9 @@ namespace swift {
 /// casted to produce a properly typed value (first element).
 typedef std::pair<ValueBase *, ApplySite> DevirtualizationResult;
 
-DevirtualizationResult tryDevirtualizeApply(FullApplySite AI);
-DevirtualizationResult tryDevirtualizeApply(FullApplySite AI,
+DevirtualizationResult tryDevirtualizeApply(ApplySite AI,
                                             ClassHierarchyAnalysis *CHA);
+bool canDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA);
 bool isNominalTypeWithUnboundGenericParameters(SILType Ty, SILModule &M);
 bool canDevirtualizeClassMethod(FullApplySite AI, SILType ClassInstanceType);
 SILFunction *getTargetClassMethod(SILModule &M, SILType ClassOrMetatypeType,
@@ -54,9 +54,7 @@ DevirtualizationResult devirtualizeClassMethod(FullApplySite AI,
                                                SILValue ClassInstance);
 DevirtualizationResult tryDevirtualizeClassMethod(FullApplySite AI,
                                                   SILValue ClassInstance);
-DevirtualizationResult tryDevirtualizeWitnessMethod(ApplySite AI); 
-/// Check if an upcast is legal.
-bool isLegalUpcast(SILType FromTy, SILType ToTy);
+DevirtualizationResult tryDevirtualizeWitnessMethod(ApplySite AI);
 }
 
 #endif

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Casting.h"
 #include "swift/ABI/MetadataValues.h"
+#include "swift/Runtime/Unreachable.h"
 
 #include <iostream>
 
@@ -36,13 +37,22 @@ enum class TypeRefKind {
 #undef TYPEREF
 };
 
-#define FIND_OR_CREATE_TYPEREF(Allocator, TypeRefTy, ...) \
-  auto ID = Profile(__VA_ARGS__); \
-  const auto Entry = Allocator.template TypeRefTy##s.find(ID); \
-  if (Entry != Allocator.template TypeRefTy##s.end()) \
-    return Entry->second; \
-  const auto TR = Allocator.template makeTypeRef<TypeRefTy>(__VA_ARGS__); \
-  Allocator.template TypeRefTy##s.insert({ID, TR}); \
+// MSVC reports an error if we use "template"
+// Clang reports an error if we don't use "template"
+#if defined(__clang__) || defined(__GNUC__)
+#define DEPENDENT_TEMPLATE template
+#else
+#define DEPENDENT_TEMPLATE
+#endif
+
+#define FIND_OR_CREATE_TYPEREF(Allocator, TypeRefTy, ...)                      \
+  auto ID = Profile(__VA_ARGS__);                                              \
+  const auto Entry = Allocator.DEPENDENT_TEMPLATE TypeRefTy##s.find(ID);       \
+  if (Entry != Allocator.DEPENDENT_TEMPLATE TypeRefTy##s.end())                \
+    return Entry->second;                                                      \
+  const auto TR =                                                              \
+      Allocator.DEPENDENT_TEMPLATE makeTypeRef<TypeRefTy>(__VA_ARGS__);        \
+  Allocator.DEPENDENT_TEMPLATE TypeRefTy##s.insert({ID, TR});                  \
   return TR;
 
 /// An identifier containing the unique bit pattern made up of all of the
@@ -386,12 +396,8 @@ public:
     FIND_OR_CREATE_TYPEREF(A, ProtocolTypeRef, MangledName);
   }
 
-  bool isAnyObject() const {
-    return MangledName == "Ps9AnyObject_";
-  }
-
   bool isError() const {
-    return MangledName == "Ps5Error_";
+    return MangledName == "s5Error_p";
   }
 
   const std::string &getMangledName() const {
@@ -411,28 +417,39 @@ public:
 };
 
 class ProtocolCompositionTypeRef final : public TypeRef {
-  std::vector<const TypeRef *> Protocols;
+  std::vector<const TypeRef *> Members;
+  bool HasExplicitAnyObject;
 
-  static TypeRefID Profile(const std::vector<const TypeRef *> &Protocols) {
+  static TypeRefID Profile(const std::vector<const TypeRef *> &Members,
+                           bool HasExplicitAnyObject) {
     TypeRefID ID;
-    for (auto Protocol : Protocols) {
-      ID.addPointer(Protocol);
+    ID.addInteger((uint32_t)HasExplicitAnyObject);
+    for (auto Member : Members) {
+      ID.addPointer(Member);
     }
     return ID;
   }
 
 public:
-  ProtocolCompositionTypeRef(std::vector<const TypeRef *> Protocols)
-    : TypeRef(TypeRefKind::ProtocolComposition), Protocols(Protocols) {}
+  ProtocolCompositionTypeRef(std::vector<const TypeRef *> Members,
+                            bool HasExplicitAnyObject)
+    : TypeRef(TypeRefKind::ProtocolComposition),
+      Members(Members), HasExplicitAnyObject(HasExplicitAnyObject) {}
 
   template <typename Allocator>
   static const ProtocolCompositionTypeRef *
-  create(Allocator &A, std::vector<const TypeRef *> Protocols) {
-    FIND_OR_CREATE_TYPEREF(A, ProtocolCompositionTypeRef, Protocols);\
+  create(Allocator &A, std::vector<const TypeRef *> Members,
+        bool HasExplicitAnyObject) {
+    FIND_OR_CREATE_TYPEREF(A, ProtocolCompositionTypeRef, Members,
+                           HasExplicitAnyObject);
   }
 
-  const std::vector<const TypeRef *> &getProtocols() const {
-    return Protocols;
+  const std::vector<const TypeRef *> &getMembers() const {
+    return Members;
+  }
+
+  bool hasExplicitAnyObject() const {
+    return HasExplicitAnyObject;
   }
 
   static bool classof(const TypeRef *TR) {
@@ -772,6 +789,8 @@ public:
                            ::std::forward<Args>(args)...);
 #include "swift/Reflection/TypeRefs.def"
     }
+
+    swift_runtime_unreachable("Unhandled TypeRefKind in switch.");
   }
 };
 

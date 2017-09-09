@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -141,6 +141,7 @@ struct CustomCompletionInfo {
     Stmt = 1 << 0,
     Expr = 1 << 1,
     Type = 1 << 2,
+    ForEachSequence = 1 << 3,
   };
   swift::OptionSet<Context> Contexts;
 };
@@ -153,6 +154,7 @@ struct FilterRule {
     Literal,
     CustomCompletion,
     Identifier,
+    Description,
   };
   Kind kind;
   bool hide;
@@ -223,7 +225,7 @@ public:
                                                  unsigned Length) = 0;
 
   virtual bool recordAffectedRange(unsigned Offset, unsigned Length) = 0;
-  
+
   virtual bool recordAffectedLineRange(unsigned Line, unsigned Length) = 0;
 
   virtual bool recordFormattedText(StringRef Text) = 0;
@@ -258,6 +260,9 @@ struct CursorInfo {
   StringRef DocComment;
   StringRef TypeInterface;
   StringRef GroupName;
+  /// A key for documentation comment localization, if it exists in the doc
+  /// comment for the declaration.
+  StringRef LocalizationKey;
   /// Annotated XML pretty printed declaration.
   StringRef AnnotatedDeclaration;
   /// Fully annotated XML pretty printed declaration.
@@ -279,7 +284,25 @@ struct CursorInfo {
   ArrayRef<StringRef> AnnotatedRelatedDeclarations;
   /// All groups of the module name under cursor.
   ArrayRef<StringRef> ModuleGroupArray;
+  /// All available actions on the code under cursor.
+  ArrayRef<StringRef> AvailableActions;
   bool IsSystem = false;
+  llvm::Optional<unsigned> ParentNameOffset;
+};
+
+struct RangeInfo {
+  bool IsCancelled = false;
+  UIdent RangeKind;
+  StringRef ExprType;
+  StringRef RangeContent;
+};
+
+struct NameTranslatingInfo {
+  bool IsCancelled = false;
+  UIdent NameKind;
+  StringRef BaseName;
+  std::vector<StringRef> ArgNames;
+  bool IsZeroArgSelector = false;
 };
 
 struct RelatedIdentsInfo {
@@ -308,12 +331,14 @@ struct DocGenericParam {
 struct DocEntityInfo {
   UIdent Kind;
   llvm::SmallString<32> Name;
+  llvm::SmallString<32> SubModuleName;
   llvm::SmallString<32> Argument;
   llvm::SmallString<64> USR;
   llvm::SmallString<64> OriginalUSR;
   llvm::SmallString<64> ProvideImplementationOfUSR;
   llvm::SmallString<64> DocComment;
   llvm::SmallString<64> FullyAnnotatedDecl;
+  llvm::SmallString<64> LocalizationKey;
   std::vector<DocGenericParam> GenericParams;
   std::vector<std::string> GenericRequirements;
   unsigned Offset = 0;
@@ -421,7 +446,9 @@ public:
                                          StringRef Name,
                                          StringRef HeaderName,
                                          ArrayRef<const char *> Args,
-                                         bool SynthesizedExtensions) = 0;
+                                         bool UsingSwiftArgs,
+                                         bool SynthesizedExtensions,
+                                         Optional<unsigned> swiftVersion) = 0;
 
   virtual void editorOpenSwiftSourceInterface(StringRef Name,
                                               StringRef SourceName,
@@ -443,21 +470,39 @@ public:
   virtual void editorExtractTextFromComment(StringRef Source,
                                             EditorConsumer &Consumer) = 0;
 
+  virtual void editorConvertMarkupToXML(StringRef Source,
+                                        EditorConsumer &Consumer) = 0;
+
   virtual void editorExpandPlaceholder(StringRef Name, unsigned Offset,
                                        unsigned Length,
                                        EditorConsumer &Consumer) = 0;
 
   virtual void getCursorInfo(StringRef Filename, unsigned Offset,
+                             unsigned Length, bool Actionables,
+                             bool CancelOnSubsequentRequest,
                              ArrayRef<const char *> Args,
                           std::function<void(const CursorInfo &)> Receiver) = 0;
 
+
+  virtual void getNameInfo(StringRef Filename, unsigned Offset,
+                           NameTranslatingInfo &Input,
+                           ArrayRef<const char *> Args,
+                std::function<void(const NameTranslatingInfo &)> Receiver) = 0;
+
+  virtual void getRangeInfo(StringRef Filename, unsigned Offset, unsigned Length,
+                            bool CancelOnSubsequentRequest,
+                            ArrayRef<const char *> Args,
+                            std::function<void(const RangeInfo&)> Receiver) = 0;
+
   virtual void
   getCursorInfoFromUSR(StringRef Filename, StringRef USR,
+                       bool CancelOnSubsequentRequest,
                        ArrayRef<const char *> Args,
                        std::function<void(const CursorInfo &)> Receiver) = 0;
 
   virtual void findRelatedIdentifiersInFile(StringRef Filename,
                                             unsigned Offset,
+                                            bool CancelOnSubsequentRequest,
                                             ArrayRef<const char *> Args,
                    std::function<void(const RelatedIdentsInfo &)> Receiver) = 0;
 

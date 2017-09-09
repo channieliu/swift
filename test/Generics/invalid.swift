@@ -1,15 +1,17 @@
-// RUN: %target-parse-verify-swift -enable-experimental-nested-generic-types
+// RUN: %target-typecheck-verify-swift
 
 func bet() where A : B {} // expected-error {{'where' clause cannot be attached to a non-generic declaration}}
 
 typealias gimel where A : B // expected-error {{'where' clause cannot be attached to a non-generic declaration}}
-// expected-error@-1 {{expected '=' in typealias declaration}}
+// expected-error@-1 {{expected '=' in type alias declaration}}
 
 class dalet where A : B {} // expected-error {{'where' clause cannot be attached to a non-generic declaration}}
 
-protocol he where A : B { // expected-error {{'where' clause cannot be attached to a protocol declaration}}
+protocol he where A : B { // expected-error 2 {{use of undeclared type 'A'}}
+  // expected-error@-1 {{use of undeclared type 'B'}}
 
-  associatedtype vav where A : B // expected-error {{'where' clause cannot be attached to an associated type declaration}}
+  associatedtype vav where A : B // expected-error{{use of undeclared type 'A'}}
+  // expected-error@-1 {{use of undeclared type 'B'}}
 }
 
 
@@ -51,8 +53,8 @@ func eatDinnerConcrete(d: Pizzas<Pepper>.DeepDish,
 
 func badDiagnostic1() {
 
-  _ = Lunch<Pizzas<Pepper>.NewYork>.Dinner<HotDog>( // expected-error {{expression type 'Lunch<Pizzas<Pepper>.NewYork>.Dinner<HotDog>' is ambiguous without more context}}
-      leftovers: Pizzas<ChiliFlakes>.NewYork(),
+  _ = Lunch<Pizzas<Pepper>.NewYork>.Dinner<HotDog>(
+      leftovers: Pizzas<ChiliFlakes>.NewYork(),  // expected-error {{cannot convert value of type 'Pizzas<ChiliFlakes>.NewYork' to expected argument type 'Pizzas<Pepper>.NewYork'}}
       transformation: { _ in HotDog() })
 }
 
@@ -78,4 +80,24 @@ func takesAny(_ a: Any) {}
 
 func badDiagnostic3() {
   takesAny(Deli.self) // expected-error {{argument type 'Deli<_>.Type' does not conform to expected type 'Any'}}
+}
+
+// Crash with missing nested type inside concrete type
+class OuterGeneric<T> {
+  class InnerGeneric<U> where U:OuterGeneric<T.NoSuchType> {
+  // expected-error@-1 {{'NoSuchType' is not a member type of 'T'}}
+    func method() {
+      _ = method
+    }
+  }
+}
+
+// Crash with missing types in requirements.
+protocol P1 {
+  associatedtype A where A == ThisTypeDoesNotExist
+  // expected-error@-1{{use of undeclared type 'ThisTypeDoesNotExist'}}
+  associatedtype B where ThisTypeDoesNotExist == B
+  // expected-error@-1{{use of undeclared type 'ThisTypeDoesNotExist'}}
+  associatedtype C where ThisTypeDoesNotExist == ThisTypeDoesNotExist
+  // expected-error@-1 2{{use of undeclared type 'ThisTypeDoesNotExist'}}
 }

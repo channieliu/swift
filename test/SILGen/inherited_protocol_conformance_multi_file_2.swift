@@ -42,25 +42,25 @@
 // cbA
 // RUN: %target-swift-frontend -emit-silgen %S/Inputs/inherited_protocol_conformance_other_file_2_c.swift %S/Inputs/inherited_protocol_conformance_other_file_2_b.swift -primary-file %s -module-name main | %FileCheck %s --check-prefix=FILE_A
 
-// FILE_A-NOT: sil [transparent] [thunk] @_TTWV4main5Things9EquatableS_ZFS1_oi2ee
-// FILE_A-NOT: sil [transparent] [thunk] @_TTWV4main5Things8HashableS_FS1_g9hashValueSi
+// FILE_A-NOT: sil [transparent] [thunk] @_T04main5ThingVs9EquatableAAsADP2eeoi{{[_0-9a-zA-Z]*}}FZTW
+// FILE_A-NOT: sil [transparent] [thunk] @_T04main5ThingVs8HashableAAsADP9hashValueSifgTW
 // FILE_A-NOT: sil_witness_table Thing: Hashable module main
 // FILE_A-NOT: sil_witness_table Thing: Equatable module main
 
-// FILE_B-NOT: sil [transparent] [thunk] @_TTWV4main5Things9EquatableS_ZFS1_oi2ee
-// FILE_B: sil [transparent] [thunk] @_TTWV4main5Things8HashableS_FS1_g9hashValueSi
-// FILE_B-NOT: sil [transparent] [thunk] @_TTWV4main5Things9EquatableS_ZFS1_oi2ee
+// FILE_B-NOT: sil [transparent] [thunk] @_T04main5ThingVs9EquatableAAsADP2eeoi{{[_0-9a-zA-Z]*}}FZTW
+// FILE_B: sil private [transparent] [thunk] @_T04main5ThingVs8HashableAAsADP9hashValueSifgTW
+// FILE_B-NOT: sil [transparent] [thunk] @_T04main5ThingVs9EquatableAAsADP2eeoi{{[_0-9a-zA-Z]*}}FZTW
 
-// FILE_B-NOT: sil_witness_table Thing: Equatable module main
-// FILE_B: sil_witness_table Thing: Hashable module main
-// FILE_B-NOT: sil_witness_table Thing: Equatable module main
+// FILE_B-NOT: sil_witness_table hidden Thing: Equatable module main
+// FILE_B: sil_witness_table hidden Thing: Hashable module main
+// FILE_B-NOT: sil_witness_table hidden Thing: Equatable module main
 
-// FILE_C-NOT: sil [transparent] [thunk] @_TTWV4main5Things8HashableS_FS1_g9hashValueSi
-// FILE_C: sil [transparent] [thunk] @_TTWV4main5Things9EquatableS_ZFS1_oi2ee
-// FILE_C-NOT: sil [transparent] [thunk] @_TTWV4main5Things8HashableS_FS1_g9hashValueSi
+// FILE_C-NOT: sil [transparent] [thunk] @_T04main5ThingVs8HashableAAsADP9hashValueSifgTW
+// FILE_C: sil private [transparent] [thunk] @_T04main5ThingVs9EquatableAAsADP2eeoi{{[_0-9a-zA-Z]*}}FZTW
+// FILE_C-NOT: sil [transparent] [thunk] @_T04main5ThingVs8HashableAAsADP9hashValueSifgTW
 
-// FILE_C-NOT: sil_witness_table Thing: Hashable module main
-// FILE_C: sil_witness_table Thing: Equatable module main
-// FILE_C-NOT: sil_witness_table Thing: Hashable module main
+// FILE_C-NOT: sil_witness_table hidden Thing: Hashable module main
+// FILE_C: sil_witness_table hidden Thing: Equatable module main
+// FILE_C-NOT: sil_witness_table hidden Thing: Hashable module main
 
 struct Thing { var value: Int }

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -parse %s -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -typecheck %s -verify
 import ObjectiveC
 
 // REQUIRES: objc_interop
@@ -83,6 +83,9 @@ func testSelector(_ c1: C1, p1: P1, obj: AnyObject) {
   let sel2: Selector
   sel2 = sel1
   _ = sel2
+
+  let dict: [Selector: Int] = [:]
+  let _: Int? = dict[#selector(c1.method1)]
 }
 
 func testAmbiguity() {
@@ -112,8 +115,7 @@ func testParseErrors3(_ c1: C1) {
 }
 
 func testParseErrors4() {
-  // Subscripts
-  _ = #selector(C1.subscript) // expected-error{{type 'C1.Type' has no subscript members}}
+  _ = #selector(C1.subscript) // expected-error{{type 'C1' has no member 'subscript'}}
 }
 
 // SR-1827
@@ -123,14 +125,16 @@ let optionalSel: Selector? = nil
 switch optionalSel {
 case #selector(C1.method1)?:
   break
+default:
+  break
 }
 
 @objc class SR1827 {
-  func bar() {}
+  @objc func bar() {}
 }
 
 switch optionalSel {
-case #selector(SR1827.bar): // expected-error{{expression pattern of type 'Selector' cannot match values of type 'Selector?'}} {{26-26=?}}
+case #selector(SR1827.bar): // expected-error{{expression pattern of type 'Selector' cannot match values of type 'Selector?'}} {{27-27=?}}
   break
 case #selector(SR1827.bar)!: // expected-error{{cannot force unwrap value of non-optional type 'Selector'}}
   break

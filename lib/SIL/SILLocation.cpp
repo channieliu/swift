@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -126,6 +126,24 @@ SourceLoc SILLocation::getEndSourceLoc(ASTNodeTy N) const {
   llvm_unreachable("impossible SILLocation");
 }
 
+DeclContext *SILLocation::getAsDeclContext() const {
+  if (!isASTNode())
+    return nullptr;
+  if (auto *D = getAsASTNode<Decl>())
+    switch (D->getKind()) {
+    // These four dual-inherit from DeclContext.
+    case DeclKind::Func:        return cast<FuncDecl>(D);
+    case DeclKind::Constructor: return cast<ConstructorDecl>(D);
+    case DeclKind::Extension:   return cast<ExtensionDecl>(D);
+    case DeclKind::Destructor:  return cast<DestructorDecl>(D);
+    default:                    return D->getDeclContext();
+    }
+  if (auto *E = getAsASTNode<Expr>())
+    if (auto *DC = dyn_cast<AbstractClosureExpr>(E))
+      return DC;
+  return nullptr;
+}
+
 SILLocation::DebugLoc SILLocation::decode(SourceLoc Loc,
                                           const SourceManager &SM) {
   DebugLoc DL;
@@ -226,4 +244,34 @@ CleanupLocation CleanupLocation::get(SILLocation L) {
     return CleanupLocation();
   llvm_unreachable("Cannot construct Cleanup loc from the "
                    "given location.");
+}
+
+ReturnLocation::ReturnLocation(ReturnStmt *RS) : SILLocation(RS, ReturnKind) {}
+
+ReturnLocation::ReturnLocation(BraceStmt *BS) : SILLocation(BS, ReturnKind) {}
+
+ReturnStmt *ReturnLocation::get() {
+  return castToASTNode<ReturnStmt>();
+}
+
+ImplicitReturnLocation::ImplicitReturnLocation(AbstractClosureExpr *E)
+  : SILLocation(E, ImplicitReturnKind) { }
+
+ImplicitReturnLocation::ImplicitReturnLocation(ReturnStmt *S)
+  : SILLocation(S, ImplicitReturnKind) { }
+
+ImplicitReturnLocation::ImplicitReturnLocation(AbstractFunctionDecl *AFD)
+  : SILLocation(AFD, ImplicitReturnKind) { }
+
+SILLocation ImplicitReturnLocation::getImplicitReturnLoc(SILLocation L) {
+  assert(L.isASTNode<Expr>() ||
+         L.isASTNode<ValueDecl>() ||
+         L.isASTNode<PatternBindingDecl>() ||
+         (L.isNull() && L.isInTopLevel()));
+  L.setLocationKind(ImplicitReturnKind);
+  return L;
+}
+
+AbstractClosureExpr *ImplicitReturnLocation::get() {
+  return castToASTNode<AbstractClosureExpr>();
 }

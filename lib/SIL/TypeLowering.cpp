@@ -2,34 +2,34 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "libsil"
 #include "swift/AST/AnyFunctionRef.h"
-#include "swift/AST/ArchetypeBuilder.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/CanTypeVisitor.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/Types.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
 #include "clang/AST/Type.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 
 using namespace swift;
@@ -78,7 +78,7 @@ namespace {
       return true;
     }
   };
-}
+} // end anonymous namespace
 
 /// Does the metatype for the given type have a known-singleton
 /// representation?
@@ -88,7 +88,7 @@ static bool hasSingletonMetatype(CanType instanceType) {
 
 CaptureKind TypeConverter::getDeclCaptureKind(CapturedValue capture) {
   auto decl = capture.getDecl();
-  if (VarDecl *var = dyn_cast<VarDecl>(decl)) {
+  if (auto *var = dyn_cast<VarDecl>(decl)) {
     switch (var->getStorageKind()) {
     case VarDecl::StoredWithTrivialAccessors:
       llvm_unreachable("stored local variable with trivial accessors?");
@@ -118,11 +118,23 @@ CaptureKind TypeConverter::getDeclCaptureKind(CapturedValue capture) {
       // If this is a non-address-only stored 'let' constant, we can capture it
       // by value.  If it is address-only, then we can't load it, so capture it
       // by its address (like a var) instead.
-      if (var->isLet() && !getTypeLowering(var->getType()).isAddressOnly())
+      if ((var->isLet() || var->isShared())
+          && (!SILModuleConventions(M).useLoweredAddresses() ||
+              !getTypeLowering(var->getType()).isAddressOnly()))
         return CaptureKind::Constant;
 
-      if (var->getType()->is<InOutType>()) {
+      // In-out parameters are captured by address.
+      if (var->isInOut()) {
         return CaptureKind::StorageAddress;
+      }
+
+      // Reference storage types can appear in a capture list, which means
+      // we might allocate boxes to store the captures. However, those boxes
+      // have the same lifetime as the closure itself, so we must capture
+      // the box itself and not the payload, even if the closure is noescape,
+      // otherwise they will be destroyed when the closure is formed.
+      if (var->getType()->is<ReferenceStorageType>()) {
+        return CaptureKind::Box;
       }
 
       // If we're capturing into a non-escaping closure, we can generally just
@@ -152,7 +164,10 @@ enum class LoweredTypeKind {
   AggWithReference,
 
   /// Non-trivial and not loadable.
-  AddressOnly
+  AddressOnly,
+
+  /// Trivial and not loadable.
+  TrivialAddressOnly
 };
 
 static LoweredTypeKind classifyType(CanType type, SILModule &M,
@@ -178,6 +193,7 @@ namespace {
     //   RetTy handleAddressOnly(CanType);
     //   RetTy handleReference(CanType);
     //   RetTy handleTrivial(CanType);
+    //   RetTy handleTrivialAddressOnly(CanType);
     // In addition, if it does not override visitTupleType
     // and visitAnyStructType, it should also implement:
     //   RetTy handleAggWithReference(CanType);
@@ -225,6 +241,9 @@ namespace {
     }
     RetTy visitInOutType(CanInOutType type) {
       llvm_unreachable("shouldn't get an inout type here");
+    }
+    RetTy visitErrorType(CanErrorType type) {
+      llvm_unreachable("shouldn't get an error type here");
     }
 
     // Dependent types should be contextualized before visiting.
@@ -317,9 +336,22 @@ namespace {
     RetTy visitArchetypeType(CanArchetypeType type) {
       if (type->requiresClass()) {
         return asImpl().handleReference(type);
-      } else {
-        return asImpl().handleAddressOnly(type);
       }
+
+      auto LayoutInfo = type->getLayoutConstraint();
+      if (LayoutInfo) {
+        if (LayoutInfo->isFixedSizeTrivial()) {
+          return asImpl().handleTrivial(type);
+        }
+
+        if (LayoutInfo->isAddressOnlyTrivial()) {
+          return asImpl().handleTrivialAddressOnly(type);
+        }
+
+        if (LayoutInfo->isRefCounted())
+          return asImpl().handleReference(type);
+      }
+      return asImpl().handleAddressOnly(type);
     }
 
     RetTy visitExistentialType(CanType type) {
@@ -338,6 +370,8 @@ namespace {
       case ExistentialRepresentation::Metatype:
         return asImpl().handleTrivial(type);
       }
+
+      llvm_unreachable("Unhandled ExistentialRepresentation in switch.");
     }
     RetTy visitProtocolType(CanProtocolType type) {
       return visitExistentialType(type);
@@ -369,6 +403,8 @@ namespace {
         switch (classifyType(eltType, M, Sig, Expansion)) {
         case LoweredTypeKind::Trivial:
           continue;
+        case LoweredTypeKind::TrivialAddressOnly:
+          return asImpl().handleTrivialAddressOnly(type);
         case LoweredTypeKind::AddressOnly:
           return asImpl().handleAddressOnly(type);
         case LoweredTypeKind::Reference:
@@ -412,9 +448,16 @@ namespace {
     LoweredTypeKind handleAggWithReference(CanType type) {
       return LoweredTypeKind::AggWithReference;
     }
-    LoweredTypeKind handleTrivial(CanType type) {
+    LoweredTypeKind
+    handleTrivial(CanType type) {
       return LoweredTypeKind::Trivial;
     }
+
+    LoweredTypeKind
+    handleTrivialAddressOnly(CanType type) {
+      return LoweredTypeKind::TrivialAddressOnly;
+    }
+
     LoweredTypeKind handleAddressOnly(CanType type) {
       return LoweredTypeKind::AddressOnly;
     }
@@ -448,9 +491,10 @@ namespace {
       // because the rest of type lowering doesn't have a generic
       // signature plumbed through.
       if (Sig && type->hasTypeParameter()) {
-        auto builder = M.getASTContext().getOrCreateArchetypeBuilder(
-            Sig, M.getSwiftModule());
-        type = builder->substDependentType(type)->getCanonicalType();
+        type = Sig->getCanonicalSignature()
+          .getGenericEnvironment(*M.getSwiftModule())
+          ->mapTypeIntoContext(type)
+          ->getCanonicalType();
       }
 
       return type;
@@ -465,11 +509,14 @@ namespace {
       return handleAggWithReference(type);
     }
   };
-}
+} // end anonymous namespace
 
 static LoweredTypeKind classifyType(CanType type, SILModule &M,
                                     CanGenericSignature sig,
                                     ResilienceExpansion expansion) {
+  assert(!type->hasError() &&
+         "Error types should not appear in type-checked AST");
+
   return TypeClassifier(M, sig, expansion).visit(type);
 }
 
@@ -484,18 +531,20 @@ bool SILType::isAddressOnly(CanType type, SILModule &M,
 }
 
 namespace {
-  /// A class for loadable types.
+  /// A class for types that can be loaded and stored in SIL.
+  /// This always include loadable types, but can include address-only types if
+  /// opaque values are passed by value.
   class LoadableTypeLowering : public TypeLowering {
   protected:
     LoadableTypeLowering(SILType type, IsTrivial_t isTrivial,
+                         IsAddressOnly_t isAddressOnly,
                          IsReferenceCounted_t isRefCounted)
-      : TypeLowering(type, isTrivial, IsNotAddressOnly, isRefCounted) {}
+      : TypeLowering(type, isTrivial, isAddressOnly, isRefCounted) {}
 
   public:
     void emitDestroyAddress(SILBuilder &B, SILLocation loc,
                             SILValue addr) const override {
-      SILValue value =
-          B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
+      SILValue value = emitLoad(B, loc, addr, LoadOwnershipQualifier::Take);
       emitDestroyValue(B, loc, value);
     }
 
@@ -516,27 +565,34 @@ namespace {
   class TrivialTypeLowering final : public LoadableTypeLowering {
   public:
     TrivialTypeLowering(SILType type)
-      : LoadableTypeLowering(type, IsTrivial, IsNotReferenceCounted) {}
+      : LoadableTypeLowering(type, IsTrivial, IsNotAddressOnly,
+                             IsNotReferenceCounted) {}
 
     SILValue emitLoadOfCopy(SILBuilder &B, SILLocation loc, SILValue addr,
                             IsTake_t isTake) const override {
-      return B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
+      return emitLoad(B, loc, addr, LoadOwnershipQualifier::Trivial);
     }
 
     void emitStoreOfCopy(SILBuilder &B, SILLocation loc,
                          SILValue value, SILValue addr,
                          IsInitialization_t isInit) const override {
-      B.createStore(loc, value, addr, StoreOwnershipQualifier::Unqualified);
+      emitStore(B, loc, value, addr, StoreOwnershipQualifier::Trivial);
     }
 
     void emitStore(SILBuilder &B, SILLocation loc, SILValue value,
                    SILValue addr, StoreOwnershipQualifier qual) const override {
-      B.createStore(loc, value, addr, StoreOwnershipQualifier::Trivial);
+      if (B.getFunction().hasQualifiedOwnership()) {
+        B.createStore(loc, value, addr, StoreOwnershipQualifier::Trivial);
+        return;
+      }
+      B.createStore(loc, value, addr, StoreOwnershipQualifier::Unqualified);
     }
 
     SILValue emitLoad(SILBuilder &B, SILLocation loc, SILValue addr,
                       LoadOwnershipQualifier qual) const override {
-      return B.createLoad(loc, addr, LoadOwnershipQualifier::Trivial);
+      if (B.getFunction().hasQualifiedOwnership())
+        return B.createLoad(loc, addr, LoadOwnershipQualifier::Trivial);
+      return B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
     }
 
     void emitDestroyAddress(SILBuilder &B, SILLocation loc,
@@ -571,37 +627,63 @@ namespace {
   class NonTrivialLoadableTypeLowering : public LoadableTypeLowering {
   public:
     NonTrivialLoadableTypeLowering(SILType type,
+                                   IsAddressOnly_t isAddressOnly,
                                    IsReferenceCounted_t isRefCounted)
-      : LoadableTypeLowering(type, IsNotTrivial, isRefCounted) {}
+      : LoadableTypeLowering(type, IsNotTrivial, isAddressOnly, isRefCounted) {}
 
     SILValue emitLoadOfCopy(SILBuilder &B, SILLocation loc,
                             SILValue addr, IsTake_t isTake) const override {
-      SILValue value =
-          B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
-      if (!isTake)
-        emitCopyValue(B, loc, value);
-      return value;
+      auto qual =
+          isTake ? LoadOwnershipQualifier::Take : LoadOwnershipQualifier::Copy;
+      return emitLoad(B, loc, addr, qual);
     }
 
     void emitStoreOfCopy(SILBuilder &B, SILLocation loc,
                          SILValue newValue, SILValue addr,
                          IsInitialization_t isInit) const override {
-      SILValue oldValue;
-      if (!isInit)
-        oldValue = B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
-      B.createStore(loc, newValue, addr, StoreOwnershipQualifier::Unqualified);
-      if (!isInit)
-        emitDestroyValue(B, loc, oldValue);
+      auto qual = isInit ? StoreOwnershipQualifier::Init
+                         : StoreOwnershipQualifier::Assign;
+      emitStore(B, loc, newValue, addr, qual);
     }
 
     void emitStore(SILBuilder &B, SILLocation loc, SILValue value,
                    SILValue addr, StoreOwnershipQualifier qual) const override {
-      B.createStore(loc, value, addr, qual);
+      if (B.getFunction().hasQualifiedOwnership()) {
+        B.createStore(loc, value, addr, qual);
+        return;
+      }
+
+      if (qual != StoreOwnershipQualifier::Assign) {
+        B.createStore(loc, value, addr, StoreOwnershipQualifier::Unqualified);
+        return;
+      }
+
+      // If the ownership qualifier is [assign], then we need to eliminate the
+      // old value.
+      //
+      // 1. Load old value.
+      // 2. Store new value.
+      // 3. Release old value.
+      SILValue old =
+          B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
+      B.createStore(loc, value, addr, StoreOwnershipQualifier::Unqualified);
+      B.emitDestroyValueOperation(loc, old);
     }
 
     SILValue emitLoad(SILBuilder &B, SILLocation loc, SILValue addr,
                       LoadOwnershipQualifier qual) const override {
-      return B.createLoad(loc, addr, qual);
+      if (B.getFunction().hasQualifiedOwnership())
+        return B.createLoad(loc, addr, qual);
+
+      SILValue loadValue =
+          B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
+
+      // If we do not have a copy, just return the value...
+      if (qual != LoadOwnershipQualifier::Copy)
+        return loadValue;
+
+      // Otherwise, emit the copy value operation.
+      return B.emitCopyValueOperation(loc, loadValue);
     }
   };
 
@@ -638,6 +720,7 @@ namespace {
   public:
     LoadableAggTypeLowering(CanType type)
       : NonTrivialLoadableTypeLowering(SILType::getPrimitiveObjectType(type),
+                                       IsNotAddressOnly,
                                        IsNotReferenceCounted) {
     }
 
@@ -690,7 +773,7 @@ namespace {
                            SILValue value) const override {
       if (B.getFunction().hasQualifiedOwnership())
         return B.createCopyValue(loc, value);
-      B.createRetainValue(loc, value, Atomicity::Atomic);
+      B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
     }
 
@@ -718,7 +801,7 @@ namespace {
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue aggValue) const override {
       if (B.getFunction().hasQualifiedOwnership()) {
-        B.emitDestroyValueAndFold(loc, aggValue);
+        B.createDestroyValue(loc, aggValue);
         return;
       }
 
@@ -816,13 +899,14 @@ namespace {
   public:
     LoadableEnumTypeLowering(CanType type)
       : NonTrivialLoadableTypeLowering(SILType::getPrimitiveObjectType(type),
+                                       IsNotAddressOnly,
                                        IsNotReferenceCounted) {}
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
       if (B.getFunction().hasQualifiedOwnership())
         return B.createCopyValue(loc, value);
-      B.createRetainValue(loc, value, Atomicity::Atomic);
+      B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
     }
 
@@ -831,14 +915,14 @@ namespace {
                                   LoweringStyle style) const override {
       if (B.getFunction().hasQualifiedOwnership())
         return B.createCopyValue(loc, value);
-      B.createRetainValue(loc, value, Atomicity::Atomic);
+      B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
     }
 
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue value) const override {
       if (B.getFunction().hasQualifiedOwnership()) {
-        B.emitDestroyValueAndFold(loc, value);
+        B.createDestroyValue(loc, value);
         return;
       }
       B.emitReleaseValueAndFold(loc, value);
@@ -850,7 +934,7 @@ namespace {
              "This method should never be called when performing a shallow "
              "destroy value.");
       if (B.getFunction().hasQualifiedOwnership()) {
-        B.emitDestroyValueAndFold(loc, value);
+        B.createDestroyValue(loc, value);
         return;
       }
       B.emitReleaseValueAndFold(loc, value);
@@ -859,8 +943,10 @@ namespace {
 
   class LeafLoadableTypeLowering : public NonTrivialLoadableTypeLowering {
   public:
-    LeafLoadableTypeLowering(SILType type, IsReferenceCounted_t isRefCounted)
-      : NonTrivialLoadableTypeLowering(type, isRefCounted) {}
+    LeafLoadableTypeLowering(SILType type,
+                             IsAddressOnly_t isAddressOnly,
+                             IsReferenceCounted_t isRefCounted)
+      : NonTrivialLoadableTypeLowering(type, isAddressOnly, isRefCounted) {}
 
     SILValue emitLoweredCopyValue(SILBuilder &B, SILLocation loc,
                                   SILValue value,
@@ -879,7 +965,7 @@ namespace {
   class ReferenceTypeLowering : public LeafLoadableTypeLowering {
   public:
     ReferenceTypeLowering(SILType type)
-      : LeafLoadableTypeLowering(type, IsReferenceCounted) {}
+      : LeafLoadableTypeLowering(type, IsNotAddressOnly, IsReferenceCounted) {}
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
@@ -889,14 +975,14 @@ namespace {
       if (B.getFunction().hasQualifiedOwnership())
         return B.createCopyValue(loc, value);
 
-      B.createStrongRetain(loc, value, Atomicity::Atomic);
+      B.createStrongRetain(loc, value, B.getDefaultAtomicity());
       return value;
     }
 
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue value) const override {
       if (B.getFunction().hasQualifiedOwnership()) {
-        B.emitDestroyValueAndFold(loc, value);
+        B.createDestroyValue(loc, value);
         return;
       }
       B.emitStrongReleaseAndFold(loc, value);
@@ -907,14 +993,14 @@ namespace {
   class LoadableUnownedTypeLowering final : public LeafLoadableTypeLowering {
   public:
     LoadableUnownedTypeLowering(SILType type)
-      : LeafLoadableTypeLowering(type, IsReferenceCounted) {}
+      : LeafLoadableTypeLowering(type, IsNotAddressOnly, IsReferenceCounted) {}
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
       if (B.getFunction().hasQualifiedOwnership())
         return B.createCopyValue(loc, value);
 
-      B.createUnownedRetain(loc, value, Atomicity::Atomic);
+      B.createUnownedRetain(loc, value, B.getDefaultAtomicity());
       return value;
     }
 
@@ -924,7 +1010,7 @@ namespace {
         B.createDestroyValue(loc, value);
         return;
       }
-      B.createUnownedRelease(loc, value, Atomicity::Atomic);
+      B.createUnownedRelease(loc, value, B.getDefaultAtomicity());
     }
   };
 
@@ -1018,6 +1104,111 @@ namespace {
     }
   };
 
+  /// Lower address only types as opaque values.
+  ///
+  /// Opaque values behave like loadable leaf types in SIL.
+  ///
+  /// FIXME: When you remove an unreachable, just delete the method.
+  class OpaqueValueTypeLowering : public LeafLoadableTypeLowering {
+  public:
+    OpaqueValueTypeLowering(SILType type)
+      : LeafLoadableTypeLowering(type, IsAddressOnly, IsReferenceCounted) {}
+
+    void emitCopyInto(SILBuilder &B, SILLocation loc,
+                      SILValue src, SILValue dest, IsTake_t isTake,
+                      IsInitialization_t isInit) const override {
+      llvm_unreachable("copy into");
+    }
+
+    // --- Same as LeafLoadableTypeLowering.
+
+    SILValue emitLoweredCopyValue(SILBuilder &B, SILLocation loc,
+                                  SILValue value,
+                                  LoweringStyle style) const override {
+      llvm_unreachable("lowered copy");
+    }
+
+    void emitLoweredDestroyValue(SILBuilder &B, SILLocation loc, SILValue value,
+                                 LoweringStyle style) const override {
+      llvm_unreachable("destroy value");
+    }
+
+    SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
+                           SILValue value) const override {
+      return B.createCopyValue(loc, value);
+    }
+
+    void emitDestroyValue(SILBuilder &B, SILLocation loc,
+                          SILValue value) const override {
+      B.createDestroyValue(loc, value);
+    }
+  };
+
+  /// A class for trivial, address-only types.
+  class AddressOnlyTrivialTypeLowering : public TypeLowering {
+  public:
+    AddressOnlyTrivialTypeLowering(SILType type)
+      : TypeLowering(type, IsTrivial, IsAddressOnly, IsNotReferenceCounted)
+    {}
+
+    void emitCopyInto(SILBuilder &B, SILLocation loc,
+                      SILValue src, SILValue dest, IsTake_t isTake,
+                      IsInitialization_t isInit) const override {
+      B.createCopyAddr(loc, src, dest, isTake, isInit);
+    }
+
+    SILValue emitLoadOfCopy(SILBuilder &B, SILLocation loc,
+                            SILValue addr, IsTake_t isTake) const override {
+      llvm_unreachable("calling emitLoadOfCopy on non-loadable type");
+    }
+
+    void emitStoreOfCopy(SILBuilder &B, SILLocation loc,
+                         SILValue newValue, SILValue addr,
+                         IsInitialization_t isInit) const override {
+      llvm_unreachable("calling emitStoreOfCopy on non-loadable type");
+    }
+
+    void emitStore(SILBuilder &B, SILLocation loc, SILValue value,
+                   SILValue addr, StoreOwnershipQualifier qual) const override {
+      llvm_unreachable("calling emitStore on non-loadable type");
+    }
+
+    SILValue emitLoad(SILBuilder &B, SILLocation loc, SILValue addr,
+                      LoadOwnershipQualifier qual) const override {
+      llvm_unreachable("calling emitLoad on non-loadable type");
+    }
+
+    void emitDestroyAddress(SILBuilder &B, SILLocation loc,
+                            SILValue addr) const override {
+    }
+
+    void emitDestroyRValue(SILBuilder &B, SILLocation loc,
+                           SILValue value) const override {
+    }
+
+    SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
+                           SILValue value) const override {
+      llvm_unreachable("type is not loadable!");
+    }
+
+    SILValue emitLoweredCopyValue(SILBuilder &B, SILLocation loc,
+                                  SILValue value,
+                                  LoweringStyle style) const override {
+      llvm_unreachable("type is not loadable!");
+    }
+
+    void emitDestroyValue(SILBuilder &B, SILLocation loc,
+                          SILValue value) const override {
+      llvm_unreachable("type is not loadable!");
+    }
+
+    void emitLoweredDestroyValue(SILBuilder &B, SILLocation loc, SILValue value,
+                                 LoweringStyle style) const override {
+      llvm_unreachable("type is not loadable!");
+    }
+  };
+
+
   /// Build the appropriate TypeLowering subclass for the given type,
   /// which is assumed to already have been lowered.
   class LowerType
@@ -1031,19 +1222,30 @@ namespace {
       : TypeClassifierBase(TC.M, Sig, Expansion),
         TC(TC), Dependent(Dependent) {}
 
-    const TypeLowering *handleTrivial(CanType type) {
+    const TypeLowering *
+    handleTrivial(CanType type) {
       auto silType = SILType::getPrimitiveObjectType(type);
       return new (TC, Dependent) TrivialTypeLowering(silType);
     }
-  
+
+    const TypeLowering *
+    handleTrivialAddressOnly(CanType type) {
+      auto silType = SILType::getPrimitiveObjectType(type);
+      return new (TC, Dependent) AddressOnlyTrivialTypeLowering(silType);
+    }
+
     const TypeLowering *handleReference(CanType type) {
       auto silType = SILType::getPrimitiveObjectType(type);
       return new (TC, Dependent) ReferenceTypeLowering(silType);
     }
 
     const TypeLowering *handleAddressOnly(CanType type) {
-      auto silType = SILType::getPrimitiveAddressType(type);
-      return new (TC, Dependent) AddressOnlyTypeLowering(silType);
+      if (SILModuleConventions(M).useLoweredAddresses()) {
+        auto silType = SILType::getPrimitiveAddressType(type);
+        return new (TC, Dependent) AddressOnlyTypeLowering(silType);
+      }
+      auto silType = SILType::getPrimitiveObjectType(type);
+      return new (TC, Dependent) OpaqueValueTypeLowering(silType);
     }
 
     const TypeLowering *
@@ -1088,6 +1290,7 @@ namespace {
           structType->getTypeOfMember(D->getModuleContext(), field, nullptr);
         switch (classifyType(substFieldType->getCanonicalType(),
                              M, Sig, Expansion)) {
+        case LoweredTypeKind::TrivialAddressOnly:
         case LoweredTypeKind::AddressOnly:
           return handleAddressOnly(structType);
         case LoweredTypeKind::AggWithReference:
@@ -1124,7 +1327,7 @@ namespace {
       bool trivial = true;
       for (auto elt : D->getAllElements()) {
         // No-payload elements do not affect address-only-ness.
-        if (!elt->hasArgumentType())
+        if (!elt->hasAssociatedValues())
           continue;
 
         // Indirect elements make the type nontrivial, but don't affect
@@ -1135,12 +1338,12 @@ namespace {
         }
         
         auto substEltType = enumType->getTypeOfMember(
-                              D->getModuleContext(),
-                              elt, nullptr,
+                              D->getModuleContext(), elt,
                               elt->getArgumentInterfaceType())
           ->getCanonicalType();
         
         switch (classifyType(substEltType, M, Sig, Expansion)) {
+        case LoweredTypeKind::TrivialAddressOnly:
         case LoweredTypeKind::AddressOnly:
           return handleAddressOnly(enumType);
         case LoweredTypeKind::AggWithReference:
@@ -1157,7 +1360,7 @@ namespace {
       return new (TC, Dependent) LoadableEnumTypeLowering(enumType);
     }
   };
-}
+} // end anonymous namespace
 
 TypeConverter::TypeConverter(SILModule &m)
   : M(m), Context(m.getASTContext()) {
@@ -1178,18 +1381,28 @@ TypeConverter::~TypeConverter() {
 
 void *TypeLowering::operator new(size_t size, TypeConverter &tc,
                                  IsDependent_t dependent) {
-  return dependent
-    ? tc.DependentBPA.Allocate(size, alignof(TypeLowering))
-    : tc.IndependentBPA.Allocate(size, alignof(TypeLowering));
+  if (dependent) {
+    auto &state = tc.DependentTypes.back();
+    return state.BPA.Allocate(size, alignof(TypeLowering&));
+  }
+  return tc.IndependentBPA.Allocate(size, alignof(TypeLowering&));
 }
 
 const TypeLowering *TypeConverter::find(TypeKey k) {
   if (!k.isCacheable()) return nullptr;
 
-  auto &Types = k.isDependent() ? DependentTypes : IndependentTypes;
   auto ck = k.getCachingKey();
-  auto found = Types.find(ck);
-  if (found == Types.end())
+
+  llvm::DenseMap<CachingTypeKey, const TypeLowering *> *types;
+  if (k.isDependent()) {
+    auto &state = DependentTypes.back();
+    types = &state.Map;
+  } else {
+    types = &IndependentTypes;
+  }
+
+  auto found = types->find(ck);
+  if (found == types->end())
     return nullptr;
 
   assert(found->second && "type recursion not caught in Sema");
@@ -1199,34 +1412,16 @@ const TypeLowering *TypeConverter::find(TypeKey k) {
 void TypeConverter::insert(TypeKey k, const TypeLowering *tl) {
   if (!k.isCacheable()) return;
 
-  auto &Types = k.isDependent() ? DependentTypes : IndependentTypes;
+  llvm::DenseMap<CachingTypeKey, const TypeLowering *> *types;
+  if (k.isDependent()) {
+    auto &state = DependentTypes.back();
+    types = &state.Map;
+  } else {
+    types = &IndependentTypes;
+  }
 
-  Types[k.getCachingKey()] = tl;
+  (*types)[k.getCachingKey()] = tl;
 }
-
-#ifndef NDEBUG
-/// Is this type a lowered type?
-static bool isLoweredType(CanType type) {
-  if (isa<LValueType>(type) || isa<InOutType>(type))
-    return false;
-  if (isa<AnyFunctionType>(type))
-    return false;
-  if (auto tuple = dyn_cast<TupleType>(type)) {
-    for (auto elt : tuple.getElementTypes())
-      if (!isLoweredType(elt))
-        return false;
-    return true;
-  }
-  OptionalTypeKind optKind;
-  if (auto objectType = type.getAnyOptionalObjectType(optKind)) {
-    return (optKind == OTK_Optional && isLoweredType(objectType));
-  }
-  if (auto meta = dyn_cast<AnyMetatypeType>(type)) {
-    return meta->hasRepresentation();
-  }
-  return true;
-}
-#endif
 
 /// Lower each of the elements of the substituted type according to
 /// the abstraction pattern of the given original type.
@@ -1247,20 +1442,14 @@ static CanTupleType getLoweredTupleType(TypeConverter &tc,
 
     assert(!isa<LValueType>(substEltType) &&
            "lvalue types cannot exist in function signatures");
-
-    CanType loweredSubstEltType;
-    if (auto substLV = dyn_cast<InOutType>(substEltType)) {
-      SILType silType = tc.getLoweredType(origType.getLValueObjectType(),
-                                          substLV.getObjectType());
-      loweredSubstEltType = CanInOutType::get(silType.getSwiftRValueType());
-
-    } else {
-      // If the original type was an archetype, use that archetype as
-      // the original type of the element --- the actual archetype
-      // doesn't matter, just the abstraction pattern.
-      SILType silType = tc.getLoweredType(origEltType, substEltType);
-      loweredSubstEltType = silType.getSwiftRValueType();
-    }
+    assert(!isa<InOutType>(substEltType) &&
+           "inout cannot appear in tuple element type here");
+    
+    // If the original type was an archetype, use that archetype as
+    // the original type of the element --- the actual archetype
+    // doesn't matter, just the abstraction pattern.
+    SILType silType = tc.getLoweredType(origEltType, substEltType);
+    CanType loweredSubstEltType = silType.getSwiftRValueType();
 
     changed = (changed || substEltType != loweredSubstEltType);
 
@@ -1312,20 +1501,18 @@ static CanType getLoweredReferenceStorageType(TypeConverter &tc,
 
 CanSILFunctionType
 TypeConverter::getSILFunctionType(AbstractionPattern origType,
-                                  CanAnyFunctionType substType,
-                                  unsigned uncurryLevel) {
-  return getLoweredType(origType, substType, uncurryLevel)
+                                  CanFunctionType substType) {
+  return getLoweredType(origType, substType)
            .castTo<SILFunctionType>();
 }
 
 const TypeLowering &
 TypeConverter::getTypeLowering(AbstractionPattern origType,
-                               Type origSubstType,
-                               unsigned uncurryLevel) {
+                               Type origSubstType) {
   CanType substType = origSubstType->getCanonicalType();
-  auto key = getTypeKey(origType, substType, uncurryLevel);
+  auto key = getTypeKey(origType, substType);
   
-  assert((!key.isDependent() || CurGenericContext)
+  assert((!key.isDependent() || getCurGenericContext())
          && "dependent type outside of generic context?!");
   
   if (auto existing = find(key))
@@ -1335,11 +1522,11 @@ TypeConverter::getTypeLowering(AbstractionPattern origType,
   // completely removed and represented as 'address' SILTypes.
   if (isa<InOutType>(substType)) {
     // Derive SILType for InOutType from the object type.
-    CanType substObjectType = substType.getLValueOrInOutObjectType();
-    AbstractionPattern origObjectType = origType.getLValueObjectType();
+    CanType substObjectType = substType.getWithoutSpecifierType();
+    AbstractionPattern origObjectType = origType.getWithoutSpecifierType();
 
-    SILType loweredType = getLoweredType(origObjectType, substObjectType,
-                                         uncurryLevel).getAddressType();
+    SILType loweredType = getLoweredType(origObjectType, substObjectType)
+      .getAddressType();
 
     auto *theInfo = new (*this, key.isDependent())
       TrivialTypeLowering(loweredType);
@@ -1349,7 +1536,7 @@ TypeConverter::getTypeLowering(AbstractionPattern origType,
 
   // Lower the type.
   CanType loweredSubstType =
-    getLoweredRValueType(origType, substType, uncurryLevel);
+    getLoweredRValueType(origType, substType);
 
   // If that didn't change the type and the key is cacheable, there's no
   // point in re-checking the table, so just construct a type lowering
@@ -1362,8 +1549,8 @@ TypeConverter::getTypeLowering(AbstractionPattern origType,
   // SILType-based lookup path for the type we just lowered to, then cache
   // that same result at this key if possible.
   AbstractionPattern origTypeForCaching =
-    AbstractionPattern(CurGenericContext, loweredSubstType);
-  auto loweredKey = getTypeKey(origTypeForCaching, loweredSubstType, 0);
+    AbstractionPattern(getCurGenericContext(), loweredSubstType);
+  auto loweredKey = getTypeKey(origTypeForCaching, loweredSubstType);
 
   auto &lowering = getTypeLoweringForLoweredType(loweredKey);
   insert(key, &lowering);
@@ -1371,41 +1558,37 @@ TypeConverter::getTypeLowering(AbstractionPattern origType,
 }
 
 CanType TypeConverter::getLoweredRValueType(AbstractionPattern origType,
-                                            CanType substType,
-                                            unsigned uncurryLevel) {
+                                            CanType substType) {
+  assert(!substType->hasError() &&
+         "Error types should not appear in type-checked AST");
+
   // AST function types are turned into SIL function types:
   //   - the type is uncurried as desired
   //   - types are turned into their unbridged equivalents, depending
   //     on the abstract CC
   //   - ownership conventions are deduced
   if (auto substFnType = dyn_cast<AnyFunctionType>(substType)) {
-    // First, lower at the AST level by uncurrying and substituting
-    // bridged types.
-    auto substLoweredType =
-      getLoweredASTFunctionType(substFnType, uncurryLevel, None);    
+    // If the formal type uses a C convention, it is not formally
+    // abstractable, and it may be subject to implicit bridging.
+    auto extInfo = substFnType->getExtInfo();
+    if (getSILFunctionLanguage(extInfo.getSILRepresentation())
+          == SILFunctionLanguage::C) {
+      // Bridge the parameters and result of the function type.
+      auto bridgedFnType = getBridgedFunctionType(origType, substFnType,
+                                                  extInfo);
+      substFnType = bridgedFnType;
 
-    AbstractionPattern origLoweredType = [&] {
-      if (origType.isExactType(substType)) {
-        return AbstractionPattern(origType.getGenericSignature(),
-                                  substLoweredType);
-      } else if (origType.isTypeParameter()) {
-        return origType;
+      // Also rewrite the type of the abstraction pattern.
+      auto signature = getCurGenericContext();
+      if (origType.isTypeParameter()) {
+        origType = AbstractionPattern(signature, bridgedFnType);
       } else {
-        auto origFnType = cast<AnyFunctionType>(origType.getType());
-        return AbstractionPattern(origType.getGenericSignature(),
-                                  getLoweredASTFunctionType(origFnType,
-                                                            uncurryLevel,
-                                                            None));
+        origType.rewriteType(signature, bridgedFnType);
       }
-    }();
+    }
 
-    CanType silFnType =
-      getNativeSILFunctionType(M, origLoweredType, substLoweredType);
-
-    return silFnType;
+    return getNativeSILFunctionType(M, origType, substFnType);
   }
-
-  assert(uncurryLevel == 0);
 
   // Ignore dynamic self types.
   if (auto selfType = dyn_cast<DynamicSelfType>(substType)) {
@@ -1441,12 +1624,7 @@ CanType TypeConverter::getLoweredRValueType(AbstractionPattern origType,
     }
     
     CanType instanceType = substMeta.getInstanceType();
-    // If this is a DynamicSelf metatype, turn it into a metatype of the
-    // underlying self type.
-    if (auto dynamicSelf = dyn_cast<DynamicSelfType>(instanceType)) {
-      instanceType = dynamicSelf.getSelfType();
-    }
-    
+
     // Regardless of thinness, metatypes are always trivial.
     return CanMetatypeType::get(instanceType, repr);
   }
@@ -1486,7 +1664,7 @@ CanType TypeConverter::getLoweredRValueType(AbstractionPattern origType,
 const TypeLowering &TypeConverter::getTypeLowering(SILType type) {
   auto loweredType = type.getSwiftRValueType();
   auto key = getTypeKey(AbstractionPattern(getCurGenericContext(), loweredType),
-                        loweredType, 0);
+                        loweredType);
 
   return getTypeLoweringForLoweredType(key);
 }
@@ -1494,7 +1672,7 @@ const TypeLowering &TypeConverter::getTypeLowering(SILType type) {
 const TypeLowering &
 TypeConverter::getTypeLoweringForLoweredType(TypeKey key) {
   auto type = key.SubstType;
-  assert(isLoweredType(type) && "type is not lowered!");
+  assert(type->isLegalSILType() && "type is not lowered!");
   (void)type;
 
   // Re-using uncurry level 0 is reasonable because our uncurrying
@@ -1511,7 +1689,7 @@ TypeConverter::getTypeLoweringForLoweredType(TypeKey key) {
 const TypeLowering &
 TypeConverter::getTypeLoweringForUncachedLoweredType(TypeKey key) {
   assert(!find(key) && "re-entrant or already cached");
-  assert(isLoweredType(key.SubstType) && "type is not already lowered");
+  assert(key.SubstType->isLegalSILType() && "type is not already lowered");
 
 #ifndef NDEBUG
   // Catch reentrancy bugs.
@@ -1549,63 +1727,49 @@ static CanAnyFunctionType getGlobalGetterType(CanType varType) {
 static CanAnyFunctionType getDefaultArgGeneratorInterfaceType(
                                                      TypeConverter &TC,
                                                      AbstractFunctionDecl *AFD,
-                                                     unsigned DefaultArgIndex,
-                                                     ASTContext &context) {
-  auto resultTy = AFD->getDefaultArg(DefaultArgIndex).second->getCanonicalType();
+                                                     unsigned DefaultArgIndex) {
+  auto resultTy = AFD->getDefaultArg(DefaultArgIndex).second;
   assert(resultTy && "Didn't find default argument?");
-  
+
+  // The result type might be written in terms of type parameters
+  // that have been made fully concrete.
+  CanType canResultTy = resultTy->getCanonicalType(
+      AFD->getGenericSignature(),
+      *TC.M.getSwiftModule());
+
   // Get the generic signature from the surrounding context.
   auto funcInfo = TC.getConstantInfo(SILDeclRef(AFD));
-  CanGenericSignature sig;
-  if (auto genTy = funcInfo.FormalInterfaceType->getAs<GenericFunctionType>()) {
-    sig = genTy->getGenericSignature()->getCanonicalSignature();
-    resultTy = ArchetypeBuilder::mapTypeOutOfContext(
-        TC.M.getSwiftModule(),
-        funcInfo.GenericEnv,
-        resultTy)->getCanonicalType();
-  }
-  
-  if (sig)
-    return CanGenericFunctionType::get(sig,
-                                       TupleType::getEmpty(context),
-                                       resultTy,
-                                       AnyFunctionType::ExtInfo());
-  
-  return CanFunctionType::get(TupleType::getEmpty(context), resultTy);
+  return CanAnyFunctionType::get(funcInfo.FormalType.getOptGenericSignature(),
+                                 TupleType::getEmpty(TC.Context),
+                                 canResultTy);
 }
 
 /// Get the type of a stored property initializer, () -> T.
 static CanAnyFunctionType getStoredPropertyInitializerInterfaceType(
                                                      TypeConverter &TC,
-                                                     VarDecl *VD,
-                                                     ASTContext &context) {
+                                                     VarDecl *VD) {
   auto *DC = VD->getDeclContext();
   CanType resultTy =
-      ArchetypeBuilder::mapTypeOutOfContext(
-          DC, VD->getParentInitializer()->getType())
+      DC->mapTypeOutOfContext(VD->getParentPattern()->getType())
           ->getCanonicalType();
-  GenericSignature *sig = DC->getGenericSignatureOfContext();
+  auto sig = TC.getEffectiveGenericSignature(DC);
 
-  if (sig)
-    return CanGenericFunctionType::get(sig->getCanonicalSignature(),
-                                       TupleType::getEmpty(context),
-                                       resultTy,
-                                       GenericFunctionType::ExtInfo());
-  
-  return CanFunctionType::get(TupleType::getEmpty(context), resultTy);
+  return CanAnyFunctionType::get(sig, TupleType::getEmpty(TC.Context),
+                                 resultTy);
 }
 
 /// Get the type of a destructor function.
-static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
+static CanAnyFunctionType getDestructorInterfaceType(TypeConverter &TC,
+                                                     DestructorDecl *dd,
                                                      bool isDeallocating,
-                                                     ASTContext &C,
                                                      bool isForeign) {
   auto classType = dd->getDeclContext()->getDeclaredInterfaceType()
-                     ->getCanonicalType();
+    ->getCanonicalType(dd->getGenericSignatureOfContext(),
+                       *TC.M.getSwiftModule());
 
   assert((!isForeign || isDeallocating)
          && "There are no foreign destroying destructors");
-  AnyFunctionType::ExtInfo extInfo =
+  auto extInfo =
             AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
                                      /*throws*/ false);
   if (isForeign)
@@ -1615,27 +1779,27 @@ static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
     extInfo = extInfo
       .withSILRepresentation(SILFunctionTypeRepresentation::Method);
 
-  CanType resultTy = isDeallocating? TupleType::getEmpty(C)->getCanonicalType()
-                                   : C.TheNativeObjectType;
+  auto &C = TC.Context;
+  CanType resultTy = (isDeallocating
+                      ? TupleType::getEmpty(C)
+                      : C.TheNativeObjectType);
 
-  auto sig = dd->getDeclContext()->getGenericSignatureOfContext();
-  if (sig)
-    return cast<GenericFunctionType>(
-      GenericFunctionType::get(sig, classType, resultTy, extInfo)
-      ->getCanonicalType());
-  return CanFunctionType::get(classType, resultTy, extInfo);
+  auto sig = TC.getEffectiveGenericSignature(dd);
+  return CanAnyFunctionType::get(sig, classType, resultTy, extInfo);
 }
 
 /// Retrieve the type of the ivar initializer or destroyer method for
 /// a class.
-static CanAnyFunctionType getIVarInitDestroyerInterfaceType(ClassDecl *cd,
+static CanAnyFunctionType getIVarInitDestroyerInterfaceType(TypeConverter &TC,
+                                                            ClassDecl *cd,
                                                             bool isObjC,
-                                                            ASTContext &ctx,
                                                             bool isDestroyer) {
-  auto classType = cd->getDeclaredInterfaceType()->getCanonicalType();
+  auto classType = cd->getDeclaredInterfaceType()
+    ->getCanonicalType(cd->getGenericSignatureOfContext(),
+                       *TC.M.getSwiftModule());
 
-  auto emptyTupleTy = TupleType::getEmpty(ctx)->getCanonicalType();
-  CanType resultType = isDestroyer? emptyTupleTy : classType;
+  CanType emptyTupleTy = TupleType::getEmpty(TC.Context);
+  auto resultType = (isDestroyer ? emptyTupleTy : classType);
   auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
                                           /*throws*/ false);
   extInfo = extInfo
@@ -1643,12 +1807,8 @@ static CanAnyFunctionType getIVarInitDestroyerInterfaceType(ClassDecl *cd,
                            : SILFunctionTypeRepresentation::Method);
 
   resultType = CanFunctionType::get(emptyTupleTy, resultType, extInfo);
-  auto sig = cd->getGenericSignatureOfContext();
-  if (sig)
-    return CanGenericFunctionType::get(sig->getCanonicalSignature(),
-                                       classType, resultType,
-                                       extInfo);
-  return CanFunctionType::get(classType, resultType, extInfo);
+  auto sig = TC.getEffectiveGenericSignature(cd);
+  return CanAnyFunctionType::get(sig, classType, resultType, extInfo);
 }
 
 GenericEnvironment *
@@ -1663,6 +1823,17 @@ TypeConverter::getEffectiveGenericEnvironment(AnyFunctionRef fn,
 }
 
 CanGenericSignature
+TypeConverter::getEffectiveGenericSignature(DeclContext *dc) {
+  if (auto sig = dc->getGenericSignatureOfContext()) {
+    if (sig->areAllParamsConcrete())
+      return nullptr;
+    return sig->getCanonicalSignature();
+  }
+
+  return nullptr;
+}
+
+CanGenericSignature
 TypeConverter::getEffectiveGenericSignature(AnyFunctionRef fn,
                                             CaptureInfo captureInfo) {
   auto dc = fn.getAsDeclContext();
@@ -1671,13 +1842,7 @@ TypeConverter::getEffectiveGenericSignature(AnyFunctionRef fn,
       !captureInfo.hasGenericParamCaptures())
     return nullptr;
 
-  if (auto sig = dc->getGenericSignatureOfContext()) {
-    if (sig->areAllParamsConcrete())
-      return nullptr;
-    return sig->getCanonicalSignature();
-  }
-
-  return nullptr;
+  return getEffectiveGenericSignature(dc);
 }
 
 CanAnyFunctionType
@@ -1694,58 +1859,12 @@ TypeConverter::getFunctionInterfaceTypeWithCaptures(CanAnyFunctionType funcType,
   auto innerExtInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
                                                funcType->throws());
 
-  // If we don't have any local captures (including function captures),
-  // there's no context to apply.
-  if (!hasLoweredLocalCaptures(theClosure)) {
-    if (!genericSig)
-      return CanFunctionType::get(funcType.getInput(),
-                                  funcType.getResult(),
-                                  innerExtInfo);
-    
-    return CanGenericFunctionType::get(genericSig,
-                                       funcType.getInput(),
-                                       funcType.getResult(),
-                                       innerExtInfo);
-  }
-
-  // Strip the generic signature off the inner type; we will add it to the
-  // outer type with captures.
-  funcType = CanFunctionType::get(funcType.getInput(),
-                                  funcType.getResult(),
-                                  innerExtInfo);
-
-  // Add an extra empty tuple level to represent the captures. We'll append the
-  // lowered capture types here.
-  auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
-                                          /*throws*/ false);
-
-  if (genericSig) {
-    return CanGenericFunctionType::get(genericSig,
-                                       Context.TheEmptyTupleType, funcType,
-                                       extInfo);
-  }
-  
-  return CanFunctionType::get(Context.TheEmptyTupleType, funcType, extInfo);
-}
-
-/// Replace any DynamicSelf types with their underlying Self type.
-static Type replaceDynamicSelfWithSelf(Type t) {
-  return t.transform([](Type type) -> Type {
-    if (auto dynamicSelf = type->getAs<DynamicSelfType>())
-      return dynamicSelf->getSelfType();
-    return type;
-  });
-}
-
-/// Replace any DynamicSelf types with their underlying Self type.
-static CanType replaceDynamicSelfWithSelf(CanType t) {
-  if (!t->hasDynamicSelfType())
-    return t;
-  return replaceDynamicSelfWithSelf(Type(t))->getCanonicalType();
+  return CanAnyFunctionType::get(genericSig, funcType.getParams(),
+                                 funcType.getResult(), innerExtInfo);
 }
 
 CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
-  ValueDecl *vd = c.loc.dyn_cast<ValueDecl *>();
+  auto *vd = c.loc.dyn_cast<ValueDecl *>();
 
   switch (c.kind) {
   case SILDeclRef::Kind::Func: {
@@ -1753,15 +1872,14 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
       // FIXME: Closures could have an interface type computed by Sema.
       auto funcTy = cast<AnyFunctionType>(ACE->getType()->getCanonicalType());
       funcTy = cast<AnyFunctionType>(
-          ArchetypeBuilder::mapTypeOutOfContext(ACE->getParent(), funcTy)
+          ACE->mapTypeOutOfContext(funcTy)
               ->getCanonicalType());
       return getFunctionInterfaceTypeWithCaptures(funcTy, ACE);
     }
 
     FuncDecl *func = cast<FuncDecl>(vd);
     auto funcTy = cast<AnyFunctionType>(
-                                  func->getInterfaceType()->getCanonicalType());
-    funcTy = cast<AnyFunctionType>(replaceDynamicSelfWithSelf(funcTy));
+        func->getInterfaceType()->eraseDynamicSelfType()->getCanonicalType());
     return getFunctionInterfaceTypeWithCaptures(funcTy, func);
   }
 
@@ -1784,10 +1902,10 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
 
   case SILDeclRef::Kind::Destroyer:
   case SILDeclRef::Kind::Deallocator:
-    return getDestructorInterfaceType(cast<DestructorDecl>(vd),
-                             c.kind == SILDeclRef::Kind::Deallocator,
-                             Context,
-                             c.isForeign);
+    return getDestructorInterfaceType(*this,
+                                      cast<DestructorDecl>(vd),
+                                      c.kind == SILDeclRef::Kind::Deallocator,
+                                      c.isForeign);
   
   case SILDeclRef::Kind::GlobalAccessor: {
     VarDecl *var = cast<VarDecl>(vd);
@@ -1804,24 +1922,27 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
   case SILDeclRef::Kind::DefaultArgGenerator:
     return getDefaultArgGeneratorInterfaceType(*this,
                                                cast<AbstractFunctionDecl>(vd),
-                                               c.defaultArgIndex, Context);
+                                               c.defaultArgIndex);
   case SILDeclRef::Kind::StoredPropertyInitializer:
     return getStoredPropertyInitializerInterfaceType(*this,
-                                                     cast<VarDecl>(vd),
-                                                     Context);
+                                                     cast<VarDecl>(vd));
   case SILDeclRef::Kind::IVarInitializer:
-    return getIVarInitDestroyerInterfaceType(cast<ClassDecl>(vd),
-                                             c.isForeign, Context, false);
+    return getIVarInitDestroyerInterfaceType(*this,
+                                             cast<ClassDecl>(vd),
+                                             c.isForeign, false);
   case SILDeclRef::Kind::IVarDestroyer:
-    return getIVarInitDestroyerInterfaceType(cast<ClassDecl>(vd),
-                                             c.isForeign, Context, true);
+    return getIVarInitDestroyerInterfaceType(*this,
+                                             cast<ClassDecl>(vd),
+                                             c.isForeign, true);
   }
+
+  llvm_unreachable("Unhandled SILDeclRefKind in switch.");
 }
 
 /// Get the generic environment for an entity.
 GenericEnvironment *
 TypeConverter::getConstantGenericEnvironment(SILDeclRef c) {
-  ValueDecl *vd = c.loc.dyn_cast<ValueDecl *>();
+  auto *vd = c.loc.dyn_cast<ValueDecl *>();
   
   /// Get the function generic params, including outer params.
   switch (c.kind) {
@@ -1862,6 +1983,8 @@ TypeConverter::getConstantGenericEnvironment(SILDeclRef c) {
     // Use the generic environment of the containing type.
     return c.getDecl()->getDeclContext()->getGenericEnvironmentOfContext();
   }
+
+  llvm_unreachable("Unhandled SILDeclRefKind in switch.");
 }
 
 SILType TypeConverter::getSubstitutedStorageType(AbstractStorageDecl *value,
@@ -1909,12 +2032,9 @@ void TypeConverter::pushGenericContext(CanGenericSignature sig) {
   // If the generic signature is empty, this is a no-op.
   if (!sig)
     return;
-  
-  // GenericFunctionTypes shouldn't nest.
-  assert(DependentTypes.empty() && "already in generic context?!");
-  assert(!CurGenericContext && "already in generic context!");
 
-  CurGenericContext = sig;
+  DependentTypeState state(sig);
+  DependentTypes.push_back(std::move(state));
 }
 
 void TypeConverter::popGenericContext(CanGenericSignature sig) {
@@ -1922,13 +2042,14 @@ void TypeConverter::popGenericContext(CanGenericSignature sig) {
   if (!sig)
     return;
 
-  assert(CurGenericContext == sig && "unpaired push/pop");
+  DependentTypeState &state = DependentTypes.back();
+  assert(state.Sig == sig && "unpaired push/pop");
   
   // Erase our cached TypeLowering objects and associated mappings for dependent
   // types.
   // Resetting the DependentBPA will deallocate but not run the destructor of
   // the dependent TypeLowerings.
-  for (auto &ti : DependentTypes) {
+  for (auto &ti : state.Map) {
     // Destroy only the unique entries.
     CanType srcType = ti.first.OrigType;
     if (!srcType) continue;
@@ -1936,23 +2057,14 @@ void TypeConverter::popGenericContext(CanGenericSignature sig) {
     if (srcType == mappedType || isa<LValueType>(srcType))
       ti.second->~TypeLowering();
   }
-  DependentTypes.clear();
-  DependentBPA.Reset();
-  CurGenericContext = nullptr;
+
+  DependentTypes.pop_back();
 }
 
 ProtocolDispatchStrategy
 TypeConverter::getProtocolDispatchStrategy(ProtocolDecl *P) {
-  // AnyObject has no requirements (other than the object being a class), so
-  // needs no method dispatch.
-  if (auto known = P->getKnownProtocolKind()) {
-    if (*known == KnownProtocolKind::AnyObject)
-      return ProtocolDispatchStrategy::Empty;
-  }
-  
-  // Otherwise, ObjC protocols use ObjC method dispatch, and Swift protocols
+  // ObjC protocols use ObjC method dispatch, and Swift protocols
   // use witness tables.
-  
   if (P->isObjC())
     return ProtocolDispatchStrategy::ObjC;
   
@@ -1962,7 +2074,8 @@ TypeConverter::getProtocolDispatchStrategy(ProtocolDecl *P) {
 CanSILFunctionType TypeConverter::
 getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
                                  CanGenericSignature genericSig,
-                                 Type selfType) {
+                                 Type selfType,
+                                 SILFunctionTypeRepresentation rep) {
   auto &ctx = M.getASTContext();
 
   // Get lowered formal types for callback parameters.
@@ -1980,17 +2093,10 @@ getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
     }
   }
 
-  CanType canSelfType;
-  CanType canSelfMetatypeType;
-  if (genericSig) {
-    canSelfType = genericSig->getCanonicalTypeInContext(
-        selfType, *M.getSwiftModule());
-    canSelfMetatypeType = genericSig->getCanonicalTypeInContext(
-        selfMetatypeType, *M.getSwiftModule());
-  } else {
-    canSelfType = selfType->getCanonicalType();
-    canSelfMetatypeType = selfMetatypeType->getCanonicalType();
-  }
+  auto canSelfType = selfType->getCanonicalType(
+    genericSig, *M.getSwiftModule());
+  auto canSelfMetatypeType = selfMetatypeType->getCanonicalType(
+    genericSig, *M.getSwiftModule());
 
   // Create the SILFunctionType for the callback.
   SILParameterInfo params[] = {
@@ -2000,9 +2106,8 @@ getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
     { canSelfMetatypeType, ParameterConvention::Direct_Unowned },
   };
   ArrayRef<SILResultInfo> results = {};
-  auto extInfo = 
-    SILFunctionType::ExtInfo()
-      .withRepresentation(SILFunctionTypeRepresentation::Thin);
+
+  auto extInfo = SILFunctionType::ExtInfo().withRepresentation(rep);
 
   if (genericSig && genericSig->areAllParamsConcrete())
     genericSig = nullptr;
@@ -2093,7 +2198,7 @@ TypeConverter::getLoweredLocalCaptures(AnyFunctionRef fn) {
             goto capture_value;
 
           // Otherwise, transitively capture the accessors.
-          SWIFT_FALLTHROUGH;
+          LLVM_FALLTHROUGH;
 
         case VarDecl::Computed: {
           collectFunctionCaptures(capturedVar->getGetter());
@@ -2104,11 +2209,12 @@ TypeConverter::getLoweredLocalCaptures(AnyFunctionRef fn) {
 
         case VarDecl::Stored: {
           // We can always capture the storage in these cases.
-          Type captureType;
-          if (auto *selfType = capturedVar->getType()->getAs<DynamicSelfType>()) {
+          Type captureType = capturedVar->getType();
+          if (auto *metatypeType = captureType->getAs<MetatypeType>())
+            captureType = metatypeType->getInstanceType();
+
+          if (auto *selfType = captureType->getAs<DynamicSelfType>()) {
             captureType = selfType->getSelfType();
-            if (auto *metatypeType = captureType->getAs<MetatypeType>())
-              captureType = metatypeType->getInstanceType();
 
             // We're capturing a 'self' value with dynamic 'Self' type;
             // handle it specially.
@@ -2267,7 +2373,7 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
   if (fnTy1->getParameters().size() != fnTy2->getParameters().size())
     return ABIDifference::NeedsThunk;
 
-  if (fnTy1->getNumAllResults() != fnTy2->getNumAllResults())
+  if (fnTy1->getNumResults() != fnTy2->getNumResults())
     return ABIDifference::NeedsThunk;
 
   // If we don't have a context but the other type does, we'll return
@@ -2276,15 +2382,16 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
       fnTy1->getCalleeConvention() != fnTy2->getCalleeConvention())
     return ABIDifference::NeedsThunk;
 
-  for (unsigned i : indices(fnTy1->getAllResults())) {
-    auto result1 = fnTy1->getAllResults()[i];
-    auto result2 = fnTy2->getAllResults()[i];
+  for (unsigned i : indices(fnTy1->getResults())) {
+    auto result1 = fnTy1->getResults()[i];
+    auto result2 = fnTy2->getResults()[i];
 
     if (result1.getConvention() != result2.getConvention())
       return ABIDifference::NeedsThunk;
 
-    if (checkForABIDifferences(result1.getSILType(), result2.getSILType())
-          != ABIDifference::Trivial)
+    if (checkForABIDifferences(result1.getSILStorageType(),
+                               result2.getSILStorageType())
+        != ABIDifference::Trivial)
       return ABIDifference::NeedsThunk;
   }
 
@@ -2297,8 +2404,9 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
     if (error1.getConvention() != error2.getConvention())
       return ABIDifference::NeedsThunk;
 
-    if (checkForABIDifferences(error1.getSILType(), error2.getSILType())
-          != ABIDifference::Trivial)
+    if (checkForABIDifferences(error1.getSILStorageType(),
+                               error2.getSILStorageType())
+        != ABIDifference::Trivial)
       return ABIDifference::NeedsThunk;
   }
 
@@ -2312,8 +2420,9 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
     // make sure to flip the relation around.
     std::swap(param1, param2);
 
-    if (checkForABIDifferences(param1.getSILType(), param2.getSILType())
-          != ABIDifference::Trivial)
+    if (checkForABIDifferences(param1.getSILStorageType(),
+                               param2.getSILStorageType())
+        != ABIDifference::Trivial)
       return ABIDifference::NeedsThunk;
   }
 
@@ -2327,4 +2436,87 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
   }
 
   return ABIDifference::Trivial;
+}
+
+CanSILBoxType
+TypeConverter::getInterfaceBoxTypeForCapture(ValueDecl *captured,
+                                             CanType loweredInterfaceType,
+                                             bool isMutable) {
+  auto &C = M.getASTContext();
+  auto signature = getEffectiveGenericSignature(captured->getDeclContext());
+  
+  // If the type is not dependent at all, we can form a concrete box layout.
+  // We don't need to capture the generic environment.
+  if (!loweredInterfaceType->hasTypeParameter()) {
+    auto layout = SILLayout::get(C, nullptr,
+                                 SILField(loweredInterfaceType, isMutable));
+    return SILBoxType::get(C, layout, {});
+  }
+  
+  // Otherwise, the layout needs to capture the generic environment of its
+  // originating scope.
+  // TODO: We could conceivably minimize the captured generic environment to
+  // only the parts used by the captured variable.
+  
+  auto layout = SILLayout::get(C, signature,
+                               SILField(loweredInterfaceType, isMutable));
+  
+  // Instantiate the layout with identity substitutions.
+  auto subMap = signature->getSubstitutionMap(
+    [&](SubstitutableType *type) -> Type {
+      return signature->getCanonicalTypeInContext(type,
+                                                  *M.getSwiftModule());
+    },
+    [](Type depTy, Type replacementTy, ProtocolType *conformedTy)
+    -> ProtocolConformanceRef {
+      return ProtocolConformanceRef(conformedTy->getDecl());
+    });
+  SmallVector<Substitution, 4> genericArgs;
+  signature->getSubstitutions(subMap, genericArgs);
+
+  auto boxTy = SILBoxType::get(C, layout, genericArgs);
+#ifndef NDEBUG
+  // FIXME: Map the box type out of context when asserting the field so
+  // we don't need to push a GenericContextScope (which really ought to die).
+  auto loweredContextType = loweredInterfaceType;
+  auto contextBoxTy = boxTy;
+  if (signature) {
+    auto env = signature.getGenericEnvironment(*M.getSwiftModule());
+    loweredContextType = env->mapTypeIntoContext(loweredContextType)
+                            ->getCanonicalType();
+    contextBoxTy = cast<SILBoxType>(
+      env->mapTypeIntoContext(contextBoxTy)
+         ->getCanonicalType());
+  }
+  assert(contextBoxTy->getLayout()->getFields().size() == 1
+         && contextBoxTy->getFieldType(M, 0).getSwiftRValueType()
+             == loweredContextType
+         && "box field type doesn't match capture!");
+#endif
+  return boxTy;
+}
+
+CanSILBoxType
+TypeConverter::getContextBoxTypeForCapture(ValueDecl *captured,
+                                           CanType loweredContextType,
+                                           GenericEnvironment *env,
+                                           bool isMutable) {
+  CanType loweredInterfaceType = loweredContextType;
+  if (env) {
+    auto homeSig = captured->getDeclContext()
+        ->getGenericSignatureOfContext();
+    loweredInterfaceType =
+      env->mapTypeOutOfContext(loweredInterfaceType)
+        ->getCanonicalType(homeSig, *M.getSwiftModule());
+  }
+  
+  auto boxType = getInterfaceBoxTypeForCapture(captured,
+                                               loweredInterfaceType,
+                                               isMutable);
+  if (env)
+    boxType = cast<SILBoxType>(
+      env->mapTypeIntoContext(boxType)
+         ->getCanonicalType());
+  
+  return boxType;
 }

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,10 +14,9 @@
 #define SWIFT_SIL_LOCATION_H
 
 #include "llvm/ADT/PointerUnion.h"
-#include "swift/AST/Decl.h"
-#include "swift/AST/Expr.h"
-#include "swift/AST/Pattern.h"
-#include "swift/AST/Stmt.h"
+#include "swift/Basic/SourceLoc.h"
+#include "swift/Basic/SourceManager.h"
+#include "swift/AST/TypeAlignments.h"
 
 #include <cstddef>
 #include <type_traits>
@@ -25,6 +24,10 @@
 namespace swift {
 
 class SourceLoc;
+class ReturnStmt;
+class BraceStmt;
+class AbstractClosureExpr;
+class AbstractFunctionDecl;
 
 /// This is a pointer to the AST node that a SIL instruction was
 /// derived from. This may be null if AST information is unavailable or
@@ -87,15 +90,15 @@ public:
   struct DebugLoc {
     unsigned Line;
     unsigned Column;
-    const char *Filename;
+    StringRef Filename;
 
     DebugLoc(unsigned Line = 0, unsigned Column = 0,
-             const char *Filename = nullptr)
+             StringRef Filename = StringRef())
         : Line(Line), Column(Column), Filename(Filename) {}
 
     inline bool operator==(const DebugLoc &R) const {
       return Line == R.Line && Column == R.Column &&
-             StringRef(Filename).equals(R.Filename);
+             Filename.equals(R.Filename);
     }
   };
 
@@ -265,7 +268,7 @@ public:
   bool isNull() const {
     switch (getStorageKind()) {
     case ASTNodeKind:   return Loc.ASTNode.Primary.isNull();
-    case DebugInfoKind: return Loc.DebugInfoLoc.Filename;
+    case DebugInfoKind: return Loc.DebugInfoLoc.Filename.empty();
     case SILFileKind:   return Loc.SILFileLoc.isInvalid();
     default:            return true;
     }
@@ -400,17 +403,23 @@ public:
     return getNodeAs<T>(Loc.ASTNode.ForDebugger);
   }
 
+  /// Return the location as a DeclContext or null.
+  DeclContext *getAsDeclContext() const;
+
   SourceLoc getDebugSourceLoc() const;
   SourceLoc getSourceLoc() const;
   SourceLoc getStartSourceLoc() const;
   SourceLoc getEndSourceLoc() const;
-  
   SourceRange getSourceRange() const {
-    return { getStartSourceLoc(), getEndSourceLoc() };
+    return {getStartSourceLoc(), getEndSourceLoc()};
+  }
+  DebugLoc getDebugInfoLoc() const {
+    assert(isDebugInfoLoc());
+    return Loc.DebugInfoLoc;
   }
 
   /// Fingerprint a DebugLoc for use in a DenseMap.
-  typedef std::pair<std::pair<unsigned, unsigned>, const void *> DebugLocKey;
+  typedef std::pair<std::pair<unsigned, unsigned>, StringRef> DebugLocKey;
   struct DebugLocHash : public DebugLocKey {
     DebugLocHash(DebugLoc L) : DebugLocKey({{L.Line, L.Column}, L.Filename}) {}
   };
@@ -498,15 +507,13 @@ private:
 /// Allowed on an BranchInst, ReturnInst.
 class ReturnLocation : public SILLocation {
 public:
-  ReturnLocation(ReturnStmt *RS) : SILLocation(RS, ReturnKind) {}
+  ReturnLocation(ReturnStmt *RS);
 
   /// Construct the return location for a constructor or a destructor.
-  ReturnLocation(BraceStmt *BS)
-    : SILLocation(BS, ReturnKind) {}
+  ReturnLocation(BraceStmt *BS);
 
-  ReturnStmt *get() {
-    return castToASTNode<ReturnStmt>();
-  }
+  ReturnStmt *get();
+
 private:
   friend class SILLocation;
   static bool isKind(const SILLocation& L) {
@@ -521,31 +528,19 @@ private:
 class ImplicitReturnLocation : public SILLocation {
 public:
 
-  ImplicitReturnLocation(AbstractClosureExpr *E)
-    : SILLocation(E, ImplicitReturnKind) { }
+  ImplicitReturnLocation(AbstractClosureExpr *E);
 
-  ImplicitReturnLocation(ReturnStmt *S)
-  : SILLocation(S, ImplicitReturnKind) { }
+  ImplicitReturnLocation(ReturnStmt *S);
 
-  ImplicitReturnLocation(AbstractFunctionDecl *AFD)
-    : SILLocation(AFD, ImplicitReturnKind) { }
+  ImplicitReturnLocation(AbstractFunctionDecl *AFD);
 
   /// Construct from a RegularLocation; preserve all special bits.
   ///
   /// Note, this can construct an implicit return for an arbitrary expression
   /// (specifically, in case of auto-generated bodies).
-  static SILLocation getImplicitReturnLoc(SILLocation L) {
-    assert(L.isASTNode<Expr>() ||
-           L.isASTNode<ValueDecl>() ||
-           L.isASTNode<PatternBindingDecl>() ||
-           (L.isNull() && L.isInTopLevel()));
-    L.setLocationKind(ImplicitReturnKind);
-    return L;
-  }
+  static SILLocation getImplicitReturnLoc(SILLocation L);
 
-  AbstractClosureExpr *get() {
-    return castToASTNode<AbstractClosureExpr>();
-  }
+  AbstractClosureExpr *get();
 
 private:
   friend class SILLocation;

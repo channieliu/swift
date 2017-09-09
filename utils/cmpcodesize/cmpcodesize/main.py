@@ -3,11 +3,11 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
 from __future__ import print_function
 
@@ -183,7 +183,7 @@ How to specify files:
         else:
             compare_function_sizes(old_files, new_files)
     else:
-        print("%-26s%16s  %8s  %8s  %s" %
+        print("%-26s%16s  %14s  %14s  %s" %
               ("", "Section", "Old", "New", "Percent"))
         if parsed_arguments.sum_sizes:
             compare_sizes_of_file(old_files, new_files,
@@ -200,6 +200,7 @@ How to specify files:
                 compare_sizes_of_file([old_file], [new_file],
                                       parsed_arguments.all_sections,
                                       parsed_arguments.list_categories)
+
 
 if __name__ == '__main__':
     main()

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -263,15 +263,24 @@ public:
   /// Encodes the memory behavior query as a MemBehaviorKeyTy.
   MemBehaviorKeyTy toMemoryBehaviorKey(SILValue V1, SILValue V2, RetainObserveKind K);
 
-  virtual void invalidate(SILAnalysis::InvalidationKind K) override {
+  virtual void invalidate() override {
     AliasCache.clear();
     MemoryBehaviorCache.clear();
   }
 
   virtual void invalidate(SILFunction *,
                           SILAnalysis::InvalidationKind K) override {
-    invalidate(K);
+    invalidate();
   }
+
+  /// Notify the analysis about a newly created function.
+  virtual void notifyAddFunction(SILFunction *F) override { }
+
+  /// Notify the analysis about a function which will be deleted from the
+  /// module.
+  virtual void notifyDeleteFunction(SILFunction *F) override { }
+
+  virtual void invalidateFunctionTables() override { }
 };
 
 

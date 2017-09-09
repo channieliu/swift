@@ -92,8 +92,8 @@ sil @stack_store : $@convention(thin) () -> () {
 // CHECK-NEXT: [[RET0:%.+]] = alloc_box
 sil @store_after_store : $@convention(thin) (@owned B) -> () {
 bb0(%0 : $B):
-  %1 = alloc_box $B
-  %1a = project_box %1 : $@box B, 0
+  %1 = alloc_box $<τ_0_0> { var τ_0_0 } <B>
+  %1a = project_box %1 : $<τ_0_0> { var τ_0_0 } <B>, 0
   %2 = store %0 to %1a : $*B
   %3 = store %0 to %1a : $*B
   %4 = tuple()
@@ -103,12 +103,12 @@ bb0(%0 : $B):
 // CHECK-LABEL: @store_after_store_struct
 // CHECK: #0 store
 // CHECK-NEXT: [[RET0:%.+]] = alloc_stack
-// CHECK-NEXT: Address Projection Type: $*Int
-// CHECK-NEXT: Field Type: var a: Int
+// CHECK-NEXT: Projection Path [$*S1
+// CHECK-NEXT:   Field: var a: Int of: $*Int]
 // CHECK: #1 store
 // CHECK-NEXT: [[RET0:%.+]] = alloc_stack
-// CHECK-NEXT: Address Projection Type: $*Int
-// CHECK-NEXT: Field Type: var a: Int
+// CHECK-NEXT: Projection Path [$*S1
+// CHECK-NEXT:   Field: var a: Int of: $*Int]
 sil @store_after_store_struct : $@convention(thin) () -> () {
   %1 = alloc_stack $S1
   %9 = integer_literal $Builtin.Int64, 0          // user: %10

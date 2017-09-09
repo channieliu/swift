@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -121,7 +121,7 @@ void emitDeallocatePartialClassInstance(IRGenFunction &IGF,
 OwnedAddress
 emitAllocateBox(IRGenFunction &IGF,
                 CanSILBoxType boxType,
-                CanSILBoxType boxInterfaceType,
+                GenericEnvironment *env,
                 const llvm::Twine &name);
 
 /// Deallocate a box whose value is uninitialized.
@@ -131,6 +131,14 @@ void emitDeallocateBox(IRGenFunction &IGF, llvm::Value *box,
 /// Project the address of the value inside a box.
 Address emitProjectBox(IRGenFunction &IGF, llvm::Value *box,
                        CanSILBoxType boxType);
+
+/// Allocate a boxed value based on the boxed type. Returns the address of the
+/// storage for the value.
+Address emitAllocateExistentialBoxInBuffer(IRGenFunction &IGF,
+                                           SILType boxedType,
+                                           Address destBuffer,
+                                           GenericEnvironment *env,
+                                           const llvm::Twine &name);
 
 } // end namespace irgen
 } // end namespace swift

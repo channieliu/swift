@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,10 +16,10 @@
 internal protocol _ArrayBufferProtocol
   : MutableCollection, RandomAccessCollection {
 
-  associatedtype Indices : RandomAccessCollection = CountableRange<Int>
-
-  /// The type of elements stored in the buffer.
-  associatedtype Element
+  associatedtype Indices 
+  // FIXME(ABI) (Revert Where Clauses): Remove this conformance
+  : RandomAccessCollection 
+    = CountableRange<Int>
 
   /// Create an empty buffer.
   init()
@@ -76,7 +76,7 @@ internal protocol _ArrayBufferProtocol
     _ subrange: Range<Int>,
     with newCount: Int,
     elementsOf newValues: C
-  ) where C : Collection, C.Iterator.Element == Element
+  ) where C : Collection, C.Element == Element
 
   /// Returns a `_SliceBuffer` containing the elements in `bounds`.
   subscript(bounds: Range<Int>) -> _SliceBuffer<Element> { get }
@@ -129,15 +129,19 @@ internal protocol _ArrayBufferProtocol
 
 extension _ArrayBufferProtocol {
 
+  @_inlineable
+  @_versioned
   internal var subscriptBaseAddress: UnsafeMutablePointer<Element> {
     return firstElementAddress
   }
 
+  @_inlineable
+  @_versioned
   internal mutating func replaceSubrange<C>(
     _ subrange: Range<Int>,
     with newCount: Int,
     elementsOf newValues: C
-  ) where C : Collection, C.Iterator.Element == Element {
+  ) where C : Collection, C.Element == Element {
     _sanityCheck(startIndex == 0, "_SliceBuffer should override this function.")
     let oldCount = self.count
     let eraseCount = subrange.count

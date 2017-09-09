@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,8 +15,8 @@
 #include "ManagedValue.h"
 #include "Scope.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/ParameterList.h"
-#include "swift/Basic/Fallthrough.h"
 
 using namespace swift;
 using namespace Lowering;
@@ -24,7 +24,7 @@ using namespace Lowering;
 SILValue SILGenFunction::emitSelfDecl(VarDecl *selfDecl) {
   // Emit the implicit 'self' argument.
   SILType selfType = getLoweredLoadableType(selfDecl->getType());
-  SILValue selfValue = new (SGM.M) SILArgument(F.begin(), selfType, selfDecl);
+  SILValue selfValue = F.begin()->createFunctionArgument(selfType, selfDecl);
   VarLocs[selfDecl] = VarLoc::get(selfValue);
   SILLocation PrologueLoc(selfDecl);
   PrologueLoc.markAsPrologue();
@@ -61,7 +61,14 @@ class StrongReleaseCleanup : public Cleanup {
 public:
   StrongReleaseCleanup(SILValue box) : box(box) {}
   void emit(SILGenFunction &gen, CleanupLocation l) override {
-    gen.B.emitDestroyValueAndFold(l, box);
+    gen.B.emitDestroyValueOperation(l, box);
+  }
+
+  void dump(SILGenFunction &) const override {
+#ifndef NDEBUG
+    llvm::errs() << "DeallocateValueBuffer\n"
+                 << "State: " << getState() << "box: " << box << "\n";
+#endif
   }
 };
 } // end anonymous namespace
@@ -72,26 +79,21 @@ class EmitBBArguments : public CanTypeVisitor<EmitBBArguments,
                                               /*RetTy*/ ManagedValue>
 {
 public:
-  SILGenFunction &gen;
+  SILGenFunction &SGF;
   SILBasicBlock *parent;
   SILLocation loc;
   bool functionArgs;
   ArrayRef<SILParameterInfo> &parameters;
 
-  EmitBBArguments(SILGenFunction &gen, SILBasicBlock *parent,
+  EmitBBArguments(SILGenFunction &sgf, SILBasicBlock *parent,
                   SILLocation l, bool functionArgs,
                   ArrayRef<SILParameterInfo> &parameters)
-    : gen(gen), parent(parent), loc(l), functionArgs(functionArgs),
+    : SGF(sgf), parent(parent), loc(l), functionArgs(functionArgs),
       parameters(parameters) {}
 
   ManagedValue getManagedValue(SILValue arg, CanType t,
-                                 SILParameterInfo parameterInfo) const {
+                               SILParameterInfo parameterInfo) const {
     switch (parameterInfo.getConvention()) {
-    case ParameterConvention::Direct_Deallocating:
-      // If we have a deallocating parameter, it is passed in at +0 and will not
-      // be deallocated since we do not allow for resurrection.
-      return ManagedValue::forUnmanaged(arg);
-
     case ParameterConvention::Direct_Guaranteed:
     case ParameterConvention::Indirect_In_Guaranteed:
       // If we have a guaranteed parameter, it is passed in at +0, and its
@@ -103,7 +105,7 @@ public:
       // An unowned parameter is passed at +0, like guaranteed, but it isn't
       // kept alive by the caller, so we need to retain and manage it
       // regardless.
-      return gen.emitManagedRetain(loc, arg);
+      return SGF.emitManagedRetain(loc, arg);
 
     case ParameterConvention::Indirect_Inout:
     case ParameterConvention::Indirect_InoutAliasable:
@@ -112,24 +114,27 @@ public:
 
     case ParameterConvention::Direct_Owned:
     case ParameterConvention::Indirect_In:
+    case ParameterConvention::Indirect_In_Constant:
       // An owned or 'in' parameter is passed in at +1. We can claim ownership
       // of the parameter and clean it up when it goes out of scope.
-      return gen.emitManagedRValueWithCleanup(arg);
+      return SGF.emitManagedRValueWithCleanup(arg);
     }
     llvm_unreachable("bad parameter convention");
   }
 
   ManagedValue visitType(CanType t) {
-    auto argType = gen.getLoweredType(t);
+    auto argType = SGF.getLoweredType(t);
     // Pop the next parameter info.
     auto parameterInfo = parameters.front();
     parameters = parameters.slice(1);
-    assert(argType == parent->getParent()
-                            ->mapTypeIntoContext(parameterInfo.getSILType()) &&
-           "argument does not have same type as specified by parameter info");
+    assert(
+        argType
+            == parent->getParent()->mapTypeIntoContext(
+                   SGF.getSILType(parameterInfo))
+        && "argument does not have same type as specified by parameter info");
 
-    SILValue arg = new (gen.SGM.M)
-      SILArgument(parent, argType, loc.getAsASTNode<ValueDecl>());
+    SILValue arg =
+        parent->createFunctionArgument(argType, loc.getAsASTNode<ValueDecl>());
     ManagedValue mv = getManagedValue(arg, t, parameterInfo);
 
     // If the value is a (possibly optional) ObjC block passed into the entry
@@ -143,8 +148,8 @@ public:
         && isa<FunctionType>(objectType)
         && cast<FunctionType>(objectType)->getRepresentation()
               == FunctionType::Representation::Block) {
-      SILValue blockCopy = gen.B.createCopyBlock(loc, mv.getValue());
-      mv = gen.emitManagedRValueWithCleanup(blockCopy);
+      SILValue blockCopy = SGF.B.createCopyBlock(loc, mv.getValue());
+      mv = SGF.emitManagedRValueWithCleanup(blockCopy);
     }
     return mv;
   }
@@ -152,7 +157,7 @@ public:
   ManagedValue visitTupleType(CanTupleType t) {
     SmallVector<ManagedValue, 4> elements;
 
-    auto &tl = gen.getTypeLowering(t);
+    auto &tl = SGF.getTypeLowering(t);
     bool canBeGuaranteed = tl.isLoadable();
 
     // Collect the exploded elements.
@@ -165,7 +170,7 @@ public:
       elements.push_back(elt);
     }
 
-    if (tl.isLoadable()) {
+    if (tl.isLoadable() || !SGF.silConv.useLoweredAddresses()) {
       SmallVector<SILValue, 4> elementValues;
       if (canBeGuaranteed) {
         // If all of the elements were guaranteed, we can form a guaranteed tuple.
@@ -175,32 +180,32 @@ public:
         // Otherwise, we need to move or copy values into a +1 tuple.
         for (auto element : elements) {
           SILValue value = element.hasCleanup()
-            ? element.forward(gen)
-            : element.copyUnmanaged(gen, loc).forward(gen);
+            ? element.forward(SGF)
+            : element.copyUnmanaged(SGF, loc).forward(SGF);
           elementValues.push_back(value);
         }
       }
-      auto tupleValue = gen.B.createTuple(loc, tl.getLoweredType(),
+      auto tupleValue = SGF.B.createTuple(loc, tl.getLoweredType(),
                                           elementValues);
       return canBeGuaranteed
         ? ManagedValue::forUnmanaged(tupleValue)
-        : gen.emitManagedRValueWithCleanup(tupleValue);
+        : SGF.emitManagedRValueWithCleanup(tupleValue);
     } else {
       // If the type is address-only, we need to move or copy the elements into
       // a tuple in memory.
       // TODO: It would be a bit more efficient to use a preallocated buffer
       // in this case.
-      auto buffer = gen.emitTemporaryAllocation(loc, tl.getLoweredType());
+      auto buffer = SGF.emitTemporaryAllocation(loc, tl.getLoweredType());
       for (auto i : indices(elements)) {
         auto element = elements[i];
-        auto elementBuffer = gen.B.createTupleElementAddr(loc, buffer,
+        auto elementBuffer = SGF.B.createTupleElementAddr(loc, buffer,
                                         i, element.getType().getAddressType());
         if (element.hasCleanup())
-          element.forwardInto(gen, loc, elementBuffer);
+          element.forwardInto(SGF, loc, elementBuffer);
         else
-          element.copyInto(gen, elementBuffer, loc);
+          element.copyInto(SGF, elementBuffer, loc);
       }
-      return gen.emitManagedRValueWithCleanup(buffer);
+      return SGF.emitManagedRValueWithCleanup(buffer);
     }
   }
 };
@@ -232,7 +237,7 @@ struct ArgumentInitHelper {
     assert(ty && "no type?!");
 
     // Create an RValue by emitting destructured arguments into a basic block.
-    CanType canTy = ty->getCanonicalType();
+    CanType canTy = ty->eraseDynamicSelfType()->getCanonicalType();
     return EmitBBArguments(gen, parent, l, /*functionArgs*/ true,
                            parameters).visit(canTy);
   }
@@ -248,11 +253,10 @@ struct ArgumentInitHelper {
     // Create a shadow copy of inout parameters so they can be captured
     // by closures. The InOutDeshadowing guaranteed optimization will
     // eliminate the variable if it is not needed.
-    if (auto inOutTy = vd->getType()->getAs<InOutType>()) {
-
+    if (vd->isInOut()) {
       SILValue address = argrv.getUnmanagedValue();
 
-      CanType objectType = inOutTy->getObjectType()->getCanonicalType();
+      CanType objectType = vd->getType()->getInOutObjectType()->getCanonicalType();
 
       // As a special case, don't introduce a local variable for
       // Builtin.UnsafeValueBuffer, which is not copyable.
@@ -263,8 +267,20 @@ struct ArgumentInitHelper {
         return;
       }
       assert(argrv.getType().isAddress() && "expected inout to be address");
+    } else if (auto *metatypeTy = ty->getAs<MetatypeType>()) {
+      // This is a hack to deal with the fact that Self.Type comes in as a
+      // static metatype, but we have to downcast it to a dynamic Self
+      // metatype to get the right semantics.
+      if (metatypeTy->getInstanceType()->is<DynamicSelfType>()) {
+        auto loweredTy = gen.getLoweredType(ty);
+        if (loweredTy != argrv.getType()) {
+          argrv = ManagedValue::forUnmanaged(
+            gen.B.createUncheckedBitCast(loc, argrv.getValue(), loweredTy));
+        }
+      }
     } else {
-      assert(vd->isLet() && "expected parameter to be immutable!");
+      assert((vd->isLet() || vd->isShared())
+             && "expected parameter to be immutable!");
       // If the variable is immutable, we can bind the value as is.
       // Leave the cleanup on the argument, if any, in place to consume the
       // argument if we're responsible for it.
@@ -277,18 +293,18 @@ struct ArgumentInitHelper {
   }
 
   void emitParam(ParamDecl *PD) {
+    auto type = PD->getType();
+
     ++ArgNo;
     if (PD->hasName()) {
-      makeArgumentIntoBinding(PD->getType(), &*f.begin(), PD);
+      makeArgumentIntoBinding(type, &*f.begin(), PD);
       return;
     }
 
-    emitAnonymousParam(PD->getType(), PD, PD);
+    emitAnonymousParam(type, PD, PD);
   }
 
   void emitAnonymousParam(Type type, SILLocation paramLoc, ParamDecl *PD) {
-    assert(!PD || PD->getType()->isEqual(type));
-
     // Allow non-materializable tuples to be bound to anonymous parameters.
     if (!type->isMaterializable()) {
       if (auto tupleType = type->getAs<TupleType>()) {
@@ -329,8 +345,8 @@ static void makeArgument(Type ty, ParamDecl *decl,
     for (auto fieldType : tupleTy->getElementTypes())
       makeArgument(fieldType, decl, args, gen);
   } else {
-    auto arg = new (gen.F.getModule()) SILArgument(gen.F.begin(),
-                                                   gen.getLoweredType(ty),decl);
+    auto arg =
+        gen.F.begin()->createFunctionArgument(gen.getLoweredType(ty), decl);
     args.push_back(arg);
   }
 }
@@ -339,26 +355,40 @@ static void makeArgument(Type ty, ParamDecl *decl,
 void SILGenFunction::bindParametersForForwarding(const ParameterList *params,
                                      SmallVectorImpl<SILValue> &parameters) {
   for (auto param : *params) {
-    makeArgument(param->getType(), param, parameters, *this);
+    Type type = (param->hasType()
+                 ? param->getType()
+                 : F.mapTypeIntoContext(param->getInterfaceType()));
+    makeArgument(type->eraseDynamicSelfType(), param, parameters, *this);
   }
 }
 
-static void emitCaptureArguments(SILGenFunction &gen, CapturedValue capture,
+static void emitCaptureArguments(SILGenFunction &gen,
+                                 AnyFunctionRef closure,
+                                 CapturedValue capture,
                                  unsigned ArgNo) {
 
   auto *VD = capture.getDecl();
-  auto type = VD->getType();
   SILLocation Loc(VD);
   Loc.markAsPrologue();
+
+  // Local function to get the captured variable type within the capturing
+  // context.
+  auto getVarTypeInCaptureContext = [&]() -> Type {
+    auto interfaceType = VD->getInterfaceType();
+    return GenericEnvironment::mapTypeIntoContext(
+      closure.getGenericEnvironment(), interfaceType);
+  };
+
   switch (gen.SGM.Types.getDeclCaptureKind(capture)) {
   case CaptureKind::None:
     break;
 
   case CaptureKind::Constant: {
-    auto &lowering = gen.getTypeLowering(VD->getType());
+    auto type = getVarTypeInCaptureContext();
+    auto &lowering = gen.getTypeLowering(type);
     // Constant decls are captured by value.
     SILType ty = lowering.getLoweredType();
-    SILValue val = new (gen.SGM.M) SILArgument(gen.F.begin(), ty, VD);
+    SILValue val = gen.F.begin()->createFunctionArgument(ty, VD);
 
     // If the original variable was settable, then Sema will have treated the
     // VarDecl as an lvalue, even in the closure's use.  As such, we need to
@@ -386,10 +416,12 @@ static void emitCaptureArguments(SILGenFunction &gen, CapturedValue capture,
   case CaptureKind::Box: {
     // LValues are captured as a retained @box that owns
     // the captured value.
-    SILType ty = gen.getLoweredType(type).getAddressType();
-    SILType boxTy = SILType::getPrimitiveObjectType(
-      SILBoxType::get(ty.getSwiftRValueType()));
-    SILValue box = new (gen.SGM.M) SILArgument(gen.F.begin(), boxTy, VD);
+    auto type = getVarTypeInCaptureContext();
+    auto boxTy = gen.SGM.Types.getContextBoxTypeForCapture(VD,
+                               gen.getLoweredType(type).getSwiftRValueType(),
+                               gen.F.getGenericEnvironment(), /*mutable*/ true);
+    SILValue box = gen.F.begin()->createFunctionArgument(
+        SILType::getPrimitiveObjectType(boxTy), VD);
     SILValue addr = gen.B.createProjectBox(VD, box, 0);
     gen.VarLocs[VD] = SILGenFunction::VarLoc::get(addr, box);
     gen.B.createDebugValueAddr(Loc, addr, {/*Constant*/false, ArgNo});
@@ -399,8 +431,9 @@ static void emitCaptureArguments(SILGenFunction &gen, CapturedValue capture,
   }
   case CaptureKind::StorageAddress: {
     // Non-escaping stored decls are captured as the address of the value.
+    auto type = getVarTypeInCaptureContext();
     SILType ty = gen.getLoweredType(type).getAddressType();
-    SILValue addr = new (gen.SGM.M) SILArgument(gen.F.begin(), ty, VD);
+    SILValue addr = gen.F.begin()->createFunctionArgument(ty, VD);
     gen.VarLocs[VD] = SILGenFunction::VarLoc::get(addr);
     gen.B.createDebugValueAddr(Loc, addr, {/*Constant*/true, ArgNo});
     break;
@@ -420,17 +453,15 @@ void SILGenFunction::emitProlog(AnyFunctionRef TheClosure,
   for (auto capture : captureInfo.getCaptures()) {
     if (capture.isDynamicSelfMetadata()) {
       auto selfMetatype = MetatypeType::get(
-          captureInfo.getDynamicSelfType()->getSelfType(),
-          MetatypeRepresentation::Thick)
-              ->getCanonicalType();
-      SILType ty = SILType::getPrimitiveObjectType(selfMetatype);
-      SILValue val = new (SGM.M) SILArgument(F.begin(), ty);
+        captureInfo.getDynamicSelfType());
+      SILType ty = getLoweredType(selfMetatype);
+      SILValue val = F.begin()->createFunctionArgument(ty);
       (void) val;
 
       return;
     }
 
-    emitCaptureArguments(*this, capture, ++ArgNo);
+    emitCaptureArguments(*this, TheClosure, capture, ++ArgNo);
   }
 }
 
@@ -445,26 +476,34 @@ static void emitIndirectResultParameters(SILGenFunction &gen, Type resultType,
   }
 
   // If the return type is address-only, emit the indirect return argument.
-  const TypeLowering &resultTI = gen.getTypeLowering(resultType);
-  if (!resultTI.isReturnedIndirectly()) return;
 
+  const TypeLowering &resultTI =
+      gen.getTypeLowering(DC->mapTypeIntoContext(resultType));
+  if (!SILModuleConventions::isReturnedIndirectlyInSIL(
+          resultTI.getLoweredType(), gen.SGM.M)) {
+    return;
+  }
   auto &ctx = gen.getASTContext();
-  auto var = new (ctx) ParamDecl(/*IsLet*/ false, SourceLoc(), SourceLoc(),
+  auto var = new (ctx) ParamDecl(VarDecl::Specifier::InOut,
+                                 SourceLoc(), SourceLoc(),
                                  ctx.getIdentifier("$return_value"), SourceLoc(),
-                                 ctx.getIdentifier("$return_value"), resultType,
+                                 ctx.getIdentifier("$return_value"), Type(),
                                  DC);
+  var->setInterfaceType(resultType);
 
-  auto arg =
-    new (gen.SGM.M) SILArgument(gen.F.begin(), resultTI.getLoweredType(), var);
-  (void) arg;
-
-  
+  auto *arg =
+      gen.F.begin()->createFunctionArgument(resultTI.getLoweredType(), var);
+  (void)arg;
 }
 
 unsigned SILGenFunction::emitProlog(ArrayRef<ParameterList *> paramLists,
                                     Type resultType, DeclContext *DC,
                                     bool throws) {
   // Create the indirect result parameters.
+  auto *genericSig = DC->getGenericSignatureOfContext();
+  resultType = resultType->getCanonicalType(genericSig,
+                                            *SGM.M.getSwiftModule());
+
   emitIndirectResultParameters(*this, resultType, DC);
 
   // Emit the argument variables in calling convention order.

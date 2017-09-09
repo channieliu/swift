@@ -6,6 +6,8 @@ struct Mystruct1 {
 // CHECK: decl: func s1f1() -> Int
   var intField = 3
 // CHECK: decl: var intField: Int
+// CHECK: decl: init(intField: Int)
+// CHECK: decl: init()
 }
 struct MyStruct2 {
 // CHECK: decl: struct MyStruct2
@@ -21,15 +23,14 @@ class Myclass1 {
 // CHECK: decl: class Myclass1
   var intField = 4
 // CHECK: decl: var intField: Int
+// CHECK: decl: init()
 }
 
 func f1() {
 // CHECK: decl: func f1()
   var s1ins = Mystruct1() // Implicit ctor
 // CHECK: decl: var s1ins: Mystruct1
-// CHECK: dref: init() for 'Mystruct1'
   _ = Mystruct1(intField: 1) // Implicit ctor
-// CHECK: dref: init(intField: Int)	for 'Mystruct1'
 
   s1ins.intField = 34
 // CHECK: type: Mystruct1
@@ -37,7 +38,6 @@ func f1() {
 
   var c1ins = Myclass1()
 // CHECK: decl: var c1ins: Myclass1
-// CHECK: dref: init()	for 'Myclass1'
 // CHECK: type: Myclass1
 
   c1ins.intField = 3
@@ -49,7 +49,7 @@ func f1() {
 
   if let ifletf1 = Int?(1) {
 // FIXME: lookup incorrect for if let binding.
-// CHECK: decl: struct Int : {{.*}} for 'ifletf1' usr=s:vF14swift_ide_test2f1FT_T_L_7ifletf1Si
+// CHECK: decl: struct Int : {{.*}} for 'ifletf1' usr=s:14swift_ide_test2f1yyF7ifletf1L_Siv
   }
 }
 
@@ -64,7 +64,7 @@ class Myclass2 {
 
     arr1.append(1)
 // FIXME: missing append()
-// CHECK: dref: FAILURE	for 'append' usr=s:FSa6appendFxT_
+// CHECK: dref: FAILURE	for 'append' usr=s:Sa6appendyxF
 // CHECK: type: (@lvalue Array<Int>) -> (Int) -> ()
 
     var arr2 : [Mystruct1]
@@ -86,12 +86,47 @@ class Myclass2 {
   }
 }
 
+// CHECK: decl: enum MyEnum
+enum MyEnum {
+// FIXME
+// CHECK: decl:   for 'ravioli'
+  case ravioli
+// CHECK: decl:   for 'pasta'
+  case pasta
+
+// CHECK: decl: func method() -> Int
+  func method() -> Int { return 0 }
+
+// CHECK: decl: func compare(_ other: MyEnum) -> Int
+  func compare(_ other: MyEnum) -> Int {
+    // CHECK: decl: let other: MyEnum
+    return 0
+  }
+
+// CHECK: decl: mutating func mutatingMethod()
+  mutating func mutatingMethod() {}
+}
+
+// CHECK: decl: func f2()
+func f2() {
+// CHECK: type: (MyEnum.Type) -> MyEnum
+  var e = MyEnum.pasta
+
+// CHECK: type: (MyEnum) -> () -> Int
+  e.method()
+// CHECK: (MyEnum) -> (MyEnum) -> Int
+  e.compare(e)
+// CHECK: (@lvalue MyEnum) -> () -> ()
+  e.mutatingMethod()
+}
+
 struct MyGenStruct1<T, U: ExpressibleByStringLiteral, V: Sequence> {
 // CHECK: decl: struct MyGenStruct1<T, U, V> where U : ExpressibleByStringLiteral, V : Sequence
 // FIXME: why are these references to the base type?
-// CHECK: decl: struct MyGenStruct1<{{.*}}> where {{.*}} for 'T' usr=s:tV14swift_ide_test12MyGenStruct11TMx
-// CHECK: decl: struct MyGenStruct1<{{.*}}> where {{.*}} for 'U' usr=s:tV14swift_ide_test12MyGenStruct11UMq_
-// CHECK: decl: struct MyGenStruct1<{{.*}}> where {{.*}} for 'V' usr=s:tV14swift_ide_test12MyGenStruct11VMq0_
+// FIXME: TypeReconstruction should support Node::Kind::GenericTypeParamDecl ('fp')
+// CHECK: decl: FAILURE for 'T' usr=s:14swift_ide_test12MyGenStruct1V1Txmfp
+// CHECK: decl: FAILURE for 'U' usr=s:14swift_ide_test12MyGenStruct1V1Uq_mfp
+// CHECK: decl: FAILURE for 'V' usr=s:14swift_ide_test12MyGenStruct1V1Vq0_mfp
 
   let x: T
 // CHECK: decl: let x: T
@@ -107,6 +142,11 @@ struct MyGenStruct1<T, U: ExpressibleByStringLiteral, V: Sequence> {
 // CHECK: type: U
     _ = z
 // CHECK: type: V
+  }
+
+  // CHECK: decl: func takesT(_ t: T)
+  func takesT(_ t: T) {
+    // CHECK: decl: let t: T
   }
 }
 
@@ -128,4 +168,105 @@ func test001() {
 // CHECK: type: String
   _ = genstruct2.z
 // CHECK: type: Dictionary<Int, Int>
+
+  genstruct2.takesT(123)
 }
+
+// CHECK: decl: protocol P1
+protocol P1 {}
+
+// CHECK: decl: func foo1(p: P1)
+func foo1(p: P1) {
+// CHECK: decl: let p: P1
+// CHECK: type: (P1) -> ()
+  foo1(p: p)
+}
+
+// CHECK: decl: protocol P2
+protocol P2 {}
+
+// CHECK: decl: func foo2(p: P1 & P2)
+func foo2(p: P1 & P2) {
+// CHECK: decl: let p: P1 & P2
+  foo2(p: p)
+}
+
+// CHECK: func foo3(p: P1 & AnyObject)
+func foo3(p: P1 & AnyObject) {
+// CHECK: decl: let p: P1 & AnyObject
+  foo3(p: p)
+}
+
+// CHECK: func foo4(p: Myclass1 & P1 & P2)
+func foo4(p: P1 & P2 & Myclass1) {
+// CHECK: decl: let p: Myclass1 & P1 & P2
+  foo4(p: p)
+}
+
+func genericFunction<T : AnyObject>(t: T) {
+// CHECK: decl: FAILURE for 'T' usr=s:14swift_ide_test15genericFunctionyx1t_tRlzClF1TL_xmfp
+  genericFunction(t: t)
+}
+
+// CHECK: decl: func takesInOut(fn: (inout Int) -> ())
+// CHECK: decl: let fn: (inout Int) -> () for 'fn'
+func takesInOut(fn: (inout Int) -> ()) {}
+
+struct Outer {
+  struct Inner {
+    let x: Int
+  }
+
+  struct GenericInner<T> {
+    // CHECK: decl: FAILURE for 'T' usr=s:14swift_ide_test5OuterV12GenericInnerV1Txmfp
+    let t: T
+  }
+}
+
+struct GenericOuter<T> {
+  // CHECK: decl: FAILURE for 'T' usr=s:14swift_ide_test12GenericOuterV1Txmfp
+  struct Inner {
+    let t: T
+    let x: Int
+  }
+
+  struct GenericInner<U> {
+    // CHECK: decl: FAILURE for 'U' usr=s:14swift_ide_test12GenericOuterV0D5InnerV1Uqd__mfp
+    let t: T
+    let u: U
+  }
+}
+
+// CHECK: decl: func takesGeneric(_ t: Outer.GenericInner<Int>)
+func takesGeneric(_ t: Outer.GenericInner<Int>) {
+  takesGeneric(t)
+}
+
+// CHECK: decl: func takesGeneric(_ t: GenericOuter<Int>.Inner)
+func takesGeneric(_ t: GenericOuter<Int>.Inner) {
+  takesGeneric(t)
+}
+
+// CHECK: decl: func takesGeneric(_ t: GenericOuter<Int>.GenericInner<String>)
+func takesGeneric(_ t: GenericOuter<Int>.GenericInner<String>) {
+  takesGeneric(t)
+}
+
+func hasLocalDecls() {
+  func localFunction() {}
+
+  // FIXME
+  // CHECK: decl: FAILURE for 'LocalType'
+  // The following is the implicit ctor
+  // CHECK: decl: FAILURE for ''
+  struct LocalType {}
+
+  // CHECK: decl: FAILURE for 'LocalAlias'
+  typealias LocalAlias = LocalType
+}
+
+fileprivate struct VeryPrivateData {}
+
+// FIXME
+// CHECK: decl: FAILURE for 'privateFunction'
+fileprivate func privateFunction(_ d: VeryPrivateData) {}

@@ -1,5 +1,4 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module -o %t %S/Inputs/def_structA.swift
 // RUN: %target-swift-frontend -emit-silgen -module-name ext_structA -I %t %s | %FileCheck %s
 
@@ -20,11 +19,11 @@ extension A {
 
 func markUsed<T>(_ t: T) {}
 
-// CHECK-LABEL: sil hidden @_TFE11ext_structAV11def_structA1A4testfT_T_
+// CHECK-LABEL: sil hidden @_T011def_structA1AV04ext_B1AE4testyyF
 var a = A()
 markUsed(a.test())
 
-// CHECK-LABEL: sil hidden @_TFVE11ext_structAV11def_structA1A10NestedType4testfT_T_
+// CHECK-LABEL: sil hidden @_T011def_structA1AV04ext_B1AE10NestedTypeV4testyyF
 
 var nestedType = A.NestedType()
 markUsed(nestedType.test())

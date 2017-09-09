@@ -2,16 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 /// Dumps an object's contents using its mirror to the specified output stream.
 @discardableResult
+@_semantics("optimize.sil.specialize.generic.never")
 public func dump<T, TargetStream : TextOutputStream>(
   _ value: T,
   to target: inout TargetStream,
@@ -37,6 +38,7 @@ public func dump<T, TargetStream : TextOutputStream>(
 
 /// Dumps an object's contents using its mirror to standard output.
 @discardableResult
+@_semantics("optimize.sil.specialize.generic.never")
 public func dump<T>(
   _ value: T,
   name: String? = nil,
@@ -55,6 +57,7 @@ public func dump<T>(
 }
 
 /// Dump an object's contents. User code should use dump().
+@_semantics("optimize.sil.specialize.generic.never")
 internal func _dump_unlocked<TargetStream : TextOutputStream>(
   _ value: Any,
   to target: inout TargetStream,
@@ -153,6 +156,7 @@ internal func _dump_unlocked<TargetStream : TextOutputStream>(
 
 /// Dump information about an object's superclass, given a mirror reflecting
 /// that superclass.
+@_semantics("optimize.sil.specialize.generic.never")
 internal func _dumpSuperclass_unlocked<TargetStream : TextOutputStream>(
   mirror: Mirror,
   to target: inout TargetStream,

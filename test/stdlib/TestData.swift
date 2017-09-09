@@ -1,20 +1,20 @@
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 //
 // RUN: %target-clang %S/Inputs/FoundationBridge/FoundationBridge.m -c -o %t/FoundationBridgeObjC.o -g
 // RUN: %target-build-swift %s -I %S/Inputs/FoundationBridge/ -Xlinker %t/FoundationBridgeObjC.o -o %t/TestData
 
-// RUN: %target-run %t/TestData > %t.txt
+// RUN: %target-run %t/TestData
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
+// UNSUPPORTED: resilient_stdlib
 
 import Foundation
 import Dispatch
@@ -442,7 +442,7 @@ class TestData : TestDataSuper {
         var deallocatorCalled = false
         
         // Scope the data to a block to control lifecycle
-        do {
+        autoreleasepool {
             let buffer = malloc(16)!
             let bytePtr = buffer.bindMemory(to: UInt8.self, capacity: 16)
             var data = Data(bytesNoCopy: bytePtr, count: 16, deallocator: .custom({ (ptr, size) in
@@ -451,7 +451,7 @@ class TestData : TestDataSuper {
             }))
             // Use the data
             data[0] = 1
-        }
+         }
         
         expectTrue(deallocatorCalled, "Custom deallocator was never called")
     }
@@ -627,11 +627,15 @@ class TestData : TestDataSuper {
         data.append(subdata2)
 
         var numChunks = 0
+        var offsets = [Int]()
         data.enumerateBytes() { buffer, offset, stop in
             numChunks += 1
+            offsets.append(offset)
         }
 
         expectEqual(2, numChunks, "composing two dispatch_data should enumerate as structural data as 2 chunks")
+        expectEqual(0, offsets[0], "composing two dispatch_data should enumerate as structural data with the first offset as the location of the region")
+        expectEqual(dataToEncode.count, offsets[1], "composing two dispatch_data should enumerate as structural data with the first offset as the location of the region")
     }
 
     func test_basicReadWrite() {
@@ -719,40 +723,25 @@ class TestData : TestDataSuper {
         free(underlyingBuffer)
     }
 
-    func expectOverride<T: _ObjectiveCBridgeable>(_ convertible: T, _ selector: String) {
-        expectNotEqual(class_getMethodImplementation(T._ObjectiveCType.self, sel_getUid(selector)), class_getMethodImplementation(object_getClass(convertible._bridgeToObjectiveC()), sel_getUid(selector)), "The bridge of \(T.self) should override \(selector)")
-    }
-
-    func test_bridgeOverrides() {
-        let d = "Hello Bridge".data(using: .utf8)!
-        // required for immutable data
-        expectOverride(d, "length")
-        expectOverride(d, "bytes")
-        // extras (for perf)
-        expectOverride(d, "subdataWithRange:")
-        expectOverride(d, "getBytes:length:")
-        expectOverride(d, "getBytes:range:")
-        expectOverride(d, "isEqualToData:")
-    }
-
     func test_basicDataMutation() {
         let object = ImmutableDataVerifier()
 
         object.verifier.reset()
         var data = object as Data
         expectTrue(object.verifier.wasCopied)
-        expectFalse(object.verifier.wasMutableCopied)
+        expectFalse(object.verifier.wasMutableCopied, "Expected an invocation to mutableCopy")
 
         object.verifier.reset()
         expectTrue(data.count == object.length)
-        assert(!object.verifier.wasCopied)
+        expectFalse(object.verifier.wasCopied, "Expected an invocation to copy")
 
         object.verifier.reset()
         data.append("test", count: 4)
-        expectTrue(object.verifier.wasMutableCopied)
+        expectTrue(object.verifier.wasMutableCopied, "Expected an invocation to mutableCopy")
 
-        let preservedObjectness = (data as NSData) is MutableDataVerifier
-        expectFalse(preservedObjectness)
+        let d = data as NSData
+        let preservedObjectness = d is ImmutableDataVerifier
+        expectTrue(preservedObjectness, "Expected ImmutableDataVerifier but got \(object_getClass(d))")
     }
 
     func test_basicMutableDataMutation() {
@@ -761,29 +750,38 @@ class TestData : TestDataSuper {
         object.verifier.reset()
         var data = object as Data
         expectTrue(object.verifier.wasCopied)
-        expectFalse(object.verifier.wasMutableCopied)
+        expectFalse(object.verifier.wasMutableCopied, "Expected an invocation to mutableCopy")
         
         object.verifier.reset()
         expectTrue(data.count == object.length)
-        expectFalse(object.verifier.wasCopied)
+        expectFalse(object.verifier.wasCopied, "Expected an invocation to copy")
         
         object.verifier.reset()
         data.append("test", count: 4)
-        expectTrue(object.verifier.wasMutableCopied)
-        
-        let preservedObjectness = (data as NSData) is MutableDataVerifier
-        expectFalse(preservedObjectness)
+        expectTrue(object.verifier.wasMutableCopied, "Expected an invocation to mutableCopy")
+        object.verifier.dump()
+
+        let d = data as NSData
+        let preservedObjectness = d is ImmutableDataVerifier
+        expectTrue(preservedObjectness, "Expected ImmutableDataVerifier but got \(object_getClass(d))")
     }
 
     func test_roundTrip() {
         let data = returnsData()
-        expectFalse(identityOfData(data))
+        expectTrue(identityOfData(data))
     }
 
     func test_passing() {
         let object = ImmutableDataVerifier()
-        takesData(object as Data)
+        let object_notPeepholed = object as Data
+        takesData(object_notPeepholed)
         expectTrue(object.verifier.wasCopied)
+    }
+
+    func test_passing_peepholed() {
+        let object = ImmutableDataVerifier()
+        takesData(object as Data)
+        expectFalse(object.verifier.wasCopied) // because of the peephole
     }
     
     // intentionally structured so sizeof() != strideof()
@@ -895,6 +893,328 @@ class TestData : TestDataSuper {
         expectNotEqual(anyHashables[0], anyHashables[1])
         expectEqual(anyHashables[1], anyHashables[2])
     }
+
+    func test_noCopyBehavior() {
+        let ptr = UnsafeMutableRawPointer(bitPattern: 0x1)!
+        
+        var deallocated = false
+        autoreleasepool {
+            let data = Data(bytesNoCopy: ptr, count: 1, deallocator: .custom({ (bytes, length) in
+                deallocated = true
+            }))
+            expectFalse(deallocated)
+            let equal = data.withUnsafeBytes { (bytes: UnsafePointer<UInt8>) -> Bool in
+                return ptr == UnsafeMutableRawPointer(mutating: bytes)
+            }
+            
+            expectTrue(equal)
+        }
+        
+        expectTrue(deallocated)
+    }
+
+    func test_doubleDeallocation() {
+        let data = "12345679".data(using: .utf8)!
+        let len = data.withUnsafeBytes { (bytes: UnsafePointer<UInt8>) -> Int in
+            let slice = Data(bytesNoCopy: UnsafeMutablePointer(mutating: bytes), count: 1, deallocator: .none)
+            return slice.count
+        }
+        expectEqual(len, 1)
+    }
+
+    func test_repeatingValueInitialization() {
+        var d = Data(repeating: 0x01, count: 3)
+        let elements = repeatElement(UInt8(0x02), count: 3) // ensure we fall into the sequence case
+        d.append(contentsOf: elements)
+
+        expectEqual(d[0], 0x01)
+        expectEqual(d[1], 0x01)
+        expectEqual(d[2], 0x01)
+
+        expectEqual(d[3], 0x02)
+        expectEqual(d[4], 0x02)
+        expectEqual(d[5], 0x02)
+    }
+
+    func test_rangeSlice() {
+        var a: [UInt8] = [0, 1, 2, 3, 4, 5, 6, 7]
+        var d = Data(bytes: a)
+        for i in 0..<d.count {
+            for j in i..<d.count {
+                let slice = d[i..<j]
+                if i == 1 && j == 2 {
+                    print("here")
+                    
+                }
+                expectEqual(slice.count, j - i, "where index range is \(i)..<\(j)")
+                expectEqual(slice.map { $0 }, a[i..<j].map { $0 }, "where index range is \(i)..<\(j)")
+                expectEqual(slice.startIndex, i, "where index range is \(i)..<\(j)")
+                expectEqual(slice.endIndex, j, "where index range is \(i)..<\(j)")
+                for n in slice.startIndex..<slice.endIndex {
+                    let p = slice[n]
+                    let q = a[n]
+                    expectEqual(p, q, "where index range is \(i)..<\(j) at index \(n)")
+                }
+            }
+        }
+    }
+
+    func test_rangeZoo() {
+        let r1 = Range(0..<1)
+        let r2 = CountableRange(0..<1)
+        let r3 = ClosedRange(0..<1)
+        let r4 = CountableClosedRange(0..<1)
+
+        let data = Data(bytes: [8, 1, 2, 3, 4])
+        let slice1: Data = data[r1]
+        let slice2: Data = data[r2]
+        let slice3: Data = data[r3]
+        let slice4: Data = data[r4]
+        expectEqual(slice1[0], 8)
+        expectEqual(slice2[0], 8)
+        expectEqual(slice3[0], 8)
+        expectEqual(slice4[0], 8)
+    }
+
+    func test_sliceAppending() {
+        // https://bugs.swift.org/browse/SR-4473
+        var fooData = Data()
+        let barData = Data([0, 1, 2, 3, 4, 5])
+        let slice = barData.suffix(from: 3)
+        fooData.append(slice)
+        expectEqual(fooData[0], 0x03)
+        expectEqual(fooData[1], 0x04)
+        expectEqual(fooData[2], 0x05)
+    }
+    
+    func test_replaceSubrange() {
+        // https://bugs.swift.org/browse/SR-4462
+        let data = Data(bytes: [0x01, 0x02])
+        var dataII = Data(base64Encoded: data.base64EncodedString())!
+        dataII.replaceSubrange(0..<1, with: Data())
+        expectEqual(dataII[0], 0x02)
+    }
+    
+    func test_sliceWithUnsafeBytes() {
+        let base = Data([0, 1, 2, 3, 4, 5])
+        let slice = base[2..<4]
+        let segment = slice.withUnsafeBytes { (ptr: UnsafePointer<UInt8>) -> [UInt8] in
+            return [ptr.pointee, ptr.advanced(by: 1).pointee]
+        }
+        expectEqual(segment, [UInt8(2), UInt8(3)])
+    }
+
+    func test_sliceIteration() {
+        let base = Data([0, 1, 2, 3, 4, 5])
+        let slice = base[2..<4]
+        var found = [UInt8]()
+        for byte in slice {
+            found.append(byte)
+        }
+        expectEqual(found[0], 2)
+        expectEqual(found[1], 3)
+    }
+  
+    func test_unconditionallyBridgeFromObjectiveC() {
+        expectEqual(Data(), Data._unconditionallyBridgeFromObjectiveC(nil))
+    }
+
+    func test_sliceIndexing() {
+        let d = Data(bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        let slice = d[5..<10]
+        expectEqual(slice[5], d[5])
+    }
+    
+    func test_sliceEquality() {
+        let d = Data(bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        let slice = d[5..<7]
+        let expected = Data(bytes: [5, 6])
+        expectEqual(expected, slice)
+    }
+    
+    func test_sliceEquality2() {
+        let d = Data(bytes: [5, 6, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        let slice1 = d[0..<2]
+        let slice2 = d[5..<7]
+        expectEqual(slice1, slice2)
+    }
+    
+    func test_splittingHttp() {
+        func split(_ data: Data, on delimiter: String) -> [Data] {
+            let dataDelimiter = delimiter.data(using: .utf8)!
+            var found = [Data]()
+            let start = data.startIndex
+            let end = data.endIndex.advanced(by: -dataDelimiter.count)
+            guard end >= start else { return [data] }
+            var index = start
+            var previousIndex = index
+            while index < end {
+                let slice = data[index..<index.advanced(by: dataDelimiter.count)]
+                
+                if slice == dataDelimiter {
+                    found.append(data[previousIndex..<index])
+                    previousIndex = index + dataDelimiter.count
+                }
+                
+                index = index.advanced(by: 1)
+            }
+            if index < data.endIndex { found.append(data[index..<index]) }
+            return found
+        }
+        let data = "GET /index.html HTTP/1.1\r\nHost: www.example.com\r\n\r\n".data(using: .ascii)!
+        let fields = split(data, on: "\r\n")
+        let splitFields = fields.map { String(data:$0, encoding: .utf8)! }
+        expectEqual([
+            "GET /index.html HTTP/1.1",
+            "Host: www.example.com",
+            ""
+        ], splitFields)
+    }
+
+    func test_map() {
+        let d1 = Data(bytes: [81, 0, 0, 0, 14])
+        let d2 = d1[1...4]
+        expectEqual(4, d2.count)
+        let expected: [UInt8] = [0, 0, 0, 14]
+        let actual = d2.map { $0 }
+        expectEqual(expected, actual)
+    }
+
+    func test_dropFirst() {
+        var data = Data([0, 1, 2, 3, 4, 5])
+        let sliced = data.dropFirst()
+        expectEqual(data.count - 1, sliced.count)
+        expectEqual(UInt8(1), sliced[1])
+        expectEqual(UInt8(2), sliced[2])
+        expectEqual(UInt8(3), sliced[3])
+        expectEqual(UInt8(4), sliced[4])
+        expectEqual(UInt8(5), sliced[5])
+    }
+
+    func test_dropFirst2() {
+        var data = Data([0, 1, 2, 3, 4, 5])
+        let sliced = data.dropFirst(2)
+        expectEqual(data.count - 2, sliced.count)
+        expectEqual(UInt8(2), sliced[2])
+        expectEqual(UInt8(3), sliced[3])
+        expectEqual(UInt8(4), sliced[4])
+        expectEqual(UInt8(5), sliced[5])
+    }
+
+    func test_copyBytes1() {
+        var array: [UInt8] = [0, 1, 2, 3]
+        var data = Data(bytes: array)
+        
+        array.withUnsafeMutableBufferPointer {
+            data[1..<3].copyBytes(to: $0.baseAddress!, from: 1..<3)
+        }
+        expectEqual([UInt8(1), UInt8(2), UInt8(2), UInt8(3)], array)
+    }
+    
+    func test_copyBytes2() {
+        let array: [UInt8] = [0, 1, 2, 3]
+        var data = Data(bytes: array)
+        
+        let expectedSlice = array[1..<3]
+        
+        let start = data.index(after: data.startIndex)
+        let end = data.index(before: data.endIndex)
+        let slice = data[start..<end]
+        
+        expectEqual(expectedSlice[expectedSlice.startIndex], slice[slice.startIndex])
+    }
+
+    func test_sliceOfSliceViaRangeExpression() {
+        let data = Data(bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        let slice = data[2..<7]
+
+        let sliceOfSlice1 = slice[..<(slice.startIndex + 2)] // this triggers the range expression
+        let sliceOfSlice2 = slice[(slice.startIndex + 2)...] // also triggers range expression
+
+        expectEqual(Data(bytes: [2, 3]), sliceOfSlice1)
+        expectEqual(Data(bytes: [4, 5, 6]), sliceOfSlice2)
+    }
+
+    func test_appendingSlices() {
+        let d1 = Data(bytes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        let slice = d1[1..<2]
+        var d2 = Data()
+        d2.append(slice)
+        expectEqual(Data(bytes: [1]), slice)
+    }
+
+    func test_sequenceInitializers() {
+        let seq = repeatElement(UInt8(0x02), count: 3) // ensure we fall into the sequence case
+        
+        let dataFromSeq = Data(seq)
+        expectEqual(3, dataFromSeq.count)
+        expectEqual(UInt8(0x02), dataFromSeq[0])
+        expectEqual(UInt8(0x02), dataFromSeq[1])
+        expectEqual(UInt8(0x02), dataFromSeq[2])
+
+        let array: [UInt8] = [0, 1, 2, 3, 4, 5, 6]
+
+        let dataFromArray = Data(array)
+        expectEqual(array.count, dataFromArray.count)
+        expectEqual(array[0], dataFromArray[0])
+        expectEqual(array[1], dataFromArray[1])
+        expectEqual(array[2], dataFromArray[2])
+        expectEqual(array[3], dataFromArray[3])
+
+        let slice = array[1..<4]
+        
+        let dataFromSlice = Data(slice)
+        expectEqual(slice.count, dataFromSlice.count)
+        expectEqual(slice.first, dataFromSlice.first)
+        expectEqual(slice.last, dataFromSlice.last)
+
+        let data = Data(bytes: [1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        let dataFromData = Data(data)
+        expectEqual(data, dataFromData)
+
+        let sliceOfData = data[1..<3]
+
+        let dataFromSliceOfData = Data(sliceOfData)
+        expectEqual(sliceOfData, dataFromSliceOfData)
+    }
+
+    func test_reversedDataInit() {
+        let data = Data(bytes: [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        let reversedData = Data(data.reversed())
+        let expected = Data(bytes: [9, 8, 7, 6, 5, 4, 3, 2, 1])
+        expectEqual(expected, reversedData)
+    }
+
+    func test_replaceSubrangeReferencingMutable() {
+        let mdataObj = NSMutableData(bytes: [0x01, 0x02, 0x03, 0x04], length: 4)
+        var data = Data(referencing: mdataObj)
+        let expected = data.count
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+    }
+
+    func test_replaceSubrangeReferencingImmutable() {
+        let dataObj = NSData(bytes: [0x01, 0x02, 0x03, 0x04], length: 4)
+        var data = Data(referencing: dataObj)
+        let expected = data.count
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+    }
+
+    func test_replaceSubrangeFromBridged() {
+        var data = NSData(bytes: [0x01, 0x02, 0x03, 0x04], length: 4) as Data
+        let expected = data.count
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+        data.replaceSubrange(4 ..< 4, with: Data(bytes: []))
+        expectEqual(expected, data.count)
+    }
 }
 
 #if !FOUNDATION_XCTEST
@@ -928,7 +1248,6 @@ DataTests.test("test_dataHash") { TestData().test_dataHash() }
 DataTests.test("test_discontiguousEnumerateBytes") { TestData().test_discontiguousEnumerateBytes() }
 DataTests.test("test_basicReadWrite") { TestData().test_basicReadWrite() }
 DataTests.test("test_writeFailure") { TestData().test_writeFailure() }
-DataTests.test("test_bridgeOverrides") { TestData().test_bridgeOverrides() }
 DataTests.test("test_genericBuffers") { TestData().test_genericBuffers() }
 DataTests.test("test_basicDataMutation") { TestData().test_basicDataMutation() }
 DataTests.test("test_basicMutableDataMutation") { TestData().test_basicMutableDataMutation() }
@@ -938,6 +1257,31 @@ DataTests.test("test_bufferSizeCalculation") { TestData().test_bufferSizeCalcula
 DataTests.test("test_classForCoder") { TestData().test_classForCoder() }
 DataTests.test("test_AnyHashableContainingData") { TestData().test_AnyHashableContainingData() }
 DataTests.test("test_AnyHashableCreatedFromNSData") { TestData().test_AnyHashableCreatedFromNSData() }
+DataTests.test("test_noCopyBehavior") { TestData().test_noCopyBehavior() }
+DataTests.test("test_doubleDeallocation") { TestData().test_doubleDeallocation() }
+DataTests.test("test_repeatingValueInitialization") { TestData().test_repeatingValueInitialization() }
+DataTests.test("test_rangeZoo") { TestData().test_rangeZoo() }
+DataTests.test("test_sliceAppending") { TestData().test_sliceAppending() }
+DataTests.test("test_replaceSubrange") { TestData().test_replaceSubrange() }
+DataTests.test("test_sliceWithUnsafeBytes") { TestData().test_sliceWithUnsafeBytes() }
+DataTests.test("test_sliceIteration") { TestData().test_sliceIteration() }
+DataTests.test("test_unconditionallyBridgeFromObjectiveC") { TestData().test_unconditionallyBridgeFromObjectiveC() }
+DataTests.test("test_sliceIndexing") { TestData().test_sliceIndexing() }
+DataTests.test("test_sliceEquality") { TestData().test_sliceEquality() }
+DataTests.test("test_sliceEquality2") { TestData().test_sliceEquality2() }
+DataTests.test("test_splittingHttp") { TestData().test_splittingHttp() }
+DataTests.test("test_map") { TestData().test_map() }
+DataTests.test("test_dropFirst") { TestData().test_dropFirst() }
+DataTests.test("test_dropFirst2") { TestData().test_dropFirst2() }
+DataTests.test("test_copyBytes1") { TestData().test_copyBytes1() }
+DataTests.test("test_copyBytes2") { TestData().test_copyBytes2() }
+DataTests.test("test_sliceOfSliceViaRangeExpression") { TestData().test_sliceOfSliceViaRangeExpression() }
+DataTests.test("test_appendingSlices") { TestData().test_appendingSlices() }
+DataTests.test("test_sequenceInitializers") { TestData().test_sequenceInitializers() }
+DataTests.test("test_reversedDataInit") { TestData().test_reversedDataInit() }
+DataTests.test("test_replaceSubrangeReferencingMutable") { TestData().test_replaceSubrangeReferencingMutable() }
+DataTests.test("test_replaceSubrangeReferencingImmutable") { TestData().test_replaceSubrangeReferencingImmutable() }
+DataTests.test("test_replaceSubrangeFromBridged") { TestData().test_replaceSubrangeFromBridged() }
 
 // XCTest does not have a crash detection, whereas lit does
 DataTests.test("bounding failure subdata") {

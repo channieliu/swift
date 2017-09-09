@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -69,6 +69,7 @@ _swift_shims_CFIndex _swift_stdlib_CFStringGetLength(
     _swift_shims_CFStringRef _Nonnull theString);
 
 SWIFT_RUNTIME_STDLIB_INTERFACE
+__attribute__((ns_returns_retained))
 _swift_shims_CFStringRef _Nonnull _swift_stdlib_CFStringCreateWithSubstring(
     _swift_shims_CFAllocatorRef _Nullable alloc,
     _swift_shims_CFStringRef _Nonnull str, _swift_shims_CFRange range);
@@ -78,6 +79,7 @@ _swift_shims_UniChar _swift_stdlib_CFStringGetCharacterAtIndex(
     _swift_shims_CFStringRef _Nonnull theString, _swift_shims_CFIndex idx);
 
 SWIFT_RUNTIME_STDLIB_INTERFACE
+__attribute__((ns_returns_retained))
 _swift_shims_CFStringRef _Nonnull _swift_stdlib_CFStringCreateCopy(
     _swift_shims_CFAllocatorRef _Nullable alloc,
     _swift_shims_CFStringRef _Nonnull theString);

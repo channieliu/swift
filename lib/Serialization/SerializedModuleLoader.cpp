@@ -2,23 +2,24 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Serialization/ModuleFile.h"
 #include "swift/Strings.h"
-#include "swift/AST/AST.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Version.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Debug.h"
@@ -39,15 +40,25 @@ SerializedModuleLoader::~SerializedModuleLoader() = default;
 static std::error_code
 openModuleFiles(StringRef DirName, StringRef ModuleFilename,
                 StringRef ModuleDocFilename,
-                std::unique_ptr<llvm::MemoryBuffer> &ModuleBuffer,
-                std::unique_ptr<llvm::MemoryBuffer> &ModuleDocBuffer,
+                std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
+                std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
                 llvm::SmallVectorImpl<char> &Scratch) {
+  assert(((ModuleBuffer && ModuleDocBuffer)
+            || (!ModuleBuffer && !ModuleDocBuffer))
+         && "Module and Module Doc buffer must both be initialized or NULL");
   // Try to open the module file first.  If we fail, don't even look for the
   // module documentation file.
   Scratch.clear();
   llvm::sys::path::append(Scratch, DirName, ModuleFilename);
+  // If there are no buffers to load into, simply check for the existence of
+  // the module file.
+  if (!(ModuleBuffer || ModuleDocBuffer)) {
+    return llvm::sys::fs::access(StringRef(Scratch.data(), Scratch.size()),
+                                 llvm::sys::fs::AccessMode::Exist);
+  }
+
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> ModuleOrErr =
-    llvm::MemoryBuffer::getFile(StringRef(Scratch.data(), Scratch.size()));
+  llvm::MemoryBuffer::getFile(StringRef(Scratch.data(), Scratch.size()));
   if (!ModuleOrErr)
     return ModuleOrErr.getError();
 
@@ -56,21 +67,23 @@ openModuleFiles(StringRef DirName, StringRef ModuleFilename,
   Scratch.clear();
   llvm::sys::path::append(Scratch, DirName, ModuleDocFilename);
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> ModuleDocOrErr =
-    llvm::MemoryBuffer::getFile(StringRef(Scratch.data(), Scratch.size()));
+  llvm::MemoryBuffer::getFile(StringRef(Scratch.data(), Scratch.size()));
   if (!ModuleDocOrErr &&
       ModuleDocOrErr.getError() != std::errc::no_such_file_or_directory) {
     return ModuleDocOrErr.getError();
   }
-  ModuleBuffer = std::move(ModuleOrErr.get());
+
+  *ModuleBuffer = std::move(ModuleOrErr.get());
   if (ModuleDocOrErr)
-    ModuleDocBuffer = std::move(ModuleDocOrErr.get());
+    *ModuleDocBuffer = std::move(ModuleDocOrErr.get());
+
   return std::error_code();
 }
 
 static bool
 findModule(ASTContext &ctx, AccessPathElem moduleID,
-           std::unique_ptr<llvm::MemoryBuffer> &moduleBuffer,
-           std::unique_ptr<llvm::MemoryBuffer> &moduleDocBuffer,
+           std::unique_ptr<llvm::MemoryBuffer> *moduleBuffer,
+           std::unique_ptr<llvm::MemoryBuffer> *moduleDocBuffer,
            bool &isFramework) {
   llvm::SmallString<64> moduleFilename(moduleID.first.str());
   moduleFilename += '.';
@@ -83,7 +96,7 @@ findModule(ASTContext &ctx, AccessPathElem moduleID,
   // FIXME: Which name should we be using here? Do we care about CPU subtypes?
   // FIXME: At the very least, don't hardcode "arch".
   llvm::SmallString<16> archFile{
-      ctx.LangOpts.getPlatformConditionValue("arch")};
+      ctx.LangOpts.getPlatformConditionValue(PlatformConditionKind::Arch)};
   llvm::SmallString<16> archDocFile{archFile};
   if (!archFile.empty()) {
     archFile += '.';
@@ -95,7 +108,6 @@ findModule(ASTContext &ctx, AccessPathElem moduleID,
 
   llvm::SmallString<128> scratch;
   llvm::SmallString<128> currPath;
-
   isFramework = false;
   for (auto path : ctx.SearchPathOpts.ImportSearchPaths) {
     auto err = openModuleFiles(path,
@@ -119,15 +131,33 @@ findModule(ASTContext &ctx, AccessPathElem moduleID,
     moduleFramework += ".framework";
     isFramework = true;
 
-    for (auto path : ctx.SearchPathOpts.FrameworkSearchPaths) {
-      currPath = path;
+    auto tryFrameworkImport = [&](StringRef frameworkPath) -> bool {
+      currPath = frameworkPath;
       llvm::sys::path::append(currPath, moduleFramework.str(),
                               "Modules", moduleFilename.str());
       auto err = openModuleFiles(currPath,
                                  archFile.str(), archDocFile.str(),
                                  moduleBuffer, moduleDocBuffer,
                                  scratch);
-      if (!err)
+      return !err;
+    };
+
+    for (const auto &framepath : ctx.SearchPathOpts.FrameworkSearchPaths) {
+      if (tryFrameworkImport(framepath.Path))
+        return true;
+    }
+
+    if (ctx.LangOpts.Target.isOSDarwin()) {
+      // Apple platforms have extra implicit framework search paths:
+      // $SDKROOT/System/Library/Frameworks/ and $SDKROOT/Library/Frameworks/
+      scratch = ctx.SearchPathOpts.SDKPath;
+      llvm::sys::path::append(scratch, "System", "Library", "Frameworks");
+      if (tryFrameworkImport(scratch))
+        return true;
+
+      scratch = ctx.SearchPathOpts.SDKPath;
+      llvm::sys::path::append(scratch, "Library", "Frameworks");
+      if (tryFrameworkImport(scratch))
         return true;
     }
   }
@@ -144,14 +174,14 @@ findModule(ASTContext &ctx, AccessPathElem moduleID,
 }
 
 FileUnit *SerializedModuleLoader::loadAST(
-    Module &M, Optional<SourceLoc> diagLoc,
+    ModuleDecl &M, Optional<SourceLoc> diagLoc,
     std::unique_ptr<llvm::MemoryBuffer> moduleInputBuffer,
     std::unique_ptr<llvm::MemoryBuffer> moduleDocInputBuffer,
     bool isFramework) {
   assert(moduleInputBuffer);
 
-  const char *moduleBufferID = moduleInputBuffer->getBufferIdentifier();
-  const char *moduleDocBufferID = nullptr;
+  StringRef moduleBufferID = moduleInputBuffer->getBufferIdentifier();
+  StringRef moduleDocBufferID;
   if (moduleDocInputBuffer)
     moduleDocBufferID = moduleDocInputBuffer->getBufferIdentifier();
 
@@ -170,8 +200,6 @@ FileUnit *SerializedModuleLoader::loadAST(
                        isFramework, loadedModuleFile,
                        &extendedInfo);
   if (loadInfo.status == serialization::Status::Valid) {
-    Ctx.bumpGeneration();
-
     M.setResilienceStrategy(extendedInfo.getResilienceStrategy());
 
     // We've loaded the file. Now try to bring it into the AST.
@@ -185,6 +213,7 @@ FileUnit *SerializedModuleLoader::loadAST(
     loadInfo.status =
         loadedModuleFile->associateWithFileContext(fileUnit, diagLocOrInvalid);
     if (loadInfo.status == serialization::Status::Valid) {
+      Ctx.bumpGeneration();
       LoadedModuleFiles.emplace_back(std::move(loadedModuleFile),
                                      Ctx.getCurrentGeneration());
       return fileUnit;
@@ -203,7 +232,7 @@ FileUnit *SerializedModuleLoader::loadAST(
 
     SmallString<32> versionBuf;
     llvm::raw_svector_ostream versionString(versionBuf);
-    versionString << version::Version::getCurrentLanguageVersion();
+    versionString << Ctx.LangOpts.EffectiveLanguageVersion;
     if (versionString.str() == shortVersion)
       return false;
 
@@ -236,9 +265,9 @@ FileUnit *SerializedModuleLoader::loadAST(
     break;
 
   case serialization::Status::MalformedDocumentation:
-    assert(moduleDocBufferID);
+    assert(!moduleDocBufferID.empty());
     Ctx.Diags.diagnose(*diagLoc, diag::serialization_malformed_module,
-                       moduleDocBufferID ? moduleDocBufferID : "");
+                       moduleDocBufferID);
     break;
 
   case serialization::Status::MissingDependency: {
@@ -353,8 +382,23 @@ FileUnit *SerializedModuleLoader::loadAST(
   return nullptr;
 }
 
-Module *SerializedModuleLoader::loadModule(SourceLoc importLoc,
-                                           Module::AccessPathTy path) {
+bool
+SerializedModuleLoader::canImportModule(std::pair<Identifier, SourceLoc> mID) {
+  // First see if we find it in the registered memory buffers.
+  if (!MemoryBuffers.empty()) {
+    auto bufIter = MemoryBuffers.find(mID.first.str());
+    if (bufIter != MemoryBuffers.end()) {
+      return true;
+    }
+  }
+
+  // Otherwise look on disk.
+  bool isFramework = false;
+  return findModule(Ctx, mID, nullptr, nullptr, isFramework);
+}
+
+ModuleDecl *SerializedModuleLoader::loadModule(SourceLoc importLoc,
+                                               ModuleDecl::AccessPathTy path) {
   // FIXME: Swift submodules?
   if (path.size() > 1)
     return nullptr;
@@ -378,7 +422,7 @@ Module *SerializedModuleLoader::loadModule(SourceLoc importLoc,
 
   // Otherwise look on disk.
   if (!moduleInputBuffer) {
-    if (!findModule(Ctx, moduleID, moduleInputBuffer, moduleDocInputBuffer,
+    if (!findModule(Ctx, moduleID, &moduleInputBuffer, &moduleDocInputBuffer,
                     isFramework)) {
       return nullptr;
     }
@@ -388,7 +432,7 @@ Module *SerializedModuleLoader::loadModule(SourceLoc importLoc,
 
   assert(moduleInputBuffer);
 
-  auto M = Module::create(moduleID.first, Ctx);
+  auto M = ModuleDecl::create(moduleID.first, Ctx);
   Ctx.LoadedModules[moduleID.first] = M;
 
   if (!loadAST(*M, moduleID.second, std::move(moduleInputBuffer),
@@ -434,22 +478,22 @@ void SerializedModuleLoader::verifyAllModules() {
 //-----------------------------------------------------------------------------
 
 void SerializedASTFile::getImportedModules(
-    SmallVectorImpl<Module::ImportedModule> &imports,
-    Module::ImportFilter filter) const {
+    SmallVectorImpl<ModuleDecl::ImportedModule> &imports,
+    ModuleDecl::ImportFilter filter) const {
   File.getImportedModules(imports, filter);
 }
 
 void SerializedASTFile::collectLinkLibrariesFromImports(
-    Module::LinkLibraryCallback callback) const {
-  llvm::SmallVector<Module::ImportedModule, 8> Imports;
-  File.getImportedModules(Imports, Module::ImportFilter::All);
+    ModuleDecl::LinkLibraryCallback callback) const {
+  llvm::SmallVector<ModuleDecl::ImportedModule, 8> Imports;
+  File.getImportedModules(Imports, ModuleDecl::ImportFilter::All);
 
   for (auto Import : Imports)
     Import.second->collectLinkLibraries(callback);
 }
 
 void SerializedASTFile::collectLinkLibraries(
-    Module::LinkLibraryCallback callback) const {
+    ModuleDecl::LinkLibraryCallback callback) const {
   if (isSIB()) {
     collectLinkLibrariesFromImports(callback);
   } else {
@@ -468,10 +512,10 @@ bool SerializedASTFile::isSystemModule() const {
   return false;
 }
 
-void SerializedASTFile::lookupValue(Module::AccessPathTy accessPath,
+void SerializedASTFile::lookupValue(ModuleDecl::AccessPathTy accessPath,
                                     DeclName name, NLKind lookupKind,
                                     SmallVectorImpl<ValueDecl*> &results) const{
-  if (!Module::matchesAccessPath(accessPath, name))
+  if (!ModuleDecl::matchesAccessPath(accessPath, name))
     return;
   
   File.lookupValue(name, results);
@@ -479,6 +523,12 @@ void SerializedASTFile::lookupValue(Module::AccessPathTy accessPath,
 
 TypeDecl *SerializedASTFile::lookupLocalType(llvm::StringRef MangledName) const{
   return File.lookupLocalType(MangledName);
+}
+
+TypeDecl *
+SerializedASTFile::lookupNestedType(Identifier name,
+                                    const NominalTypeDecl *parent) const {
+  return File.lookupNestedType(name, parent);
 }
 
 OperatorDecl *SerializedASTFile::lookupOperator(Identifier name,
@@ -491,19 +541,19 @@ SerializedASTFile::lookupPrecedenceGroup(Identifier name) const {
   return File.lookupPrecedenceGroup(name);
 }
 
-void SerializedASTFile::lookupVisibleDecls(Module::AccessPathTy accessPath,
+void SerializedASTFile::lookupVisibleDecls(ModuleDecl::AccessPathTy accessPath,
                                            VisibleDeclConsumer &consumer,
                                            NLKind lookupKind) const {
   File.lookupVisibleDecls(accessPath, consumer, lookupKind);
 }
 
-void SerializedASTFile::lookupClassMembers(Module::AccessPathTy accessPath,
+void SerializedASTFile::lookupClassMembers(ModuleDecl::AccessPathTy accessPath,
                                            VisibleDeclConsumer &consumer) const{
   File.lookupClassMembers(accessPath, consumer);
 }
 
 void
-SerializedASTFile::lookupClassMember(Module::AccessPathTy accessPath,
+SerializedASTFile::lookupClassMember(ModuleDecl::AccessPathTy accessPath,
                                      DeclName name,
                                      SmallVectorImpl<ValueDecl*> &decls) const {
   File.lookupClassMember(accessPath, name, decls);

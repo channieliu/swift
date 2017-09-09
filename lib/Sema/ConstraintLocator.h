@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -75,6 +75,8 @@ public:
     TupleElement,
     /// \brief A tuple element referenced by name.
     NamedTupleElement,
+    /// \brief An optional payload.
+    OptionalPayload,
     /// \brief A generic argument.
     /// FIXME: Add support for named generic arguments?
     GenericArgument,
@@ -91,8 +93,6 @@ public:
     SubscriptIndex,
     /// \brief The result of a subscript expression.
     SubscriptResult,
-    /// \brief An argument to string interpolation.
-    InterpolationArgument,
     /// \brief The lookup for a constructor member.
     ConstructorMember,
     /// \brief Rvalue adjustment.
@@ -121,6 +121,8 @@ public:
     /// This is referring to a type produced by opening a generic type at the
     /// base of the locator.
     OpenedGeneric,
+    /// A component of a key path.
+    KeyPathComponent,
   };
 
   /// \brief Determine the number of numeric values used for the given path
@@ -133,6 +135,7 @@ public:
     case AssociatedType:
     case FunctionArgument:
     case FunctionResult:
+    case OptionalPayload:
     case Member:
     case MemberRefBase:
     case UnresolvedMember:
@@ -155,14 +158,16 @@ public:
       return 0;
 
     case GenericArgument:
-    case InterpolationArgument:
     case NamedTupleElement:
     case TupleElement:
+    case KeyPathComponent:
       return 1;
 
     case ApplyArgToParam:
       return 2;
     }
+
+    llvm_unreachable("Unhandled PathElementKind in switch.");
   }
 
   /// Flags for efficiently recording certain information about a path.
@@ -189,6 +194,7 @@ public:
     case ConstructorMember:
     case InstanceType:
     case Load:
+    case OptionalPayload:
     case Member:
     case MemberRefBase:
     case UnresolvedMember:
@@ -202,18 +208,19 @@ public:
     case Archetype:
     case AssociatedType:
     case GenericArgument:
-    case InterpolationArgument:
     case NamedTupleElement:
     case TupleElement:
     case Requirement:
     case Witness:
+    case KeyPathComponent:
       return 0;
 
     case FunctionArgument:
     case FunctionResult:
       return IsFunctionConversion;
     }
-    llvm_unreachable("bad path element kind");
+
+    llvm_unreachable("Unhandled PathElementKind in switch.");
   }
 
   template<unsigned N> struct incomplete;
@@ -331,11 +338,10 @@ public:
     static PathElement getGenericArgument(unsigned position) {
       return PathElement(GenericArgument, position);
     }
-
-    /// \brief Retrieve a path element for an argument to string
-    /// interpolation.
-    static PathElement getInterpolationArgument(unsigned position) {
-      return PathElement(InterpolationArgument, position);
+    
+    /// Get a path element for a key path component.
+    static PathElement getKeyPathComponent(unsigned position) {
+      return PathElement(KeyPathComponent, position);
     }
 
     /// \brief Retrieve the kind of path element.
@@ -354,6 +360,8 @@ public:
       case StoredKindAndValue:
         return decodeStorage(storage).first;
       }
+
+      llvm_unreachable("Unhandled StoredKind in switch.");
     }
 
     /// \brief Retrieve the value associated with this path element,
@@ -615,6 +623,7 @@ public:
   }
 };
 
-} } // end namespace swift::constraints
+} // end namespace constraints
+} // end namespace swift
 
 #endif // LLVM_SWIFT_SEMA_CONSTRAINTLOCATOR_H

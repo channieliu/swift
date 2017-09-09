@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -379,11 +379,23 @@ public:
   /// Get the side-effects of a call site.
   void getEffects(FunctionEffects &ApplyEffects, FullApplySite FAS);
   
-  /// No invalidation is needed. See comment for SideEffectAnalysis.
-  virtual void invalidate(InvalidationKind K) override;
+  /// Invalidate all information in this analysis.
+  virtual void invalidate() override;
   
-  /// No invalidation is needed. See comment for SideEffectAnalysis.
+  /// Invalidate all of the information for a specific function.
   virtual void invalidate(SILFunction *F, InvalidationKind K)  override;
+
+  /// Notify the analysis about a newly created function.
+  virtual void notifyAddFunction(SILFunction *F) override { }
+
+  /// Notify the analysis about a function which will be deleted from the
+  /// module.
+  virtual void notifyDeleteFunction(SILFunction *F) override {
+    invalidate(F, InvalidationKind::Nothing);
+  }
+
+  /// Notify the analysis about changed witness or vtables.
+  virtual void invalidateFunctionTables() override { }
 };
 
 } // end namespace swift

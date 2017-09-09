@@ -2,27 +2,16 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported import Foundation // Clang module
-
-@_silgen_name("__NSLocaleIsAutoupdating")
-internal func __NSLocaleIsAutoupdating(_ locale: NSLocale) -> Bool
-
-@_silgen_name("__NSLocaleAutoupdating")
-internal func __NSLocaleAutoupdating() -> NSLocale
-
-@_silgen_name("__NSLocaleCurrent")
-internal func __NSLocaleCurrent() -> NSLocale
-
-@_silgen_name("__NSLocaleBackstop")
-internal func __NSLocaleBackstop() -> NSLocale
+import _SwiftFoundationOverlayShims
 
 /**
  `Locale` encapsulates information about linguistic, cultural, and technological conventions and standards. Examples of information encapsulated by a locale include the symbol used for the decimal separator in numbers and the way dates are formatted.
@@ -39,14 +28,16 @@ public struct Locale : Hashable, Equatable, ReferenceConvertible {
 
     /// Returns a locale which tracks the user's current preferences.
     ///
-    /// The autoupdatingCurrent locale will stop auto-updating if mutated. It only compares equal to itself.
+    /// If mutated, this Locale will no longer track the user's preferences.
+    ///
+    /// - note: The autoupdating Locale will only compare equal to another autoupdating Locale.
     public static var autoupdatingCurrent : Locale {
-        return Locale(adoptingReference: __NSLocaleAutoupdating(), autoupdating: true)
+        return Locale(adoptingReference: __NSLocaleAutoupdating() as! NSLocale, autoupdating: true)
     }
     
     /// Returns the user's current locale.
     public static var current : Locale {
-        return Locale(adoptingReference: __NSLocaleCurrent(), autoupdating: false)
+        return Locale(adoptingReference: __NSLocaleCurrent() as! NSLocale, autoupdating: false)
     }
     
     @available(*, unavailable, message: "Consider using the user's locale or nil instead, depending on use case")
@@ -433,9 +424,9 @@ public struct Locale : Hashable, Equatable, ReferenceConvertible {
 
 extension Locale : CustomDebugStringConvertible, CustomStringConvertible, CustomReflectable {
     private var _kindDescription : String {
-        if (self == Locale.autoupdatingCurrent) {
+        if self == Locale.autoupdatingCurrent {
             return "autoupdatingCurrent"
-        } else if (self == Locale.current) {
+        } else if self == Locale.current {
             return "current"
         } else {
             return "fixed"
@@ -490,3 +481,19 @@ extension NSLocale : _HasCustomAnyHashableRepresentation {
     }
 }
 
+extension Locale : Codable {
+    private enum CodingKeys : Int, CodingKey {
+        case identifier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let identifier = try container.decode(String.self, forKey: .identifier)
+        self.init(identifier: identifier)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.identifier, forKey: .identifier)
+    }
+}

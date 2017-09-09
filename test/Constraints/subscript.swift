@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // Simple subscript of arrays:
 func simpleSubscript(_ array: [Float], x: Int) -> Float {
@@ -105,4 +105,14 @@ class C_r25601561 {
     let s: String = a[i]!.value()! // expected-error {{cannot convert value of type 'Any' to specified type 'String'}}
     return s
   }
+}
+
+// rdar://problem/31977679 - Misleading diagnostics when using subscript with incorrect argument
+
+func r31977679_1(_ properties: [String: String]) -> Any? {
+  return properties[0] // expected-error {{cannot subscript a value of type '[String : String]' with an index of type 'Int'}}
+}
+
+func r31977679_2(_ properties: [String: String]) -> Any? {
+  return properties["foo"] // Ok
 }

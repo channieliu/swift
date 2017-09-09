@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -463,18 +463,9 @@ extension TestSuite {
     collectionIsBidirectional: Bool = false
   ) where
     C.SubSequence : Collection,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
     C.Indices : Collection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
     CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
-    CollectionWithEquatableElement.SubSequence.Iterator.Element
-      == CollectionWithEquatableElement.Iterator.Element {
+    CollectionWithEquatableElement.SubSequence : Collection {
 
     var testNamePrefix = testNamePrefix
 
@@ -601,6 +592,19 @@ self.test("\(testNamePrefix).append(contentsOf:)/semantics") {
     let newElements =
       MinimalCollection(elements: test.newElements.map(wrapValue))
     c.append(contentsOf: newElements)
+    expectEqualSequence(
+      test.expected,
+      c.map { extractValue($0).value },
+      stackTrace: SourceLocStack().with(test.loc))
+  }
+}
+
+self.test("\(testNamePrefix).OperatorPlusEquals") {
+  for test in appendContentsOfTests {
+    var c = makeWrappedCollection(test.collection)
+    let newElements =
+      MinimalCollection(elements: test.newElements.map(wrapValue))
+    c += newElements
     expectEqualSequence(
       test.expected,
       c.map { extractValue($0).value },
@@ -1177,18 +1181,8 @@ self.test("\(testNamePrefix).OperatorPlus") {
     outOfBoundsIndexOffset: Int = 1
   ) where
     C.SubSequence : BidirectionalCollection & RangeReplaceableCollection,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
     C.Indices : BidirectionalCollection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
-    CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
-    CollectionWithEquatableElement.SubSequence.Iterator.Element
-      == CollectionWithEquatableElement.Iterator.Element {
+    CollectionWithEquatableElement.Iterator.Element : Equatable {
 
     var testNamePrefix = testNamePrefix
 
@@ -1309,18 +1303,8 @@ self.test("\(testNamePrefix).removeLast(n: Int)/whereIndexIsBidirectional/remove
     outOfBoundsIndexOffset: Int = 1
   ) where
     C.SubSequence : RandomAccessCollection & RangeReplaceableCollection,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
     C.Indices : RandomAccessCollection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
-    CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
-    CollectionWithEquatableElement.SubSequence.Iterator.Element
-      == CollectionWithEquatableElement.Iterator.Element {
+    CollectionWithEquatableElement.Iterator.Element : Equatable {
 
     var testNamePrefix = testNamePrefix
 

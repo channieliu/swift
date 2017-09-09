@@ -1,3 +1,6 @@
+cmake_minimum_required(VERSION 3.4.3)
+include("../../../../cmake/modules/StandaloneOverlay.cmake")
+
 add_swift_library(swiftCoreMedia ${SWIFT_SDK_OVERLAY_LIBRARY_BUILD_TYPES} IS_SDK_OVERLAY
   CMTime.swift
   CMTimeRange.swift
@@ -9,4 +12,8 @@ add_swift_library(swiftCoreMedia ${SWIFT_SDK_OVERLAY_LIBRARY_BUILD_TYPES} IS_SDK
   SWIFT_MODULE_DEPENDS_IOS Darwin CoreAudio CoreGraphics Dispatch Foundation ObjectiveC # auto-updated
   SWIFT_MODULE_DEPENDS_TVOS Darwin CoreAudio CoreGraphics Dispatch Foundation ObjectiveC # auto-updated
   FRAMEWORK_DEPENDS CoreMedia
+
+  DEPLOYMENT_VERSION_OSX ${SWIFTLIB_DEPLOYMENT_VERSION_COREMEDIA_OSX}
+  DEPLOYMENT_VERSION_IOS ${SWIFTLIB_DEPLOYMENT_VERSION_COREMEDIA_IOS}
+  DEPLOYMENT_VERSION_TVOS ${SWIFTLIB_DEPLOYMENT_VERSION_COREMEDIA_TVOS}
 )

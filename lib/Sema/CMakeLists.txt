@@ -1,7 +1,14 @@
+
+if (SWIFT_FORCE_OPTIMIZED_TYPECHECKER)
+  set(EXTRA_TYPECHECKER_FLAGS "FORCE_BUILD_OPTIMIZED")
+endif()
+
 add_swift_library(swiftSema STATIC
   CSApply.cpp
+  CSBindings.cpp
   CSDiag.cpp
   CSGen.cpp
+  CSPropagate.cpp
   CSRanking.cpp
   CSSimplify.cpp
   CSSolver.cpp
@@ -10,6 +17,8 @@ add_swift_library(swiftSema STATIC
   ConstraintGraph.cpp
   ConstraintLocator.cpp
   ConstraintSystem.cpp
+  DerivedConformanceCodable.cpp
+  DerivedConformanceCodingKey.cpp
   DerivedConformanceEquatableHashable.cpp
   DerivedConformanceError.cpp
   DerivedConformanceRawRepresentable.cpp
@@ -17,13 +26,18 @@ add_swift_library(swiftSema STATIC
   ITCDecl.cpp
   ITCNameLookup.cpp
   ITCType.cpp
+  InstrumenterSupport.cpp
   IterativeTypeChecker.cpp
   MiscDiagnostics.cpp
   NameBinding.cpp
+  PCMacro.cpp
   PlaygroundTransform.cpp
+  ResilienceDiagnostics.cpp
   SourceLoader.cpp
   TypeCheckAttr.cpp
+  TypeCheckAvailability.cpp
   TypeCheckCaptures.cpp
+  TypeCheckCircularity.cpp
   TypeCheckConstraints.cpp
   TypeCheckDecl.cpp
   TypeCheckError.cpp
@@ -36,9 +50,15 @@ add_swift_library(swiftSema STATIC
   TypeCheckREPL.cpp
   TypeCheckRequest.cpp
   TypeCheckStmt.cpp
+  TypeCheckSwitchStmt.cpp
   TypeCheckType.cpp
   TypeChecker.cpp
+  DEPENDS
+    swift-syntax-generated-headers
   LINK_LIBRARIES
     swiftParse
-    swiftAST)
+    swiftAST
+    swiftSerialization
+  ${EXTRA_TYPECHECKER_FLAGS}
+)
 

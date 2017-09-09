@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -21,7 +21,6 @@
 #include "ARCEntryPointBuilder.h"
 #include "LLVMARCOpts.h"
 #include "swift/Basic/NullablePtr.h"
-#include "swift/Basic/Fallthrough.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
@@ -549,18 +548,20 @@ static DtorKind analyzeDestructor(Value *P) {
   // We have to have a known heap metadata value, reject dynamically computed
   // ones, or places
   // Also, make sure we have a definitive initializer for the global.
-  GlobalVariable *GV = dyn_cast<GlobalVariable>(P->stripPointerCasts());
-  if (GV == 0 || !GV->hasDefinitiveInitializer())
+  auto *GV = dyn_cast<GlobalVariable>(P->stripPointerCasts());
+  if (GV == nullptr || !GV->hasDefinitiveInitializer())
     return DtorKind::Unknown;
 
   ConstantStruct *CS = dyn_cast_or_null<ConstantStruct>(GV->getInitializer());
-  if (CS == 0 || CS->getNumOperands() == 0) return DtorKind::Unknown;
+  if (CS == nullptr || CS->getNumOperands() == 0)
+    return DtorKind::Unknown;
 
   // FIXME: Would like to abstract the dtor slot (#0) out from this to somewhere
   // unified.
   enum { DTorSlotOfHeapMetadata = 0 };
-  Function *DtorFn =dyn_cast<Function>(CS->getOperand(DTorSlotOfHeapMetadata));
-  if (DtorFn == 0 || DtorFn->isInterposable() || DtorFn->hasExternalLinkage())
+  auto *DtorFn = dyn_cast<Function>(CS->getOperand(DTorSlotOfHeapMetadata));
+  if (DtorFn == nullptr || DtorFn->isInterposable() ||
+      DtorFn->hasExternalLinkage())
     return DtorKind::Unknown;
 
   // Okay, we have a body, and we can trust it.  If the function is marked
@@ -634,12 +635,12 @@ static DtorKind analyzeDestructor(Value *P) {
         if (!I.mayHaveSideEffects()) continue;
 
         // store, memcpy, memmove *to* the object can be dropped.
-        if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+        if (auto *SI = dyn_cast<StoreInst>(&I)) {
           if (SI->getPointerOperand()->stripInBoundsOffsets() == ThisObject)
             continue;
         }
 
-        if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(&I)) {
+        if (auto *MI = dyn_cast<MemIntrinsic>(&I)) {
           if (MI->getDest()->stripInBoundsOffsets() == ThisObject)
             continue;
         }
@@ -648,9 +649,12 @@ static DtorKind analyzeDestructor(Value *P) {
         break;
       }
 
-      // Okay, the function has some side effects, if it doesn't capture the
-      // object argument, at least that is something.
-      return DtorFn->doesNotCapture(0) ? DtorKind::NoEscape : DtorKind::Unknown;
+      // Okay, the function has some side effects.
+      //
+      // TODO: We could in the future return more accurate information by
+      // checking if the function is able to capture the deinit parameter. We do
+      // not do that today.
+      return DtorKind::Unknown;
     }
   }
 
@@ -752,7 +756,7 @@ static bool performStoreOnlyObjectElimination(CallInst &Allocation,
       // object is being stored *to*, not itself being stored (which would be an
       // escape point).  Since stores themselves don't have any uses, we can
       // short-cut the classification scheme above.
-      if (StoreInst *SI = dyn_cast<StoreInst>(User)) {
+      if (auto *SI = dyn_cast<StoreInst>(User)) {
         // If this is a store *to* the object, we can zap it.
         if (UI.getUse().getOperandNo() == StoreInst::getPointerOperandIndex()) {
           InvolvedInstructions.insert(SI);
@@ -761,7 +765,7 @@ static bool performStoreOnlyObjectElimination(CallInst &Allocation,
         // Otherwise, using the object as a source (or size) is an escape.
         return false;
       }
-      if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(User)) {
+      if (auto *MI = dyn_cast<MemIntrinsic>(User)) {
         // If this is a memset/memcpy/memmove *to* the object, we can zap it.
         if (UI.getUse().getOperandNo() == 0) {
           InvolvedInstructions.insert(MI);

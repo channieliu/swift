@@ -2,18 +2,18 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-passmanager"
 
 #include "swift/SILOptimizer/PassManager/PassManager.h"
-#include "swift/Basic/DemangleWrappers.h"
+#include "swift/Demangling/Demangle.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
@@ -27,7 +27,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/TimeValue.h"
+#include "llvm/Support/Chrono.h"
 
 using namespace swift;
 
@@ -114,7 +114,7 @@ struct DebugOnlyPassNumberOpt {
   }
 };
 
-}
+} // end anonymous namespace
 
 static DebugOnlyPassNumberOpt DebugOnlyPassNumberOptLoc;
 
@@ -137,7 +137,9 @@ static bool doPrintBefore(SILTransform *T, SILFunction *F) {
     return false;
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return T->getName().find(Str) != StringRef::npos;
+    return T->getName().find(Str) != StringRef::npos
+      || T->getTag().find(Str) != StringRef::npos
+      || T->getID().find(Str) != StringRef::npos;
   };
 
   if (SILPrintBefore.end() !=
@@ -160,7 +162,9 @@ static bool doPrintAfter(SILTransform *T, SILFunction *F, bool Default) {
     return false;
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return T->getName().find(Str) != StringRef::npos;
+    return T->getName().find(Str) != StringRef::npos
+      || T->getTag().find(Str) != StringRef::npos
+      || T->getID().find(Str) != StringRef::npos;
   };
 
   if (SILPrintAfter.end() !=
@@ -176,8 +180,11 @@ static bool doPrintAfter(SILTransform *T, SILFunction *F, bool Default) {
 
 static bool isDisabled(SILTransform *T) {
   for (const std::string &NamePattern : SILDisablePass) {
-    if (T->getName().find(NamePattern) != StringRef::npos)
+    if (T->getName().find(NamePattern) != StringRef::npos
+        || T->getTag().find(NamePattern) != StringRef::npos
+        || T->getID().find(NamePattern) != StringRef::npos) {
       return true;
+    }
   }
   return false;
 }
@@ -241,6 +248,12 @@ SILPassManager::SILPassManager(SILModule *M, llvm::StringRef Stage) :
   }
 }
 
+SILPassManager::SILPassManager(SILModule *M, irgen::IRGenModule *IRMod,
+                               llvm::StringRef Stage)
+    : SILPassManager(M, Stage) {
+  this->IRMod = IRMod;
+}
+
 bool SILPassManager::continueTransforming() {
   return Mod->getStage() == SILStage::Raw ||
          NumPassesRun < SILNumOptPassesToRun;
@@ -257,17 +270,19 @@ bool SILPassManager::analysesUnlocked() {
 // Test the function and pass names we're given against the debug
 // options that force us to break prior to a given pass and/or on a
 // given function.
-static bool breakBeforeRunning(StringRef fnName, StringRef passName) {
+static bool breakBeforeRunning(StringRef fnName, SILFunctionTransform *SFT) {
   if (SILBreakOnFun.empty() && SILBreakOnPass.empty())
     return false;
 
-  if (SILBreakOnFun.empty() && passName == SILBreakOnPass)
+  if (SILBreakOnFun.empty()
+      && (SFT->getName() == SILBreakOnPass || SFT->getTag() == SILBreakOnPass))
     return true;
 
   if (SILBreakOnPass.empty() && fnName == SILBreakOnFun)
     return true;
 
-  return fnName == SILBreakOnFun && passName == SILBreakOnPass;
+  return fnName == SILBreakOnFun
+    && (SFT->getName() == SILBreakOnPass || SFT->getTag() == SILBreakOnPass);
 }
 
 void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
@@ -288,7 +303,7 @@ void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
       !SILDisableSkippingPasses) {
     if (SILPrintPassName)
       llvm::dbgs() << "  (Skip) Stage: " << StageName
-                   << " Pass: " << SFT->getName()
+                   << " Pass: " << SFT->getName() << " (" << SFT->getTag() << ")"
                    << ", Function: " << F->getName() << "\n";
     return;
   }
@@ -296,7 +311,7 @@ void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
   if (isDisabled(SFT)) {
     if (SILPrintPassName)
       llvm::dbgs() << "  (Disabled) Stage: " << StageName
-                   << " Pass: " << SFT->getName()
+                   << " Pass: " << SFT->getName() << " (" << SFT->getTag() << ")"
                    << ", Function: " << F->getName() << "\n";
     return;
   }
@@ -305,27 +320,26 @@ void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
 
   if (SILPrintPassName)
     llvm::dbgs() << "  #" << NumPassesRun << " Stage: " << StageName
-                 << " Pass: " << SFT->getName()
+                 << " Pass: " << SFT->getName() << " (" << SFT->getTag() << ")"
                  << ", Function: " << F->getName() << "\n";
 
   if (doPrintBefore(SFT, F)) {
     llvm::dbgs() << "*** SIL function before " << StageName << " "
-                 << SFT->getName() << " (" << NumOptimizationIterations
-                 << ") ***\n";
+                 << SFT->getName() << " (" << SFT->getTag() << ")"
+                 << " (#" << NumOptimizationIterations << ") ***\n";
     F->dump(getOptions().EmitVerboseSIL);
   }
 
-  llvm::sys::TimeValue StartTime = llvm::sys::TimeValue::now();
+  llvm::sys::TimePoint<> StartTime = std::chrono::system_clock::now();
   Mod->registerDeleteNotificationHandler(SFT);
-  if (breakBeforeRunning(F->getName(), SFT->getName()))
+  if (breakBeforeRunning(F->getName(), SFT))
     LLVM_BUILTIN_DEBUGTRAP;
   SFT->run();
   assert(analysesUnlocked() && "Expected all analyses to be unlocked!");
   Mod->removeDeleteNotificationHandler(SFT);
 
   if (SILPrintPassTime) {
-    auto Delta =
-        llvm::sys::TimeValue::now().nanoseconds() - StartTime.nanoseconds();
+    auto Delta = (std::chrono::system_clock::now() - StartTime).count();
     llvm::dbgs() << Delta << " (" << SFT->getName() << "," << F->getName()
                  << ")\n";
   }
@@ -333,8 +347,8 @@ void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
   // If this pass invalidated anything, print and verify.
   if (doPrintAfter(SFT, F, CurrentPassHasInvalidated && SILPrintAll)) {
     llvm::dbgs() << "*** SIL function after " << StageName << " "
-                 << SFT->getName() << " (" << NumOptimizationIterations
-                 << ") ***\n";
+                 << SFT->getName() << " (" << SFT->getTag() << ") (#"
+                 << NumOptimizationIterations << ") ***\n";
     F->dump(getOptions().EmitVerboseSIL);
   }
 
@@ -351,8 +365,8 @@ void SILPassManager::runPassOnFunction(SILFunctionTransform *SFT,
   ++NumPassesRun;
 }
 
-void SILPassManager::runFunctionPasses(PassList FuncTransforms) {
-
+void SILPassManager::
+runFunctionPasses(ArrayRef<SILFunctionTransform *> FuncTransforms) {
   if (FuncTransforms.empty())
     return;
 
@@ -434,12 +448,12 @@ void SILPassManager::runModulePass(SILModuleTransform *SMT) {
 
   if (doPrintBefore(SMT, nullptr)) {
     llvm::dbgs() << "*** SIL module before " << StageName << " "
-                 << SMT->getName() << " (" << NumOptimizationIterations
-                 << ") ***\n";
+                 << SMT->getName() << " (" << SMT->getTag() << ") (#"
+                 << NumOptimizationIterations << ") ***\n";
     printModule(Mod, Options.EmitVerboseSIL);
   }
 
-  llvm::sys::TimeValue StartTime = llvm::sys::TimeValue::now();
+  llvm::sys::TimePoint<> StartTime = std::chrono::system_clock::now();
   assert(analysesUnlocked() && "Expected all analyses to be unlocked!");
   Mod->registerDeleteNotificationHandler(SMT);
   SMT->run();
@@ -447,8 +461,7 @@ void SILPassManager::runModulePass(SILModuleTransform *SMT) {
   assert(analysesUnlocked() && "Expected all analyses to be unlocked!");
 
   if (SILPrintPassTime) {
-    auto Delta = llvm::sys::TimeValue::now().nanoseconds() -
-      StartTime.nanoseconds();
+    auto Delta = (std::chrono::system_clock::now() - StartTime).count();
     llvm::dbgs() << Delta << " (" << SMT->getName() << ",Module)\n";
   }
 
@@ -456,8 +469,8 @@ void SILPassManager::runModulePass(SILModuleTransform *SMT) {
   if (doPrintAfter(SMT, nullptr,
                    CurrentPassHasInvalidated && SILPrintAll)) {
     llvm::dbgs() << "*** SIL module after " << StageName << " "
-                 << SMT->getName() << " (" << NumOptimizationIterations
-                 << ") ***\n";
+                 << SMT->getName() << " (" << SMT->getTag() << ") (#"
+                 << NumOptimizationIterations << ") ***\n";
     printModule(Mod, Options.EmitVerboseSIL);
   }
 
@@ -511,36 +524,11 @@ void SILPassManager::runOneIteration() {
   }
 }
 
-void SILPassManager::run() {
-  const SILOptions &Options = getOptions();
-  (void) Options;
-
-  if (SILPrintAll) {
-    if (SILPrintOnlyFun.empty() && SILPrintOnlyFuns.empty()) {
-      llvm::dbgs() << "*** SIL module before transformation ("
-                   << NumOptimizationIterations << ") ***\n";
-      Mod->dump(Options.EmitVerboseSIL);
-    } else {
-      for (auto &F : *Mod) {
-        if (!SILPrintOnlyFun.empty() && F.getName().str() == SILPrintOnlyFun) {
-          llvm::dbgs() << "*** SIL function before transformation ("
-                       << NumOptimizationIterations << ") ***\n";
-          F.dump(Options.EmitVerboseSIL);
-        }
-        if (!SILPrintOnlyFuns.empty() &&
-            F.getName().find(SILPrintOnlyFuns, 0) != StringRef::npos) {
-          llvm::dbgs() << "*** SIL function before transformation ("
-                       << NumOptimizationIterations << ") ***\n";
-          F.dump(Options.EmitVerboseSIL);
-        }
-      }
-    }
-  }
-  runOneIteration();
-}
-
 /// D'tor.
 SILPassManager::~SILPassManager() {
+  assert(IRGenPasses.empty() && "Must add IRGen SIL passes that were "
+                                "registered to the list of transformations");
+
   // Free all transformations.
   for (auto *T : Transformations)
     delete T;
@@ -624,24 +612,26 @@ const SILOptions &SILPassManager::getOptions() const {
   return Mod->getOptions();
 }
 
-// Define the add-functions for all passes.
-
-#define PASS(ID, NAME, DESCRIPTION)                                            \
-  void SILPassManager::add##ID() {                                             \
-    SILTransform *T = swift::create##ID();                                     \
-    T->setPassKind(PassKind::ID);                                              \
-    Transformations.push_back(T);                                              \
-  }
-#include "swift/SILOptimizer/PassManager/Passes.def"
-
 void SILPassManager::addPass(PassKind Kind) {
   assert(unsigned(PassKind::AllPasses_Last) >= unsigned(Kind) &&
          "Invalid pass kind");
   switch (Kind) {
-#define PASS(ID, NAME, DESCRIPTION)                                            \
-  case PassKind::ID:                                                           \
-    add##ID();                                                                 \
-    break;
+#define PASS(ID, TAG, NAME)                                                    \
+  case PassKind::ID: {                                                         \
+    SILTransform *T = swift::create##ID();                                     \
+    T->setPassKind(PassKind::ID);                                              \
+    Transformations.push_back(T);                                              \
+    break;                                                                     \
+  }
+#define IRGEN_PASS(ID, TAG, NAME)                                              \
+  case PassKind::ID: {                                                         \
+    SILTransform *T = IRGenPasses[unsigned(Kind)];                             \
+    assert(T && "Missing IRGen pass?");                                        \
+    T->setPassKind(PassKind::ID);                                              \
+    Transformations.push_back(T);                                              \
+    IRGenPasses.erase(unsigned(Kind));                                         \
+    break;                                                                     \
+  }
 #include "swift/SILOptimizer/PassManager/Passes.def"
   case PassKind::invalidPassKind:
     llvm_unreachable("invalid pass kind");
@@ -650,7 +640,7 @@ void SILPassManager::addPass(PassKind Kind) {
 
 void SILPassManager::addPassForName(StringRef Name) {
   PassKind P = llvm::StringSwitch<PassKind>(Name)
-#define PASS(ID, NAME, DESCRIPTION) .Case(#ID, PassKind::ID)
+#define PASS(ID, TAG, NAME) .Case(#ID, PassKind::ID)
 #include "swift/SILOptimizer/PassManager/Passes.def"
   ;
   addPass(P);
@@ -748,7 +738,7 @@ namespace {
     }
   }
 
-} // end swift namespace
+} // end anonymous namespace
 
 namespace llvm {
 
@@ -775,7 +765,6 @@ namespace llvm {
   /// CallGraph GraphTraits specialization so the CallGraph can be
   /// iterable by generic graph iterators.
   template <> struct GraphTraits<CallGraph::Node *> {
-    typedef CallGraph::Node NodeType;
     typedef CallGraph::child_iterator ChildIteratorType;
     typedef CallGraph::Node *NodeRef;
 
@@ -795,11 +784,13 @@ namespace llvm {
 
     static NodeRef getEntryNode(GraphType F) { return nullptr; }
 
-    typedef CallGraph::iterator nodes_iterator;
+    typedef pointer_iterator<CallGraph::iterator> nodes_iterator;
     static nodes_iterator nodes_begin(GraphType CG) {
-      return CG->Nodes.begin();
+      return nodes_iterator(CG->Nodes.begin());
     }
-    static nodes_iterator nodes_end(GraphType CG) { return CG->Nodes.end(); }
+    static nodes_iterator nodes_end(GraphType CG) {
+      return nodes_iterator(CG->Nodes.end());
+    }
     static unsigned size(GraphType CG) { return CG->Nodes.size(); }
   };
 
@@ -819,7 +810,7 @@ namespace llvm {
 
     std::string getNodeDescription(const CallGraph::Node *Node,
                                    const CallGraph *Graph) {
-      std::string Label = demangle_wrappers::
+      std::string Label = Demangle::
       demangleSymbolAsString(Node->F->getName());
       wrap(Label, Node->NumCallSites);
       return Label;
@@ -843,7 +834,7 @@ namespace llvm {
       return "";
     }
   };
-} // end llvm namespace
+} // namespace llvm
 #endif
 
 void SILPassManager::viewCallGraph() {

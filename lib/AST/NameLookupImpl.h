@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,13 +23,13 @@ namespace namelookup {
 /// Performs a qualified lookup into the given module and, if necessary, its
 /// reexports, observing proper shadowing rules.
 void
-lookupVisibleDeclsInModule(Module *M, Module::AccessPathTy accessPath,
+lookupVisibleDeclsInModule(ModuleDecl *M, ModuleDecl::AccessPathTy accessPath,
                            SmallVectorImpl<ValueDecl *> &decls,
                            NLKind lookupKind,
                            ResolutionKind resolutionKind,
                            LazyResolver *typeResolver,
                            const DeclContext *moduleScopeContext,
-                           ArrayRef<Module::ImportedModule> extraImports = {});
+                           ArrayRef<ModuleDecl::ImportedModule> extraImports = {});
 
 /// Searches through statements and patterns for local variable declarations.
 class FindLocalVal : public StmtVisitor<FindLocalVal> {
@@ -101,7 +101,7 @@ public:
 
   void checkSourceFile(const SourceFile &SF) {
     for (Decl *D : SF.Decls)
-      if (TopLevelCodeDecl *TLCD = dyn_cast<TopLevelCodeDecl>(D))
+      if (auto *TLCD = dyn_cast<TopLevelCodeDecl>(D))
         visitBraceStmt(TLCD->getBody(), /*isTopLevel=*/true);
   }
 
@@ -151,10 +151,6 @@ private:
     visit(S->getBody());
   }
 
-  void visitIfConfigStmt(IfConfigStmt * S) {
-    // Active members are attached to the enclosing declaration, so there's no
-    // need to walk anything within.
-  }
   void visitWhileStmt(WhileStmt *S) {
     if (!isReferencePointInRange(S->getSourceRange()))
       return;
@@ -174,7 +170,7 @@ private:
       return;
     visit(S->getBody());
     for (Decl *D : S->getInitializerVarDecls()) {
-      if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+      if (auto *VD = dyn_cast<ValueDecl>(D))
         checkValueDecl(VD, DeclVisibilityKind::LocalVariable);
     }
   }
@@ -196,12 +192,12 @@ private:
     }
 
     for (auto elem : S->getElements()) {
-      if (Stmt *S = elem.dyn_cast<Stmt*>())
+      if (auto *S = elem.dyn_cast<Stmt*>())
         visit(S);
     }
     for (auto elem : S->getElements()) {
-      if (Decl *D = elem.dyn_cast<Decl*>()) {
-        if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+      if (auto *D = elem.dyn_cast<Decl*>()) {
+        if (auto *VD = dyn_cast<ValueDecl>(D))
           checkValueDecl(VD, DeclVisibilityKind::LocalVariable);
       }
     }

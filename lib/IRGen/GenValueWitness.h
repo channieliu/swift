@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -29,6 +29,7 @@ namespace swift {
   class CanType;
 
 namespace irgen {
+  class ConstantStructBuilder;
   class IRGenModule;
 
   /// True if a type has a generic-parameter-dependent value witness table.
@@ -43,8 +44,8 @@ namespace irgen {
   /// Emit the elements of a dependent value witness table template into a
   /// vector.
   void emitDependentValueWitnessTablePattern(IRGenModule &IGM,
-                                    CanType abstractType,
-                                    SmallVectorImpl<llvm::Constant*> &fields);
+                                             ConstantStructBuilder &B,
+                                             CanType abstractType);
 
   /// Build a value witness that initializes an array front-to-back.
   void emitInitializeArrayFrontToBack(IRGenFunction &IGF,

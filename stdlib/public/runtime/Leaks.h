@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -23,22 +23,21 @@
 
 #include "../SwiftShims/Visibility.h"
 
+#include "llvm/Support/Compiler.h"
+#include "swift/Runtime/Config.h"
+
 namespace swift {
 struct HeapObject;
 }
 
-SWIFT_RUNTIME_EXPORT
-extern "C" void swift_leaks_startTrackingObjects(const char *)
-    __attribute__((__noinline__, __used__));
-SWIFT_RUNTIME_EXPORT
-extern "C" int swift_leaks_stopTrackingObjects(const char *)
-    __attribute__((__noinline__, __used__));
-SWIFT_RUNTIME_EXPORT
-extern "C" void swift_leaks_startTrackingObject(swift::HeapObject *)
-    __attribute__((__noinline__, __used__));
-SWIFT_RUNTIME_EXPORT
-extern "C" void swift_leaks_stopTrackingObject(swift::HeapObject *)
-    __attribute__((__noinline__, __used__));
+SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT LLVM_ATTRIBUTE_NOINLINE LLVM_ATTRIBUTE_USED
+void swift_leaks_startTrackingObjects(const char *);
+SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT LLVM_ATTRIBUTE_NOINLINE LLVM_ATTRIBUTE_USED
+int swift_leaks_stopTrackingObjects(const char *);
+SWIFT_RUNTIME_EXPORT LLVM_ATTRIBUTE_NOINLINE LLVM_ATTRIBUTE_USED
+void swift_leaks_startTrackingObject(swift::HeapObject *);
+SWIFT_RUNTIME_EXPORT LLVM_ATTRIBUTE_NOINLINE LLVM_ATTRIBUTE_USED
+void swift_leaks_stopTrackingObject(swift::HeapObject *);
 
 #define SWIFT_LEAKS_START_TRACKING_OBJECT(obj)                                 \
   swift_leaks_startTrackingObject(obj)

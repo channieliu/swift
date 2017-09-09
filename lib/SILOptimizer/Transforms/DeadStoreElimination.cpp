@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -110,7 +110,7 @@ static llvm::SmallVector<SILInstruction *, 1>
 findDeallocStackInst(AllocStackInst *ASI) {
   llvm::SmallVector<SILInstruction *, 1> DSIs;
   for (auto UI = ASI->use_begin(), E = ASI->use_end(); UI != E; ++UI) {
-    if (DeallocStackInst *D = dyn_cast<DeallocStackInst>(UI->getUser())) {
+    if (auto *D = dyn_cast<DeallocStackInst>(UI->getUser())) {
       DSIs.push_back(D);
     }   
   }
@@ -139,8 +139,6 @@ static bool isDeadStoreInertInstruction(SILInstruction *Inst) {
   case ValueKind::RetainValueInst:
   case ValueKind::DeallocStackInst:
   case ValueKind::CondFailInst:
-  case ValueKind::IsUniqueInst:
-  case ValueKind::IsUniqueOrPinnedInst:
   case ValueKind::FixLifetimeInst:
     return true;
   default:
@@ -590,7 +588,7 @@ void DSEContext::processBasicBlockForGenKillSet(SILBasicBlock *BB) {
   }
 
   // Handle SILArgument for base invalidation.
-  ArrayRef<SILArgument *> Args = BB->getBBArgs();
+  ArrayRef<SILArgument *> Args = BB->getArguments();
   for (auto &X : Args) {
     invalidateBase(X, BBState, DSEKind::BuildGenKillSet);
   }
@@ -633,7 +631,7 @@ void DSEContext::processBasicBlockForDSE(SILBasicBlock *BB, bool Optimistic) {
   }
 
   // Handle SILArgument for base invalidation.
-  ArrayRef<SILArgument *> Args = BB->getBBArgs();
+  ArrayRef<SILArgument *> Args = BB->getArguments();
   for (auto &X : Args) {
     invalidateBase(X, S, DSEKind::BuildGenKillSet);
   }
@@ -1115,7 +1113,7 @@ void DSEContext::runIterativeDSE() {
     SILBasicBlock *BB = WorkList.pop_back_val();
     HandledBBs.erase(BB);
     if (processBasicBlockWithGenKillSet(BB)) {
-      for (auto X : BB->getPreds()) {
+      for (auto X : BB->getPredecessorBlocks()) {
         // We do not push basic block into the worklist if its already 
         // in the worklist.
         if (HandledBBs.find(X) != HandledBBs.end())
@@ -1217,8 +1215,6 @@ namespace {
 
 class DeadStoreElimination : public SILFunctionTransform {
 public:
-  StringRef getName() override { return "SIL Dead Store Elimination"; }
-
   /// The entry point to the transformation.
   void run() override {
     SILFunction *F = getFunction();

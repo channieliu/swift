@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,7 +16,7 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/CFG.h"
-#include "swift/AST/ArchetypeBuilder.h"
+#include "swift/SIL/PrettyStackTrace.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/CommandLine.h"
@@ -25,47 +25,55 @@
 using namespace swift;
 using namespace Lowering;
 
-SILSpecializeAttr::SILSpecializeAttr(ArrayRef<Substitution> subs)
-  : numSubs(subs.size()) {
-  std::copy(subs.begin(), subs.end(), getTrailingObjects<Substitution>());
+ArrayRef<Requirement> SILSpecializeAttr::getRequirements() const {
+  return {const_cast<SILSpecializeAttr *>(this)->getRequirementsData(),
+          numRequirements};
+}
+
+SILSpecializeAttr::SILSpecializeAttr(ArrayRef<Requirement> requirements,
+                                     bool exported, SpecializationKind kind)
+    : numRequirements(requirements.size()), kind(kind), exported(exported) {
+  std::copy(requirements.begin(), requirements.end(), getRequirementsData());
 }
 
 SILSpecializeAttr *SILSpecializeAttr::create(SILModule &M,
-                                             ArrayRef<Substitution> subs) {
+                                             ArrayRef<Requirement> requirements,
+                                             bool exported,
+                                             SpecializationKind kind) {
   unsigned size =
-    sizeof(SILSpecializeAttr) + (subs.size() * sizeof(Substitution));
+      sizeof(SILSpecializeAttr) + sizeof(Requirement) * requirements.size();
   void *buf = M.allocate(size, alignof(SILSpecializeAttr));
-  return ::new (buf) SILSpecializeAttr(subs);
+  return ::new (buf) SILSpecializeAttr(requirements, exported, kind);
 }
 
-SILFunction *SILFunction::create(SILModule &M, SILLinkage linkage,
-                                 StringRef name,
-                                 CanSILFunctionType loweredType,
-                                 GenericEnvironment *genericEnv,
-                                 Optional<SILLocation> loc,
-                                 IsBare_t isBareSILFunction,
-                                 IsTransparent_t isTrans,
-                                 IsFragile_t isFragile,
-                                 IsThunk_t isThunk,
-                                 ClassVisibility_t classVisibility,
-                                 Inline_t inlineStrategy, EffectsKind E,
-                                 SILFunction *insertBefore,
-                                 const SILDebugScope *debugScope,
-                                 DeclContext *DC) {
+void SILFunction::addSpecializeAttr(SILSpecializeAttr *Attr) {
+  if (getLoweredFunctionType()->getGenericSignature()) {
+    Attr->F = this;
+    SpecializeAttrSet.push_back(Attr);
+  }
+}
+
+SILFunction *SILFunction::create(
+    SILModule &M, SILLinkage linkage, StringRef name,
+    CanSILFunctionType loweredType, GenericEnvironment *genericEnv,
+    Optional<SILLocation> loc, IsBare_t isBareSILFunction,
+    IsTransparent_t isTrans, IsSerialized_t isSerialized, IsThunk_t isThunk,
+    SubclassScope classSubclassScope, Inline_t inlineStrategy, EffectsKind E,
+    SILFunction *insertBefore, const SILDebugScope *debugScope) {
   // Get a StringMapEntry for the function.  As a sop to error cases,
   // allow the name to have an empty string.
   llvm::StringMapEntry<SILFunction*> *entry = nullptr;
   if (!name.empty()) {
     entry = &*M.FunctionTable.insert(std::make_pair(name, nullptr)).first;
+    PrettyStackTraceSILFunction trace("creating", entry->getValue());
     assert(!entry->getValue() && "function already exists");
     name = entry->getKey();
   }
 
-  auto fn = new (M) SILFunction(M, linkage, name,
-                                loweredType, genericEnv, loc,
-                                isBareSILFunction, isTrans, isFragile, isThunk,
-                                classVisibility, inlineStrategy, E,
-                                insertBefore, debugScope, DC);
+  auto fn = new (M) SILFunction(M, linkage, name, loweredType, genericEnv, loc,
+                                isBareSILFunction, isTrans, isSerialized,
+                                isThunk, classSubclassScope, inlineStrategy, E,
+                                insertBefore, debugScope);
 
   if (entry) entry->setValue(fn);
   return fn;
@@ -75,17 +83,18 @@ SILFunction::SILFunction(SILModule &Module, SILLinkage Linkage, StringRef Name,
                          CanSILFunctionType LoweredType,
                          GenericEnvironment *genericEnv,
                          Optional<SILLocation> Loc, IsBare_t isBareSILFunction,
-                         IsTransparent_t isTrans, IsFragile_t isFragile,
-                         IsThunk_t isThunk, ClassVisibility_t classVisibility,
+                         IsTransparent_t isTrans, IsSerialized_t isSerialized,
+                         IsThunk_t isThunk, SubclassScope classSubclassScope,
                          Inline_t inlineStrategy, EffectsKind E,
                          SILFunction *InsertBefore,
-                         const SILDebugScope *DebugScope, DeclContext *DC)
+                         const SILDebugScope *DebugScope)
     : Module(Module), Name(Name), LoweredType(LoweredType),
-      GenericEnv(genericEnv), DeclCtx(DC), DebugScope(DebugScope),
-      Bare(isBareSILFunction), Transparent(isTrans), Fragile(isFragile),
-      Thunk(isThunk), ClassVisibility(classVisibility), GlobalInitFlag(false),
+      GenericEnv(genericEnv), DebugScope(DebugScope), Bare(isBareSILFunction),
+      Transparent(isTrans), Serialized(isSerialized), Thunk(isThunk),
+      ClassSubclassScope(unsigned(classSubclassScope)), GlobalInitFlag(false),
       InlineStrategy(inlineStrategy), Linkage(unsigned(Linkage)),
       KeepAsPublic(false), EffectsKindAttr(E) {
+
   if (InsertBefore)
     Module.functions.insert(SILModule::iterator(InsertBefore), this);
   else
@@ -124,25 +133,6 @@ SILFunction::~SILFunction() {
          "Function cannot be deleted while function_ref's still exist");
 }
 
-void SILFunction::setDeclContext(Decl *D) {
-  if (!D)
-    return;
-  switch (D->getKind()) {
-  // These four dual-inherit from DeclContext.
-  case DeclKind::Func:        DeclCtx = cast<FuncDecl>(D); break;
-  case DeclKind::Constructor: DeclCtx = cast<ConstructorDecl>(D); break;
-  case DeclKind::Extension:   DeclCtx = cast<ExtensionDecl>(D);   break;
-  case DeclKind::Destructor:  DeclCtx = cast<DestructorDecl>(D);  break;
-  default:
-    DeclCtx = D->getDeclContext();
-  }
-  assert(DeclCtx);
-}
-
-void SILFunction::setDeclContext(Expr *E) {
-  DeclCtx = dyn_cast_or_null<AbstractClosureExpr>(E);
-}
-
 bool SILFunction::hasForeignBody() const {
   if (!hasClangNode()) return false;
   return SILDeclRef::isClangGenerated(getClangNode());
@@ -152,7 +142,7 @@ void SILFunction::numberValues(llvm::DenseMap<const ValueBase*,
                                unsigned> &ValueToNumberMap) const {
   unsigned idx = 0;
   for (auto &BB : *this) {
-    for (auto I = BB.bbarg_begin(), E = BB.bbarg_end(); I != E; ++I)
+    for (auto I = BB.args_begin(), E = BB.args_end(); I != E; ++I)
       ValueToNumberMap[*I] = idx++;
     
     for (auto &I : BB)
@@ -172,111 +162,30 @@ bool SILFunction::shouldOptimize() const {
 }
 
 Type SILFunction::mapTypeIntoContext(Type type) const {
-  return ArchetypeBuilder::mapTypeIntoContext(getModule().getSwiftModule(),
-                                              getGenericEnvironment(),
-                                              type);
+  return GenericEnvironment::mapTypeIntoContext(
+      getGenericEnvironment(), type);
 }
-
-namespace {
-template<typename SubstFn>
-struct SubstDependentSILType
-  : CanTypeVisitor<SubstDependentSILType<SubstFn>, CanType>
-{
-  SILModule &M;
-  SubstFn Subst;
-  
-  SubstDependentSILType(SILModule &M, SubstFn Subst)
-    : M(M), Subst(std::move(Subst))
-  {}
-  
-  using super = CanTypeVisitor<SubstDependentSILType<SubstFn>, CanType>;
-  using super::visit;
-  
-  CanType visitDependentMemberType(CanDependentMemberType t) {
-    // If a dependent member type appears in lowered position, we need to lower
-    // its context substitution against the associated type's abstraction
-    // pattern.
-    CanType astTy = Subst(t);
-    auto origTy = AbstractionPattern::getOpaque();
-    
-    return M.Types.getLoweredType(origTy, astTy)
-      .getSwiftRValueType();
-  }
-  
-  CanType visitTupleType(CanTupleType t) {
-    // Dependent members can appear in lowered position inside tuples.
-    
-    SmallVector<TupleTypeElt, 4> elements;
-    
-    for (auto &elt : t->getElements())
-      elements.push_back(elt.getWithType(visit(CanType(elt.getType()))));
-    
-    return TupleType::get(elements, t->getASTContext())
-      ->getCanonicalType();
-  }
-  
-  CanType visitSILFunctionType(CanSILFunctionType t) {
-    // Dependent members can appear in lowered position inside SIL functions.
-    
-    SmallVector<SILParameterInfo, 4> params;
-    for (auto &param : t->getParameters())
-      params.push_back(param.map([&](CanType pt) -> CanType {
-        return visit(pt);
-      }));
-
-    SmallVector<SILResultInfo, 4> results;
-    for (auto &result : t->getAllResults())
-      results.push_back(result.map([&](CanType pt) -> CanType {
-        return visit(pt);
-      }));
-    
-    Optional<SILResultInfo> errorResult;
-    if (t->hasErrorResult()) {
-      errorResult = t->getErrorResult().map([&](CanType elt) -> CanType {
-          return visit(elt);
-      });
-    }
-    
-    return SILFunctionType::get(t->getGenericSignature(),
-                                t->getExtInfo(),
-                                t->getCalleeConvention(),
-                                params, results, errorResult,
-                                t->getASTContext());
-  }
-  
-  CanType visitType(CanType t) {
-    // Other types get substituted into context normally.
-    return Subst(t);
-  }
-};
-
-template<typename SubstFn>
-SILType doSubstDependentSILType(SILModule &M,
-                                SubstFn Subst,
-                                SILType t) {
-  CanType result = SubstDependentSILType<SubstFn>(M, std::move(Subst))
-    .visit(t.getSwiftRValueType());
-  return SILType::getPrimitiveType(result, t.getCategory());
-}
-  
-} // end anonymous namespace
 
 SILType SILFunction::mapTypeIntoContext(SILType type) const {
-  return doSubstDependentSILType(getModule(),
-    [&](CanType t) { return mapTypeIntoContext(t)->getCanonicalType(); },
-    type);
+  if (auto *genericEnv = getGenericEnvironment())
+    return genericEnv->mapTypeIntoContext(getModule(), type);
+  return type;
 }
 
-SILType ArchetypeBuilder::substDependentType(SILModule &M, SILType type) {
-  return doSubstDependentSILType(M,
-    [&](CanType t) { return substDependentType(t)->getCanonicalType(); },
-    type);
+SILType GenericEnvironment::mapTypeIntoContext(SILModule &M,
+                                               SILType type) const {
+  assert(!type.hasArchetype());
+
+  auto genericSig = getGenericSignature()->getCanonicalSignature();
+  return type.subst(M,
+                    QueryInterfaceTypeSubstitutions(this),
+                    LookUpConformanceInSignature(*genericSig),
+                    genericSig);
 }
 
 Type SILFunction::mapTypeOutOfContext(Type type) const {
-  return ArchetypeBuilder::mapTypeOutOfContext(getModule().getSwiftModule(),
-                                               getGenericEnvironment(),
-                                               type);
+  return GenericEnvironment::mapTypeOutOfContext(
+      getGenericEnvironment(), type);
 }
 
 bool SILFunction::isNoReturnFunction() const {
@@ -286,6 +195,10 @@ bool SILFunction::isNoReturnFunction() const {
 
 SILBasicBlock *SILFunction::createBasicBlock() {
   return new (getModule()) SILBasicBlock(this);
+}
+
+SILBasicBlock *SILFunction::createBasicBlock(SILBasicBlock *AfterBlock) {
+  return new (getModule()) SILBasicBlock(this, AfterBlock);
 }
 
 //===----------------------------------------------------------------------===//
@@ -311,8 +224,7 @@ LLBehavior("view-cfg-long-line-behavior",
                clEnumValN(LongLineBehavior::None, "none", "Print everything"),
                clEnumValN(LongLineBehavior::Truncate, "truncate",
                           "Truncate long lines"),
-               clEnumValN(LongLineBehavior::Wrap, "wrap", "Wrap long lines"),
-               clEnumValEnd));
+               clEnumValN(LongLineBehavior::Wrap, "wrap", "Wrap long lines")));
 
 static llvm::cl::opt<bool>
 RemoveUseListComments("view-cfg-remove-use-list-comments",
@@ -337,20 +249,18 @@ struct DOTGraphTraits<SILFunction *> : public DefaultDOTGraphTraits {
 
   DOTGraphTraits(bool isSimple = false) : DefaultDOTGraphTraits(isSimple) {}
 
-  static std::string getGraphName(const SILFunction *F) {
+  static std::string getGraphName(SILFunction *F) {
     return "CFG for '" + F->getName().str() + "' function";
   }
 
-  static std::string getSimpleNodeLabel(const SILBasicBlock *Node,
-                                        const SILFunction *F) {
+  static std::string getSimpleNodeLabel(SILBasicBlock *Node, SILFunction *F) {
     std::string OutStr;
     raw_string_ostream OSS(OutStr);
     const_cast<SILBasicBlock *>(Node)->printAsOperand(OSS, false);
     return OSS.str();
   }
 
-  static std::string getCompleteNodeLabel(const SILBasicBlock *Node,
-                                          const SILFunction *F) {
+  static std::string getCompleteNodeLabel(SILBasicBlock *Node, SILFunction *F) {
     std::string Str;
     raw_string_ostream OS(Str);
 
@@ -398,17 +308,16 @@ struct DOTGraphTraits<SILFunction *> : public DefaultDOTGraphTraits {
     return OutStr;
   }
 
-  std::string getNodeLabel(const SILBasicBlock *Node,
-                           const SILFunction *Graph) {
+  std::string getNodeLabel(SILBasicBlock *Node, SILFunction *Graph) {
     if (isSimple())
       return getSimpleNodeLabel(Node, Graph);
     else
       return getCompleteNodeLabel(Node, Graph);
   }
 
-  static std::string getEdgeSourceLabel(const SILBasicBlock *Node,
-                                        SILBasicBlock::const_succ_iterator I) {
-    SILBasicBlock *Succ = I->getBB();
+  static std::string getEdgeSourceLabel(SILBasicBlock *Node,
+                                        SILBasicBlock::succblock_iterator I) {
+    const SILBasicBlock *Succ = *I;
     const TermInst *Term = Node->getTerminator();
 
     // Label source of conditional branches with "T" or "F"
@@ -454,13 +363,16 @@ struct DOTGraphTraits<SILFunction *> : public DefaultDOTGraphTraits {
     if (auto *CCBI = dyn_cast<CheckedCastBranchInst>(Term))
       return (Succ == CCBI->getSuccessBB()) ? "T" : "F";
 
+    if (auto *CCBI = dyn_cast<CheckedCastValueBranchInst>(Term))
+      return (Succ == CCBI->getSuccessBB()) ? "T" : "F";
+
     if (auto *CCBI = dyn_cast<CheckedCastAddrBranchInst>(Term))
       return (Succ == CCBI->getSuccessBB()) ? "T" : "F";
 
     return "";
   }
 };
-} // end llvm namespace
+} // namespace llvm
 #endif
 
 #ifndef NDEBUG
@@ -481,22 +393,24 @@ void SILFunction::viewCFG() const {
 #endif
 }
 
-/// Returns true if this function has either a self metadata argument or
-/// object from which Self metadata may be obtained.
 bool SILFunction::hasSelfMetadataParam() const {
-  auto paramTypes = getLoweredFunctionType()->getParameterSILTypes();
+  auto paramTypes = getConventions().getParameterSILTypes();
   if (paramTypes.empty())
     return false;
 
-  auto silTy = paramTypes.back();
-  if (!silTy.isClassOrClassMetatype())
+  auto silTy = *std::prev(paramTypes.end());
+  if (!silTy.isObject())
     return false;
 
-  auto metaTy = dyn_cast<MetatypeType>(silTy.getSwiftRValueType());
-  (void)metaTy;
-  assert(!metaTy || metaTy->getRepresentation() != MetatypeRepresentation::Thin
-         && "Class metatypes are never thin.");
-  return true;
+  auto selfTy = silTy.getSwiftRValueType();
+
+  if (auto metaTy = dyn_cast<MetatypeType>(selfTy)) {
+    selfTy = metaTy.getInstanceType();
+    if (auto dynamicSelfTy = dyn_cast<DynamicSelfType>(selfTy))
+      selfTy = dynamicSelfTy.getSelfType();
+  }
+
+  return !!selfTy.getClassOrBoundGenericClass();
 }
 
 bool SILFunction::hasName(const char *Name) const {
@@ -539,7 +453,7 @@ void SILFunction::convertToDeclaration() {
   getBlocks().clear();
 }
 
-ArrayRef<Substitution> SILFunction::getForwardingSubstitutions() {
+SubstitutionList SILFunction::getForwardingSubstitutions() {
   if (ForwardingSubs)
     return *ForwardingSubs;
 
@@ -547,9 +461,10 @@ ArrayRef<Substitution> SILFunction::getForwardingSubstitutions() {
   if (!env)
     return {};
 
-  auto sig = getLoweredFunctionType()->getGenericSignature();
-  auto *M = getModule().getSwiftModule();
-  ForwardingSubs = env->getForwardingSubstitutions(M, sig);
-
+  ForwardingSubs = env->getForwardingSubstitutions();
   return *ForwardingSubs;
+}
+
+bool SILFunction::shouldVerifyOwnership() const {
+  return !hasSemanticsAttr("verify.ownership.sil.never");
 }

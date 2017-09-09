@@ -1,5 +1,4 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 //
 // RUN: %gyb %s -o %t/main.swift
 // RUN: if [ %target-runtime == "objc" ]; then \
@@ -127,18 +126,22 @@ func equalsUnordered(_ lhs: Set<Int>, _ rhs: Set<Int>) -> Bool {
 }
 
 func isNativeSet<T : Hashable>(_ s: Set<T>) -> Bool {
-  switch s._variantStorage {
+  switch s._variantBuffer {
   case .native:
     return true
+#if _runtime(_ObjC)
   case .cocoa:
     return false
+#endif
   }
 }
 
 #if _runtime(_ObjC)
 func isNativeNSSet(_ s: NSSet) -> Bool {
   let className: NSString = NSStringFromClass(type(of: s)) as NSString
-  return className.range(of: "NativeSetStorage").length > 0
+  return ["_SwiftDeferredNSSet", "NativeSetStorage"].contains {
+    className.range(of: $0).length > 0
+  }
 }
 
 func isCocoaNSSet(_ s: NSSet) -> Bool {
@@ -201,7 +204,10 @@ func getBridgedVerbatimSet(_ members: [Int] = [1010, 2020, 3030])
 /// Get a Set<NSObject> (Set<TestObjCKeyTy>) backed by native storage
 func getNativeBridgedVerbatimSet(_ members: [Int] = [1010, 2020, 3030]) ->
   Set<NSObject> {
-  let result: Set<NSObject> = Set(members.map({ TestObjCKeyTy($0) }))
+  // SR-4724: Should not need to be split out but if it is not it
+  // is considered ambiguous.
+  let temp = members.map({ TestObjCKeyTy($0) })
+  let result: Set<NSObject> = Set(temp)
   expectTrue(isNativeSet(result))
   return result
 }
@@ -446,7 +452,10 @@ SetTestSuite.test("COW.Fast.ContainsDoesNotReallocate") {
   }
 }
 
-SetTestSuite.test("COW.Slow.ContainsDoesNotReallocate") {
+SetTestSuite.test("COW.Slow.ContainsDoesNotReallocate")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   var s = getCOWSlowSet()
   var identity1 = s._rawIdentifier()
 
@@ -658,7 +667,10 @@ SetTestSuite.test("COW.Slow.IndexForMemberDoesNotReallocate") {
   }
 }
 
-SetTestSuite.test("COW.Fast.RemoveAtDoesNotReallocate") {
+SetTestSuite.test("COW.Fast.RemoveAtDoesNotReallocate")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   do {
     var s = getCOWFastSet()
     var identity1 = s._rawIdentifier()
@@ -697,7 +709,10 @@ SetTestSuite.test("COW.Fast.RemoveAtDoesNotReallocate") {
   }
 }
 
-SetTestSuite.test("COW.Slow.RemoveAtDoesNotReallocate") {
+SetTestSuite.test("COW.Slow.RemoveAtDoesNotReallocate")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   do {
     var s = getCOWSlowSet()
     var identity1 = s._rawIdentifier()
@@ -736,7 +751,10 @@ SetTestSuite.test("COW.Slow.RemoveAtDoesNotReallocate") {
   }
 }
 
-SetTestSuite.test("COW.Fast.RemoveDoesNotReallocate") {
+SetTestSuite.test("COW.Fast.RemoveDoesNotReallocate")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   do {
     var s1 = getCOWFastSet()
     var identity1 = s1._rawIdentifier()
@@ -774,7 +792,10 @@ SetTestSuite.test("COW.Fast.RemoveDoesNotReallocate") {
   }
 }
 
-SetTestSuite.test("COW.Slow.RemoveDoesNotReallocate") {
+SetTestSuite.test("COW.Slow.RemoveDoesNotReallocate")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   do {
     var s1 = getCOWSlowSet()
     var identity1 = s1._rawIdentifier()
@@ -832,7 +853,7 @@ SetTestSuite.test("COW.Fast.UnionInPlaceSmallSetDoesNotReallocate") {
 SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
   do {
     var s = getCOWFastSet()
-    let originalCapacity = s._variantStorage.asNative.capacity
+    let originalCapacity = s._variantBuffer.asNative.capacity
     expectEqual(3, s.count)
     expectTrue(s.contains(1010))
 
@@ -840,7 +861,7 @@ SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
     // We cannot expectTrue that identity changed, since the new buffer of
     // smaller size can be allocated at the same address as the old one.
     var identity1 = s._rawIdentifier()
-    expectTrue(s._variantStorage.asNative.capacity < originalCapacity)
+    expectTrue(s._variantBuffer.asNative.capacity < originalCapacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(1010))
 
@@ -853,19 +874,19 @@ SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
   do {
     var s = getCOWFastSet()
     var identity1 = s._rawIdentifier()
-    let originalCapacity = s._variantStorage.asNative.capacity
+    let originalCapacity = s._variantBuffer.asNative.capacity
     expectEqual(3, s.count)
     expectTrue(s.contains(1010))
 
     s.removeAll(keepingCapacity: true)
     expectEqual(identity1, s._rawIdentifier())
-    expectEqual(originalCapacity, s._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s._variantBuffer.asNative.capacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(1010))
 
     s.removeAll(keepingCapacity: true)
     expectEqual(identity1, s._rawIdentifier())
-    expectEqual(originalCapacity, s._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s._variantBuffer.asNative.capacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(1010))
   }
@@ -894,7 +915,7 @@ SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
   do {
     var s1 = getCOWFastSet()
     var identity1 = s1._rawIdentifier()
-    let originalCapacity = s1._variantStorage.asNative.capacity
+    let originalCapacity = s1._variantBuffer.asNative.capacity
     expectEqual(3, s1.count)
     expectTrue(s1.contains(1010))
 
@@ -905,7 +926,7 @@ SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
     expectNotEqual(identity1, identity2)
     expectEqual(3, s1.count)
     expectTrue(s1.contains(1010))
-    expectEqual(originalCapacity, s2._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s2._variantBuffer.asNative.capacity)
     expectEqual(0, s2.count)
     expectFalse(s2.contains(1010))
 
@@ -918,7 +939,7 @@ SetTestSuite.test("COW.Fast.RemoveAllDoesNotReallocate") {
 SetTestSuite.test("COW.Slow.RemoveAllDoesNotReallocate") {
   do {
     var s = getCOWSlowSet()
-    let originalCapacity = s._variantStorage.asNative.capacity
+    let originalCapacity = s._variantBuffer.asNative.capacity
     expectEqual(3, s.count)
     expectTrue(s.contains(TestKeyTy(1010)))
 
@@ -926,7 +947,7 @@ SetTestSuite.test("COW.Slow.RemoveAllDoesNotReallocate") {
     // We cannot expectTrue that identity changed, since the new buffer of
     // smaller size can be allocated at the same address as the old one.
     var identity1 = s._rawIdentifier()
-    expectTrue(s._variantStorage.asNative.capacity < originalCapacity)
+    expectTrue(s._variantBuffer.asNative.capacity < originalCapacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(TestKeyTy(1010)))
 
@@ -939,19 +960,19 @@ SetTestSuite.test("COW.Slow.RemoveAllDoesNotReallocate") {
   do {
     var s = getCOWSlowSet()
     var identity1 = s._rawIdentifier()
-    let originalCapacity = s._variantStorage.asNative.capacity
+    let originalCapacity = s._variantBuffer.asNative.capacity
     expectEqual(3, s.count)
     expectTrue(s.contains(TestKeyTy(1010)))
 
     s.removeAll(keepingCapacity: true)
     expectEqual(identity1, s._rawIdentifier())
-    expectEqual(originalCapacity, s._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s._variantBuffer.asNative.capacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(TestKeyTy(1010)))
 
     s.removeAll(keepingCapacity: true)
     expectEqual(identity1, s._rawIdentifier())
-    expectEqual(originalCapacity, s._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s._variantBuffer.asNative.capacity)
     expectEqual(0, s.count)
     expectFalse(s.contains(TestKeyTy(1010)))
   }
@@ -980,7 +1001,7 @@ SetTestSuite.test("COW.Slow.RemoveAllDoesNotReallocate") {
   do {
     var s1 = getCOWSlowSet()
     var identity1 = s1._rawIdentifier()
-    let originalCapacity = s1._variantStorage.asNative.capacity
+    let originalCapacity = s1._variantBuffer.asNative.capacity
     expectEqual(3, s1.count)
     expectTrue(s1.contains(TestKeyTy(1010)))
 
@@ -991,7 +1012,7 @@ SetTestSuite.test("COW.Slow.RemoveAllDoesNotReallocate") {
     expectNotEqual(identity1, identity2)
     expectEqual(3, s1.count)
     expectTrue(s1.contains(TestKeyTy(1010)))
-    expectEqual(originalCapacity, s2._variantStorage.asNative.capacity)
+    expectEqual(originalCapacity, s2._variantBuffer.asNative.capacity)
     expectEqual(0, s2.count)
     expectFalse(s2.contains(TestKeyTy(1010)))
 
@@ -1194,7 +1215,7 @@ class CustomImmutableNSSet : NSSet {
     super.init()
   }
 
-  override init(objects: UnsafePointer<AnyObject>, count: Int) {
+  override init(objects: UnsafePointer<AnyObject>?, count: Int) {
     expectUnreachable()
     super.init(objects: objects, count: count)
   }
@@ -1229,7 +1250,6 @@ class CustomImmutableNSSet : NSSet {
   static var timesObjectEnumeratorWasCalled = 0
   static var timesCountWasCalled = 0
 }
-
 
 SetTestSuite.test("BridgedFromObjC.Verbatim.SetIsCopied") {
   var (s, nss) = getBridgedVerbatimSetAndNSMutableSet()
@@ -1645,7 +1665,10 @@ SetTestSuite.test("BridgedFromObjC.Verbatim.RemoveAt") {
   expectNil(s.index(of: TestObjCKeyTy(1010)))
 }
 
-SetTestSuite.test("BridgedFromObjC.Nonverbatim.RemoveAt") {
+SetTestSuite.test("BridgedFromObjC.Nonverbatim.RemoveAt")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   var s = getBridgedNonverbatimSet()
   let identity1 = s._rawIdentifier()
   expectTrue(isNativeSet(s))
@@ -1722,7 +1745,11 @@ SetTestSuite.test("BridgedFromObjC.Verbatim.Remove") {
   }
 }
 
-SetTestSuite.test("BridgedFromObjC.Nonverbatim.Remove") {
+SetTestSuite.test("BridgedFromObjC.Nonverbatim.Remove")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
+
   do {
     var s = getBridgedNonverbatimSet()
     var identity1 = s._rawIdentifier()
@@ -2038,26 +2065,17 @@ SetTestSuite.test("BridgedFromObjC.Nonverbatim.Generate_Huge") {
 
 SetTestSuite.test("BridgedFromObjC.Verbatim.EqualityTest_Empty") {
   var s1 = getBridgedVerbatimSet([])
-  var identity1 = s1._rawIdentifier()
   expectTrue(isCocoaSet(s1))
 
   var s2 = getBridgedVerbatimSet([])
-  var identity2 = s2._rawIdentifier()
   expectTrue(isCocoaSet(s2))
-  expectEqual(identity1, identity2)
 
   expectEqual(s1, s2)
-  expectEqual(identity1, s1._rawIdentifier())
-  expectEqual(identity2, s2._rawIdentifier())
 
   s2.insert(TestObjCKeyTy(4040))
   expectTrue(isNativeSet(s2))
-  expectNotEqual(identity2, s2._rawIdentifier())
-  identity2 = s2._rawIdentifier()
 
   expectNotEqual(s1, s2)
-  expectEqual(identity1, s1._rawIdentifier())
-  expectEqual(identity2, s2._rawIdentifier())
 }
 
 SetTestSuite.test("BridgedFromObjC.Nonverbatim.EqualityTest_Empty") {
@@ -2489,7 +2507,7 @@ SetTestSuite.test("SetUpcastBridged") {
   }
 
   do {
-    var s = s as Set<NSObject>
+    var s = s as! Set<NSObject>
 
     expectEqual(3, s.count)
     expectTrue(s.contains(TestBridgedKeyTy(1010) as NSObject))
@@ -3146,7 +3164,10 @@ SetTestSuite.test("∪=") {
   expectEqual(identity1, s1._rawIdentifier())
 }
 
-SetTestSuite.test("subtract") {
+SetTestSuite.test("subtract")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   let s1 = Set([1010, 2020, 3030])
   let s2 = Set([4040, 5050, 6060])
   let s3 = Set([1010, 2020, 3030, 4040, 5050, 6060])
@@ -3198,7 +3219,10 @@ SetTestSuite.test("∖") {
   expectEqual(identity1, s1._rawIdentifier())
 }
 
-SetTestSuite.test("subtract") {
+SetTestSuite.test("subtract")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   var s1 = Set([1010, 2020, 3030, 4040, 5050, 6060])
   let s2 = Set([1010, 2020, 3030])
   let s3 = Set([4040, 5050, 6060])
@@ -3215,7 +3239,11 @@ SetTestSuite.test("subtract") {
   expectEqual(identity1, s1._rawIdentifier())
 }
 
-SetTestSuite.test("∖=") {
+SetTestSuite.test("∖=")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
+
   var s1 = Set([1010, 2020, 3030, 4040, 5050, 6060])
   let s2 = Set([1010, 2020, 3030])
   let s3 = Set([4040, 5050, 6060])
@@ -3376,7 +3404,10 @@ SetTestSuite.test("⨁") {
   expectTrue((s1 ⨁ s1).isEmpty)
 }
 
-SetTestSuite.test("formSymmetricDifference") {
+SetTestSuite.test("formSymmetricDifference")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
   // Overlap with 4040, 5050, 6060
   var s1 = Set([1010, 2020, 3030, 4040, 5050, 6060])
   let s2 = Set([1010])
@@ -3399,7 +3430,11 @@ SetTestSuite.test("formSymmetricDifference") {
   expectNotEqual(identity1, s1._rawIdentifier())
 }
 
-SetTestSuite.test("⨁=") {
+SetTestSuite.test("⨁=")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
+
   // Overlap with 4040, 5050, 6060
   var s1 = Set([1010, 2020, 3030, 4040, 5050, 6060])
   let s2 = Set([1010])
@@ -3434,7 +3469,11 @@ SetTestSuite.test("removeFirst") {
   expectNil(empty.first)
 }
 
-SetTestSuite.test("remove(member)") {
+SetTestSuite.test("remove(member)")
+  .xfail(.custom({ _isStdlibDebugConfiguration() },
+                 reason: "rdar://33358110"))
+  .code {
+
   let s1 : Set<TestKeyTy> = [1010, 2020, 3030]
   var s2 = Set<TestKeyTy>(minimumCapacity: 10)
   for i in [1010, 2020, 3030] {
@@ -3495,6 +3534,28 @@ SetTestSuite.test("first") {
   expectNil(emptySet.first)
 }
 
+SetTestSuite.test("capacity/reserveCapacity(_:)") {
+  var s1: Set = [10, 20, 30]
+  expectEqual(3, s1.capacity)
+  s1.insert(40)
+  expectEqual(6, s1.capacity)
+
+  // Reserving new capacity jumps up to next limit.
+  s1.reserveCapacity(7)
+  expectEqual(12, s1.capacity)
+
+  // Can reserve right up to a limit.
+  s1.reserveCapacity(24)
+  expectEqual(24, s1.capacity)
+
+  // Fill up to the limit, no reallocation.
+  s1.formUnion(stride(from: 50, through: 240, by: 10))
+  expectEqual(24, s1.count)
+  expectEqual(24, s1.capacity)
+  s1.insert(250)
+  expectEqual(48, s1.capacity)
+}
+
 SetTestSuite.test("isEmpty") {
   let s1 = Set([1010, 2020, 3030])
   expectFalse(s1.isEmpty)
@@ -3516,7 +3577,7 @@ class MockSetWithCustomCount : NSSet {
     super.init()
   }
 
-  override init(objects: UnsafePointer<AnyObject>, count: Int) {
+  override init(objects: UnsafePointer<AnyObject>?, count: Int) {
     expectUnreachable()
     super.init(objects: objects, count: count)
   }

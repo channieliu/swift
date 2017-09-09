@@ -3,6 +3,7 @@ set(TRANSFORMS_SOURCES
   Transforms/AllocBoxToStack.cpp
   Transforms/ArrayCountPropagation.cpp
   Transforms/ArrayElementValuePropagation.cpp
+  Transforms/AssumeSingleThreaded.cpp
   Transforms/CSE.cpp
   Transforms/ConditionForwarding.cpp
   Transforms/CopyForwarding.cpp
@@ -13,6 +14,7 @@ set(TRANSFORMS_SOURCES
   Transforms/FunctionSignatureOpts.cpp
   Transforms/GenericSpecializer.cpp
   Transforms/MergeCondFail.cpp
+  Transforms/MarkUninitializedFixup.cpp
   Transforms/OwnershipModelEliminator.cpp
   Transforms/PerformanceInliner.cpp
   Transforms/RedundantLoadElimination.cpp

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,23 +46,6 @@ struct SyntaxModelContext::Implementation {
       LangOpts(SrcFile.getASTContext().LangOpts),
       SrcMgr(SrcFile.getASTContext().SourceMgr) {}
 };
-
-static bool canFindSurroundingParens(ArrayRef<Token> Toks,
-                                    const unsigned Current) {
-  bool LeftOk = false;
-  bool RightOk = false;
-  for (unsigned Offset = 1; ; Offset ++) {
-    if (Current < Offset || Current + Offset >= Toks.size())
-      return false;
-    auto &L = Toks[Current - Offset];
-    auto &R = Toks[Current + Offset];
-    LeftOk |= L.getKind() == tok::l_paren;
-    RightOk |= R.getKind() == tok::r_paren;
-    if (LeftOk && RightOk)
-      return true;
-  }
-  llvm_unreachable("unreachable exit condition");
-}
 
 SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
   : Impl(*new Implementation(SrcFile)) {
@@ -113,35 +96,38 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
 
       switch(Tok.getKind()) {
 #define KEYWORD(X) case tok::kw_##X:
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
 #undef KEYWORD
-        if (Tok.getKind() != tok::kw__ &&
-            0 < I && I < Tokens.size() - 1 &&
-            (Tokens[I-1].getKind() == tok::l_paren ||
-             Tokens[I-1].getKind() == tok::comma) &&
-            (Tokens[I+1].getKind() == tok::colon ||
-             Tokens[I+1].getKind() == tok::identifier ||
-             Tokens[I+1].isKeyword()) &&
-            canFindSurroundingParens(Tokens, I)) {
-          // Keywords are allowed as argument labels and should be treated as
-          // identifiers.  The exception is '_' which is not a name.
-          Kind = SyntaxNodeKind::Identifier;
-        } else {
-          Kind = SyntaxNodeKind::Keyword;
+        Kind = SyntaxNodeKind::Keyword;
+        // Some keywords can be used as an argument labels. If this one can and
+        // is being used as one, treat it as an identifier instead.
+        if (Tok.canBeArgumentLabel() && !Tok.is(tok::kw__) &&
+            0 < I && I < Tokens.size() - 1) {
+          auto prev = Tokens[I - 1];
+          auto next = Tokens[I + 1];
+          if ((prev.is(tok::identifier) || prev.isKeyword()) && I > 1)
+            prev = Tokens[I - 2];
+          else if ((next.is(tok::identifier) || next.isKeyword()) &&
+                   I < Tokens.size() - 2)
+            next = Tokens[I + 2];
+
+          if ((prev.is(tok::l_paren) || prev.is(tok::comma)) &&
+              next.is(tok::colon))
+            Kind = SyntaxNodeKind::Identifier;
         }
         break;
 
 #define POUND_OLD_OBJECT_LITERAL(Name, NewName, OldArg, NewArg) \
       case tok::pound_##Name:
 #define POUND_OBJECT_LITERAL(Name, Desc, Proto) case tok::pound_##Name:
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
         LiteralStartLoc = Loc;
         continue;
 
 #define POUND_OBJECT_LITERAL(Name, Desc, Proto)
 #define POUND_OLD_OBJECT_LITERAL(Name, NewName, OldArg, NewArg)
 #define POUND_KEYWORD(Name) case tok::pound_##Name:
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
         Kind = SyntaxNodeKind::Keyword;
         break;
       case tok::identifier:
@@ -311,7 +297,7 @@ public:
   bool walkToDeclPost(Decl *D) override;
   bool walkToTypeReprPre(TypeRepr *T) override;
   std::pair<bool, Pattern*> walkToPatternPre(Pattern *P) override;
-  bool shouldWalkIntoFunctionGenericParams() override { return true; }
+  bool shouldWalkIntoGenericParams() override { return true; }
 
 private:
   static bool findUrlStartingLoc(StringRef Text, unsigned &Start,
@@ -350,7 +336,7 @@ private:
   bool searchForURL(CharSourceRange Range);
   bool findFieldsInDocCommentLine(SyntaxNode Node);
   bool findFieldsInDocCommentBlock(SyntaxNode Node);
-  bool isVisitedBeforeInIfConfigStmt(ASTNode Node) {
+  bool isVisitedBeforeInIfConfig(ASTNode Node) {
     return VisitedNodesInsideIfConfig.count(Node) > 0;
   }
 };
@@ -452,7 +438,7 @@ void ModelASTWalker::visitSourceFile(SourceFile &SrcFile,
 }
 
 std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
-  if (isVisitedBeforeInIfConfigStmt(E))
+  if (isVisitedBeforeInIfConfig(E))
     return {false, E};
 
   if (E->isImplicit())
@@ -570,7 +556,7 @@ void ModelASTWalker::handleStmtCondition(StmtCondition cond) {
 
 
 std::pair<bool, Stmt *> ModelASTWalker::walkToStmtPre(Stmt *S) {
-  if (isVisitedBeforeInIfConfigStmt(S)) {
+  if (isVisitedBeforeInIfConfig(S)) {
     return {false, S};
   }
   auto addExprElem = [&](SyntaxStructureElementKind K, const Expr *Elem,
@@ -713,39 +699,6 @@ std::pair<bool, Stmt *> ModelASTWalker::walkToStmtPre(Stmt *S) {
       pushStructureNode(SN, SW);
     }
 
-  } else if (auto ConfigS = dyn_cast<IfConfigStmt>(S)) {
-    for (auto &Clause : ConfigS->getClauses()) {
-      unsigned TokLen;
-      if (&Clause == &*ConfigS->getClauses().begin())
-        TokLen = 3; // '#if'
-      else if (Clause.Cond == nullptr)
-        TokLen = 5; // '#else'
-      else
-        TokLen = 7; // '#elseif'
-      if (!passNonTokenNode({SyntaxNodeKind::BuildConfigKeyword,
-        CharSourceRange(Clause.Loc, TokLen) }))
-        return { false, nullptr };
-
-      if (Clause.Cond && !annotateIfConfigConditionIdentifiers(Clause.Cond))
-        return { false, nullptr };
-
-      for (auto &Element : Clause.Elements) {
-        if (Expr *E = Element.dyn_cast<Expr*>()) {
-          E->walk(*this);
-        } else if (Stmt *S = Element.dyn_cast<Stmt*>()) {
-          S->walk(*this);
-        } else {
-          Element.get<Decl*>()->walk(*this);
-        }
-        VisitedNodesInsideIfConfig.insert(Element);
-      }
-    }
-    
-    if (!ConfigS->hadMissingEnd())
-      if (!passNonTokenNode({ SyntaxNodeKind::BuildConfigKeyword,
-        CharSourceRange(ConfigS->getEndLoc(), 6/*'#endif'*/) }))
-        return { false, nullptr };
-
   } else if (auto *DeferS = dyn_cast<DeferStmt>(S)) {
     if (auto *FD = DeferS->getTempDecl()) {
       auto *RetS = FD->getBody()->walk(*this);
@@ -766,7 +719,7 @@ Stmt *ModelASTWalker::walkToStmtPost(Stmt *S) {
 }
 
 bool ModelASTWalker::walkToDeclPre(Decl *D) {
-  if (isVisitedBeforeInIfConfigStmt(D))
+  if (isVisitedBeforeInIfConfig(D))
     return false;
   if (D->isImplicit())
     return false;
@@ -775,7 +728,7 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
     return false;
 
   if (auto *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
-    FuncDecl *FD = dyn_cast<FuncDecl>(AFD);
+    auto *FD = dyn_cast<FuncDecl>(AFD);
     if (FD && FD->isAccessor()) {
       // Pass context sensitive keyword token.
       SourceLoc SL = FD->getFuncLoc();
@@ -930,9 +883,16 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
       if (Clause.Cond && !annotateIfConfigConditionIdentifiers(Clause.Cond))
         return false;
 
-      for (auto *D : Clause.Members)
-        if (D->walk(*this))
-          return false;
+      for (auto &Element : Clause.Elements) {
+        if (auto *E = Element.dyn_cast<Expr*>()) {
+          E->walk(*this);
+        } else if (auto *S = Element.dyn_cast<Stmt*>()) {
+          S->walk(*this);
+        } else {
+          Element.get<Decl*>()->walk(*this);
+        }
+        VisitedNodesInsideIfConfig.insert(Element);
+      }
     }
     
     if (!ConfigD->hadMissingEnd())
@@ -994,6 +954,16 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
         popStructureNode();
       }
     }
+  } else if (auto *TypeAliasD = dyn_cast<TypeAliasDecl>(D)) {
+    SyntaxStructureNode SN;
+    SN.Dcl = TypeAliasD;
+    SN.Kind = SyntaxStructureKind::TypeAlias;
+    SN.Range = charSourceRangeFromSourceRange(SM,
+                                              TypeAliasD->getSourceRange());
+    SN.NameRange = CharSourceRange(TypeAliasD->getNameLoc(),
+                                   TypeAliasD->getName().getLength());
+    SN.Attrs = TypeAliasD->getAttrs();
+    pushStructureNode(SN, TypeAliasD);
   }
 
   return true;
@@ -1028,7 +998,7 @@ std::pair<bool, Pattern*> ModelASTWalker::walkToPatternPre(Pattern *P) {
       if (auto InOutT =
            dyn_cast_or_null<InOutTypeRepr>(TyPat->getTypeLoc().getTypeRepr())) {
         if (!passNonTokenNode({ SyntaxNodeKind::Keyword,
-                                CharSourceRange(InOutT->getInOutLoc(),
+                                CharSourceRange(InOutT->getSpecifierLoc(),
                                                 /*'inout'*/5)
                               }))
           return { false, nullptr };
@@ -1052,14 +1022,15 @@ public:
         return { true, E };
       if (DRE->getRefKind() != DeclRefKind::Ordinary)
         return { true, E };
-      if (!Fn(CharSourceRange(DRE->getSourceRange().Start,
-                              DRE->getName().getBaseName().getLength())))
+      if (!Fn(CharSourceRange(
+              DRE->getSourceRange().Start,
+              DRE->getName().getBaseName().userFacingName().size())))
         return { false, nullptr };
     }
     return { true, E };
   }
 };
-}
+} // end anonymous namespace
 
 bool ModelASTWalker::annotateIfConfigConditionIdentifiers(Expr *Cond) {
   if (!Cond)
@@ -1069,9 +1040,7 @@ bool ModelASTWalker::annotateIfConfigConditionIdentifiers(Expr *Cond) {
   };
 
   IdRefWalker<decltype(passNode)> Walker(passNode);
-  if (!Cond->walk(Walker))
-    return false;
-  return true;
+  return Cond->walk(Walker);
 }
 
 bool ModelASTWalker::handleSpecialDeclAttribute(const DeclAttribute *D,
@@ -1262,9 +1231,7 @@ bool ModelASTWalker::passNode(const SyntaxNode &Node) {
     }
   }
 
-  if (!Walker.walkToNodePost(Node))
-    return false;
-  return true;
+  return Walker.walkToNodePost(Node);
 }
 
 bool ModelASTWalker::pushStructureNode(const SyntaxStructureNode &Node,

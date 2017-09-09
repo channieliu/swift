@@ -68,9 +68,10 @@ ErrorBridgingTests.test("NSCopying") {
   }
 }
 
-func archiveAndUnarchiveObject<T: NSCoding where T: NSObject>(
+func archiveAndUnarchiveObject<T: NSCoding>(
   _ object: T
-) -> T? {
+) -> T?
+where T: NSObject {
   let unarchiver = NSKeyedUnarchiver(forReadingWith:
     NSKeyedArchiver.archivedData(withRootObject: object)
   )
@@ -89,7 +90,7 @@ ErrorBridgingTests.test("NSCoding") {
 ErrorBridgingTests.test("NSError-to-enum bridging") {
   NoisyErrorLifeCount = 0
   NoisyErrorDeathCount = 0
-  let testURL = URL(string: "http://swift.org")!
+  let testURL = URL(string: "https://swift.org")!
 
   autoreleasepool {
     let underlyingError = CocoaError(.fileLockingError)
@@ -498,6 +499,7 @@ func testCustomizedError(error: Error, nsError: NSError) {
     nsError.localizedRecoveryOptions)
 
   // Directly recover.
+  let ctx = UnsafeMutableRawPointer(bitPattern:0x1234567)
   let attempter: AnyObject
   if #available(OSX 10.11, iOS 9.0, tvOS 9.0, watchOS 2.0, *) {
     expectNil(nsError.userInfo[NSRecoveryAttempterErrorKey as NSObject])
@@ -513,14 +515,14 @@ func testCustomizedError(error: Error, nsError: NSError) {
     false)
 
   // Recover through delegate.
-  let rd1 = RecoveryDelegate(expectedSuccess: true, expectedContextInfo: nil)
+  let rd1 = RecoveryDelegate(expectedSuccess: true, expectedContextInfo: ctx)
   expectEqual(false, rd1.called)
   attempter.attemptRecovery(
     fromError: nsError,
     optionIndex: 0,
     delegate: rd1,
     didRecoverSelector: #selector(RecoveryDelegate.recover(success:contextInfo:)),
-    contextInfo: nil)
+    contextInfo: ctx)
   expectEqual(true, rd1.called)
 
   let rd2 = RecoveryDelegate(expectedSuccess: false, expectedContextInfo: nil)
@@ -601,11 +603,19 @@ enum DefaultCustomizedError3 : UInt, CustomNSError {
   }
 }
 
+enum DefaultCustomizedParent {
+    enum ChildError: CustomNSError {
+        case foo
+    }
+}
+
 ErrorBridgingTests.test("Default-customized via CustomNSError") {
   expectEqual(1, (DefaultCustomizedError1.worse as NSError).code)
   expectEqual(13, (DefaultCustomizedError2.worse as NSError).code)
   expectEqual(115, (DefaultCustomizedError3.worse as NSError).code)
+  expectEqual("main.DefaultCustomizedError1", (DefaultCustomizedError1.worse as NSError).domain)
   expectEqual("customized3", (DefaultCustomizedError3.worse as NSError).domain)
+  expectEqual("main.DefaultCustomizedParent.ChildError", (DefaultCustomizedParent.ChildError.foo as NSError).domain)
 }
 
 class MyNSError : NSError {  }

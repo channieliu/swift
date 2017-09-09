@@ -21,13 +21,15 @@ func use_subscript_rvalue_get(_ i : Int) -> Int {
 
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_rvalue_get
 // CHECK: bb0(%0 : $Int):
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols16subscriptableGetPS_16SubscriptableGet_ : $*SubscriptableGet
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*SubscriptableGet to $*[[OPENED:@opened(.*) SubscriptableGet]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols16subscriptableGetAA013SubscriptableC0_pv : $*SubscriptableGet
+// CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[GLOB]] : $*SubscriptableGet
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr immutable_access [[READ]] : $*SubscriptableGet to $*[[OPENED:@opened(.*) SubscriptableGet]]
 // CHECK: [[ALLOCSTACK:%[0-9]+]] = alloc_stack $[[OPENED]]
 // CHECK: copy_addr [[PROJ]] to [initialization] [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #SubscriptableGet.subscript!getter.1
 // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[METH]]<[[OPENED]]>(%0, [[ALLOCSTACK]])
 // CHECK-NEXT: destroy_addr [[ALLOCSTACK]]
+// CHECK-NEXT: end_access [[READ]] : $*SubscriptableGet
 // CHECK-NEXT: dealloc_stack [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: return [[RESULT]]
 
@@ -37,13 +39,15 @@ func use_subscript_lvalue_get(_ i : Int) -> Int {
 
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_lvalue_get
 // CHECK: bb0(%0 : $Int):
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols19subscriptableGetSetPS_19SubscriptableGetSet_ : $*SubscriptableGetSet
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*SubscriptableGetSet to $*[[OPENED:@opened(.*) SubscriptableGetSet]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols19subscriptableGetSetAA013SubscriptablecD0_pv : $*SubscriptableGetSet
+// CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[GLOB]] : $*SubscriptableGetSet
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr immutable_access [[READ]] : $*SubscriptableGetSet to $*[[OPENED:@opened(.*) SubscriptableGetSet]]
 // CHECK: [[ALLOCSTACK:%[0-9]+]] = alloc_stack $[[OPENED]]
 // CHECK: copy_addr [[PROJ]] to [initialization] [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #SubscriptableGetSet.subscript!getter.1
 // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[METH]]<[[OPENED]]>(%0, [[ALLOCSTACK]])
 // CHECK-NEXT: destroy_addr [[ALLOCSTACK]] : $*[[OPENED]]
+// CHECK-NEXT: end_access [[READ]] : $*SubscriptableGetSet
 // CHECK-NEXT: dealloc_stack [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: return [[RESULT]]
 
@@ -53,8 +57,9 @@ func use_subscript_lvalue_set(_ i : Int) {
 
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_lvalue_set
 // CHECK: bb0(%0 : $Int):
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols19subscriptableGetSetPS_19SubscriptableGetSet_ : $*SubscriptableGetSet
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*SubscriptableGetSet to $*[[OPENED:@opened(.*) SubscriptableGetSet]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols19subscriptableGetSetAA013SubscriptablecD0_pv : $*SubscriptableGetSet
+// CHECK: [[READ:%.*]] = begin_access [modify] [dynamic] [[GLOB]] : $*SubscriptableGetSet
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr mutable_access [[READ]] : $*SubscriptableGetSet to $*[[OPENED:@opened(.*) SubscriptableGetSet]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #SubscriptableGetSet.subscript!setter.1
 // CHECK-NEXT: apply [[METH]]<[[OPENED]]>(%0, %0, [[PROJ]])
 
@@ -82,11 +87,13 @@ func use_subscript_archetype_lvalue_get<T : SubscriptableGetSet>(_ generic: inou
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_archetype_lvalue_get
 // CHECK: bb0(%0 : $*T, %1 : $Int):
+// CHECK: [[READ:%.*]] = begin_access [read] [unknown] %0 : $*T
 // CHECK: [[GUARANTEEDSTACK:%[0-9]+]] = alloc_stack $T
-// CHECK: copy_addr %0 to [initialization] [[GUARANTEEDSTACK]] : $*T
+// CHECK: copy_addr [[READ]] to [initialization] [[GUARANTEEDSTACK]] : $*T
 // CHECK: [[METH:%[0-9]+]] = witness_method $T, #SubscriptableGetSet.subscript!getter.1
 // CHECK-NEXT: [[APPLYRESULT:%[0-9]+]] = apply [[METH]]<T>(%1, [[GUARANTEEDSTACK]])
 // CHECK-NEXT: destroy_addr [[GUARANTEEDSTACK]] : $*T
+// CHECK-NEXT: end_access [[READ]]
 // CHECK-NEXT: dealloc_stack [[GUARANTEEDSTACK]] : $*T
 // CHECK: return [[APPLYRESULT]]
 
@@ -97,7 +104,8 @@ func use_subscript_archetype_lvalue_set<T : SubscriptableGetSet>(_ generic: inou
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_archetype_lvalue_set
 // CHECK: bb0(%0 : $*T, %1 : $Int):
 // CHECK: [[METH:%[0-9]+]] = witness_method $T, #SubscriptableGetSet.subscript!setter.1
-// CHECK-NEXT: apply [[METH]]<T>(%1, %1, %0)
+// CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] %0 : $*T
+// CHECK-NEXT: apply [[METH]]<T>(%1, %1, [[WRITE]])
 
 
 //===----------------------------------------------------------------------===//
@@ -120,8 +128,9 @@ func use_property_rvalue_get() -> Int {
   return propertyGet.a
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_property_rvalue_get
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols11propertyGetPS_18PropertyWithGetter_ : $*PropertyWithGetter
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*PropertyWithGetter to $*[[OPENED:@opened(.*) PropertyWithGetter]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols11propertyGetAA18PropertyWithGetter_pv : $*PropertyWithGetter
+// CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[GLOB]] : $*PropertyWithGetter
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr immutable_access [[READ]] : $*PropertyWithGetter to $*[[OPENED:@opened(.*) PropertyWithGetter]]
 // CHECK: [[COPY:%.*]] = alloc_stack $[[OPENED]]
 // CHECK-NEXT: copy_addr [[PROJ]] to [initialization] [[COPY]] : $*[[OPENED]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #PropertyWithGetter.a!getter.1
@@ -131,8 +140,9 @@ func use_property_lvalue_get() -> Int {
   return propertyGetSet.b
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_property_lvalue_get
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols14propertyGetSetPS_24PropertyWithGetterSetter_ : $*PropertyWithGetterSetter
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*PropertyWithGetterSetter to $*[[OPENED:@opened(.*) PropertyWithGetterSetter]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols14propertyGetSetAA24PropertyWithGetterSetter_pv : $*PropertyWithGetterSetter
+// CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[GLOB]] : $*PropertyWithGetterSetter
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr immutable_access [[READ]] : $*PropertyWithGetterSetter to $*[[OPENED:@opened(.*) PropertyWithGetterSetter]]
 // CHECK: [[STACK:%[0-9]+]] = alloc_stack $[[OPENED]]
 // CHECK: copy_addr [[PROJ]] to [initialization] [[STACK]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #PropertyWithGetterSetter.b!getter.1
@@ -144,8 +154,9 @@ func use_property_lvalue_set(_ x : Int) {
 
 // CHECK-LABEL: sil hidden @{{.*}}use_property_lvalue_set
 // CHECK: bb0(%0 : $Int):
-// CHECK: [[GLOB:%[0-9]+]] = global_addr @_Tv9protocols14propertyGetSetPS_24PropertyWithGetterSetter_ : $*PropertyWithGetterSetter
-// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr [[GLOB]] : $*PropertyWithGetterSetter to $*[[OPENED:@opened(.*) PropertyWithGetterSetter]]
+// CHECK: [[GLOB:%[0-9]+]] = global_addr @_T09protocols14propertyGetSetAA24PropertyWithGetterSetter_pv : $*PropertyWithGetterSetter
+// CHECK: [[READ:%.*]] = begin_access [modify] [dynamic] [[GLOB]] : $*PropertyWithGetterSetter
+// CHECK: [[PROJ:%[0-9]+]] = open_existential_addr mutable_access [[READ]] : $*PropertyWithGetterSetter to $*[[OPENED:@opened(.*) PropertyWithGetterSetter]]
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #PropertyWithGetterSetter.b!setter.1
 // CHECK-NEXT: apply [[METH]]<[[OPENED]]>(%0, [[PROJ]])
 
@@ -189,7 +200,8 @@ func use_property_archetype_lvalue_set<T : PropertyWithGetterSetter>(_ generic: 
 // CHECK-LABEL: sil hidden @{{.*}}use_property_archetype_lvalue_set
 // CHECK: bb0(%0 : $*T, %1 : $Int):
 // CHECK: [[METH:%[0-9]+]] = witness_method $T, #PropertyWithGetterSetter.b!setter.1
-// CHECK-NEXT: apply [[METH]]<T>(%1, %0)
+// CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] %0 : $*T
+// CHECK-NEXT: apply [[METH]]<T>(%1, [[WRITE]])
 
 //===----------------------------------------------------------------------===//
 // Calling Initializers
@@ -198,11 +210,11 @@ protocol Initializable {
   init(int: Int)
 }
 
-// CHECK-LABEL: sil hidden @_TF9protocols27use_initializable_archetype
+// CHECK-LABEL: sil hidden @_T09protocols27use_initializable_archetype{{[_0-9a-zA-Z]*}}F
 func use_initializable_archetype<T: Initializable>(_ t: T, i: Int) {
-  // CHECK:   [[T_INIT:%[0-9]+]] = witness_method $T, #Initializable.init!allocator.1 : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
-  // CHECK:   [[T_META:%[0-9]+]] = metatype $@thick T.Type
+  // CHECK:   [[T_INIT:%[0-9]+]] = witness_method $T, #Initializable.init!allocator.1 : {{.*}} : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
   // CHECK:   [[T_RESULT:%[0-9]+]] = alloc_stack $T
+  // CHECK:   [[T_META:%[0-9]+]] = metatype $@thick T.Type
   // CHECK:   [[T_RESULT_ADDR:%[0-9]+]] = apply [[T_INIT]]<T>([[T_RESULT]], %1, [[T_META]]) : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
   // CHECK:   destroy_addr [[T_RESULT]] : $*T
   // CHECK:   dealloc_stack [[T_RESULT]] : $*T
@@ -212,13 +224,13 @@ func use_initializable_archetype<T: Initializable>(_ t: T, i: Int) {
   T(int: i)
 }
 
-// CHECK: sil hidden @_TF9protocols29use_initializable_existential
+// CHECK: sil hidden @_T09protocols29use_initializable_existential{{[_0-9a-zA-Z]*}}F
 func use_initializable_existential(_ im: Initializable.Type, i: Int) {
 // CHECK: bb0([[IM:%[0-9]+]] : $@thick Initializable.Type, [[I:%[0-9]+]] : $Int):
 // CHECK:   [[ARCHETYPE_META:%[0-9]+]] = open_existential_metatype [[IM]] : $@thick Initializable.Type to $@thick (@opened([[N:".*"]]) Initializable).Type
 // CHECK:   [[TEMP_VALUE:%[0-9]+]] = alloc_stack $Initializable
 // CHECK:   [[TEMP_ADDR:%[0-9]+]] = init_existential_addr [[TEMP_VALUE]] : $*Initializable, $@opened([[N]]) Initializable
-// CHECK:   [[INIT_WITNESS:%[0-9]+]] = witness_method $@opened([[N]]) Initializable, #Initializable.init!allocator.1, [[ARCHETYPE_META]]{{.*}} : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
+// CHECK:   [[INIT_WITNESS:%[0-9]+]] = witness_method $@opened([[N]]) Initializable, #Initializable.init!allocator.1 : {{.*}}, [[ARCHETYPE_META]]{{.*}} : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
 // CHECK:   [[INIT_RESULT:%[0-9]+]] = apply [[INIT_WITNESS]]<@opened([[N]]) Initializable>([[TEMP_ADDR]], [[I]], [[ARCHETYPE_META]]) : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
 // CHECK:   destroy_addr [[TEMP_VALUE]] : $*Initializable
 // CHECK:   dealloc_stack [[TEMP_VALUE]] : $*Initializable
@@ -241,13 +253,15 @@ class ClassWithGetter : PropertyWithGetter {
 
 // Make sure we are generating a protocol witness that calls the class method on
 // ClassWithGetter.
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWC9protocols15ClassWithGetterS_18PropertyWithGetterS_FS1_g1aSi : $@convention(witness_method) (@in_guaranteed ClassWithGetter) -> Int {
+// CHECK-LABEL: sil private [transparent] [thunk] @_T09protocols15ClassWithGetterCAA08PropertycD0A2aDP1aSifgTW : $@convention(witness_method) (@in_guaranteed ClassWithGetter) -> Int {
 // CHECK: bb0([[C:%.*]] : $*ClassWithGetter):
 // CHECK-NEXT: [[CCOPY:%.*]] = alloc_stack $ClassWithGetter
 // CHECK-NEXT: copy_addr [[C]] to [initialization] [[CCOPY]]
-// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [[CCOPY]]
-// CHECK-NEXT: [[FUN:%.*]] = class_method [[CCOPY_LOADED]] : $ClassWithGetter, #ClassWithGetter.a!getter.1 : (ClassWithGetter) -> () -> Int , $@convention(method) (@guaranteed ClassWithGetter) -> Int
-// CHECK-NEXT: apply [[FUN]]([[CCOPY_LOADED]])
+// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [take] [[CCOPY]]
+// CHECK-NEXT: [[BORROWED_CCOPY_LOADED:%.*]] = begin_borrow [[CCOPY_LOADED]]
+// CHECK-NEXT: [[FUN:%.*]] = class_method [[BORROWED_CCOPY_LOADED]] : $ClassWithGetter, #ClassWithGetter.a!getter.1 : (ClassWithGetter) -> () -> Int, $@convention(method) (@guaranteed ClassWithGetter) -> Int
+// CHECK-NEXT: apply [[FUN]]([[BORROWED_CCOPY_LOADED]])
+// CHECK-NEXT: end_borrow [[BORROWED_CCOPY_LOADED]] from [[CCOPY_LOADED]]
 // CHECK-NEXT: destroy_value [[CCOPY_LOADED]]
 // CHECK-NEXT: dealloc_stack [[CCOPY]]
 // CHECK-NEXT: return
@@ -267,13 +281,15 @@ class ClassWithGetterSetter : PropertyWithGetterSetter, PropertyWithGetter {
   }
 }
 
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWC9protocols21ClassWithGetterSetterS_24PropertyWithGetterSetterS_FS1_g1bSi : $@convention(witness_method) (@in_guaranteed ClassWithGetterSetter) -> Int {
+// CHECK-LABEL: sil private [transparent] [thunk] @_T09protocols21ClassWithGetterSetterCAA08PropertycdE0A2aDP1bSifgTW : $@convention(witness_method) (@in_guaranteed ClassWithGetterSetter) -> Int {
 // CHECK: bb0([[C:%.*]] : $*ClassWithGetterSetter):
 // CHECK-NEXT: [[CCOPY:%.*]] = alloc_stack $ClassWithGetterSetter
 // CHECK-NEXT: copy_addr [[C]] to [initialization] [[CCOPY]]
-// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [[CCOPY]]
-// CHECK-NEXT: [[FUN:%.*]] = class_method [[CCOPY_LOADED]] : $ClassWithGetterSetter, #ClassWithGetterSetter.b!getter.1 : (ClassWithGetterSetter) -> () -> Int , $@convention(method) (@guaranteed ClassWithGetterSetter) -> Int
-// CHECK-NEXT: apply [[FUN]]([[CCOPY_LOADED]])
+// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [take] [[CCOPY]]
+// CHECK-NEXT: [[BORROWED_CCOPY_LOADED:%.*]] = begin_borrow [[CCOPY_LOADED]]
+// CHECK-NEXT: [[FUN:%.*]] = class_method [[BORROWED_CCOPY_LOADED]] : $ClassWithGetterSetter, #ClassWithGetterSetter.b!getter.1 : (ClassWithGetterSetter) -> () -> Int, $@convention(method) (@guaranteed ClassWithGetterSetter) -> Int
+// CHECK-NEXT: apply [[FUN]]([[BORROWED_CCOPY_LOADED]])
+// CHECK-NEXT: end_borrow [[BORROWED_CCOPY_LOADED]] from [[CCOPY_LOADED]]
 // CHECK-NEXT: destroy_value [[CCOPY_LOADED]]
 // CHECK-NEXT: dealloc_stack [[CCOPY]]
 // CHECK-NEXT: return
@@ -287,11 +303,11 @@ class ClassWithStoredProperty : PropertyWithGetter {
   func methodUsingProperty() -> Int {
     return a
   }
-  // CHECK-LABEL: sil hidden @{{.*}}ClassWithStoredProperty{{.*}}methodUsingProperty
+  // CHECK-LABEL: sil hidden @_T09protocols23ClassWithStoredPropertyC011methodUsingE0SiyF
   // CHECK: bb0([[ARG:%.*]] : $ClassWithStoredProperty):
   // CHECK-NEXT: debug_value [[ARG]]
   // CHECK-NOT: copy_value
-  // CHECK-NEXT: [[FUN:%.*]] = class_method [[ARG]] : $ClassWithStoredProperty, #ClassWithStoredProperty.a!getter.1 : (ClassWithStoredProperty) -> () -> Int , $@convention(method) (@guaranteed ClassWithStoredProperty) -> Int
+  // CHECK-NEXT: [[FUN:%.*]] = class_method [[ARG]] : $ClassWithStoredProperty, #ClassWithStoredProperty.a!getter.1 : (ClassWithStoredProperty) -> () -> Int, $@convention(method) (@guaranteed ClassWithStoredProperty) -> Int
   // CHECK-NEXT: [[RESULT:%.*]] = apply [[FUN]]([[ARG]])
   // CHECK-NOT: destroy_value
   // CHECK-NEXT: return [[RESULT]] : $Int
@@ -304,7 +320,7 @@ struct StructWithStoredProperty : PropertyWithGetter {
   func methodUsingProperty() -> Int {
     return a
   }
-  // CHECK-LABEL: sil hidden @{{.*}}StructWithStoredProperty{{.*}}methodUsingProperty
+  // CHECK-LABEL: sil hidden @_T09protocols24StructWithStoredPropertyV011methodUsingE0SiyF
   // CHECK: bb0(%0 : $StructWithStoredProperty):
   // CHECK-NEXT: debug_value %0
   // CHECK-NEXT: %2 = struct_extract %0 : $StructWithStoredProperty, #StructWithStoredProperty.a
@@ -321,13 +337,13 @@ struct StructWithStoredProperty : PropertyWithGetter {
 // thunking code being too dumb but it is harmless to program
 // correctness.
 //
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV9protocols24StructWithStoredPropertyS_18PropertyWithGetterS_FS1_g1aSi : $@convention(witness_method) (@in_guaranteed StructWithStoredProperty) -> Int {
+// CHECK-LABEL: sil private [transparent] [thunk] @_T09protocols24StructWithStoredPropertyVAA0eC6GetterA2aDP1aSifgTW : $@convention(witness_method) (@in_guaranteed StructWithStoredProperty) -> Int {
 // CHECK: bb0([[C:%.*]] : $*StructWithStoredProperty):
 // CHECK-NEXT: [[CCOPY:%.*]] = alloc_stack $StructWithStoredProperty
 // CHECK-NEXT: copy_addr [[C]] to [initialization] [[CCOPY]]
-// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [[CCOPY]]
+// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [trivial] [[CCOPY]]
 // CHECK-NEXT: function_ref
-// CHECK-NEXT: [[FUN:%.*]] = function_ref @_TFV9protocols24StructWithStoredPropertyg1aSi : $@convention(method) (StructWithStoredProperty) -> Int
+// CHECK-NEXT: [[FUN:%.*]] = function_ref @_T09protocols24StructWithStoredPropertyV1aSifg : $@convention(method) (StructWithStoredProperty) -> Int
 // CHECK-NEXT: apply [[FUN]]([[CCOPY_LOADED]])
 // CHECK-NEXT: dealloc_stack [[CCOPY]]
 // CHECK-NEXT: return
@@ -344,21 +360,23 @@ struct StructWithStoredClassProperty : PropertyWithGetter {
   func methodUsingProperty() -> Int {
     return a
   }
-  // CHECK-LABEL: sil hidden @{{.*}}StructWithStoredClassProperty{{.*}}methodUsingProperty
+  // CHECK-LABEL: sil hidden @_T09protocols29StructWithStoredClassPropertyV011methodUsingF0SiyF
   // CHECK: bb0(%0 : $StructWithStoredClassProperty):
   // CHECK-NEXT: debug_value %0
   // CHECK-NEXT: %2 = struct_extract %0 : $StructWithStoredClassProperty, #StructWithStoredClassProperty.a
   // CHECK-NEXT: return %2 : $Int
 }
 
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV9protocols29StructWithStoredClassPropertyS_18PropertyWithGetterS_FS1_g1aSi : $@convention(witness_method) (@in_guaranteed StructWithStoredClassProperty) -> Int {
+// CHECK-LABEL: sil private [transparent] [thunk] @_T09protocols29StructWithStoredClassPropertyVAA0fC6GetterA2aDP1aSifgTW : $@convention(witness_method) (@in_guaranteed StructWithStoredClassProperty) -> Int {
 // CHECK: bb0([[C:%.*]] : $*StructWithStoredClassProperty):
 // CHECK-NEXT: [[CCOPY:%.*]] = alloc_stack $StructWithStoredClassProperty
 // CHECK-NEXT: copy_addr [[C]] to [initialization] [[CCOPY]]
-// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [[CCOPY]]
+// CHECK-NEXT: [[CCOPY_LOADED:%.*]] = load [take] [[CCOPY]]
+// CHECK-NEXT: [[BORROWED_CCOPY_LOADED:%.*]] = begin_borrow [[CCOPY_LOADED]]
 // CHECK-NEXT: function_ref
-// CHECK-NEXT: [[FUN:%.*]] = function_ref @_TFV9protocols29StructWithStoredClassPropertyg1aSi : $@convention(method) (@guaranteed StructWithStoredClassProperty) -> Int
-// CHECK-NEXT: apply [[FUN]]([[CCOPY_LOADED]])
+// CHECK-NEXT: [[FUN:%.*]] = function_ref @_T09protocols29StructWithStoredClassPropertyV1aSifg : $@convention(method) (@guaranteed StructWithStoredClassProperty) -> Int
+// CHECK-NEXT: apply [[FUN]]([[BORROWED_CCOPY_LOADED]])
+// CHECK-NEXT: end_borrow [[BORROWED_CCOPY_LOADED]] from [[CCOPY_LOADED]]
 // CHECK-NEXT: destroy_value [[CCOPY_LOADED]]
 // CHECK-NEXT: dealloc_stack [[CCOPY]]
 // CHECK-NEXT: return
@@ -372,14 +390,15 @@ protocol ExistentialProperty {
 func testExistentialPropertyRead<T: ExistentialProperty>(_ t: inout T) {
     let b = t.p.b
 }
-// CHECK-LABEL: sil hidden @_TF9protocols27testExistentialPropertyRead
+// CHECK-LABEL: sil hidden @_T09protocols27testExistentialPropertyRead{{[_0-9a-zA-Z]*}}F
+// CHECK:      [[READ:%.*]] = begin_access [read] [unknown] %0 : $*T
 // CHECK:      [[P_TEMP:%.*]] = alloc_stack $PropertyWithGetterSetter
 // CHECK:      [[T_TEMP:%.*]] = alloc_stack $T
-// CHECK:      copy_addr %0 to [initialization] [[T_TEMP]] : $*T
+// CHECK:      copy_addr [[READ]] to [initialization] [[T_TEMP]] : $*T
 // CHECK:      [[P_GETTER:%.*]] = witness_method $T, #ExistentialProperty.p!getter.1 :
 // CHECK-NEXT: apply [[P_GETTER]]<T>([[P_TEMP]], [[T_TEMP]])
 // CHECK-NEXT: destroy_addr [[T_TEMP]]
-// CHECK-NEXT: [[OPEN:%.*]] = open_existential_addr [[P_TEMP]] : $*PropertyWithGetterSetter to $*[[P_OPENED:@opened(.*) PropertyWithGetterSetter]]
+// CHECK-NEXT: [[OPEN:%.*]] = open_existential_addr immutable_access [[P_TEMP]] : $*PropertyWithGetterSetter to $*[[P_OPENED:@opened(.*) PropertyWithGetterSetter]]
 // CHECK-NEXT: [[T0:%.*]] = alloc_stack $[[P_OPENED]]
 // CHECK-NEXT: copy_addr [[OPEN]] to [initialization] [[T0]]
 // CHECK-NEXT: [[B_GETTER:%.*]] = witness_method $[[P_OPENED]], #PropertyWithGetterSetter.b!getter.1
@@ -396,14 +415,15 @@ func modify(_ x: inout Int) {}
 func modifyProperty<T : PropertyWithGetterSetter>(_ x: inout T) {
   modify(&x.b)
 }
-// CHECK-LABEL: sil hidden @_TF9protocols14modifyPropertyuRxS_24PropertyWithGetterSetterrFRxT_
-// CHECK:      [[MODIFY_FN:%.*]] = function_ref @_TF9protocols6modifyFRSiT_
+// CHECK-LABEL: sil hidden @_T09protocols14modifyPropertyyxzAA0C16WithGetterSetterRzlF
+// CHECK:      [[MODIFY_FN:%.*]] = function_ref @_T09protocols6modifyySizF
+// CHECK:      [[WRITE:%.*]] = begin_access [modify] [unknown] %0 : $*T
 // CHECK:      [[WITNESS_FN:%.*]] = witness_method $T, #PropertyWithGetterSetter.b!materializeForSet.1
 // CHECK:      [[RESULT:%.*]] = apply [[WITNESS_FN]]<T>
 // CHECK:      [[TEMPORARY:%.*]] = tuple_extract [[RESULT]]
 // CHECK:      [[CALLBACK:%.*]] = tuple_extract [[RESULT]]
 // CHECK:      [[TEMPORARY_ADDR_TMP:%.*]] = pointer_to_address [[TEMPORARY]] : $Builtin.RawPointer to [strict] $*Int
-// CHECK:      [[TEMPORARY_ADDR:%.*]] = mark_dependence [[TEMPORARY_ADDR_TMP]] : $*Int on %0 : $*T
+// CHECK:      [[TEMPORARY_ADDR:%.*]] = mark_dependence [[TEMPORARY_ADDR_TMP]] : $*Int on [[WRITE]] : $*T
 // CHECK:      apply [[MODIFY_FN]]([[TEMPORARY_ADDR]])
 // CHECK:      switch_enum [[CALLBACK]] : $Optional<Builtin.RawPointer>, case #Optional.some!enumelt.1: bb1, case #Optional.none!enumelt: bb2
 // CHECK:    bb1([[CALLBACK_ADDR:%.*]] : $Builtin.RawPointer):
@@ -413,23 +433,23 @@ func modifyProperty<T : PropertyWithGetterSetter>(_ x: inout T) {
 // CHECK:      apply [[CALLBACK]]<T>
 
 // CHECK-LABEL: sil_witness_table hidden ClassWithGetter: PropertyWithGetter module protocols {
-// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: @_TTWC9protocols15ClassWithGetterS_18PropertyWithGetterS_FS1_g1aSi
+// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: {{.*}} : @_T09protocols15ClassWithGetterCAA08PropertycD0A2aDP1aSifgTW
 // CHECK-NEXT: }
 
 // CHECK-LABEL: sil_witness_table hidden ClassWithGetterSetter: PropertyWithGetterSetter module protocols {
-// CHECK-NEXT:  method #PropertyWithGetterSetter.b!getter.1: @_TTWC9protocols21ClassWithGetterSetterS_24PropertyWithGetterSetterS_FS1_g1bSi
-// CHECK-NEXT:  method #PropertyWithGetterSetter.b!setter.1: @_TTWC9protocols21ClassWithGetterSetterS_24PropertyWithGetterSetterS_FS1_s1bSi
-// CHECK-NEXT:  method #PropertyWithGetterSetter.b!materializeForSet.1: @_TTWC9protocols21ClassWithGetterSetterS_24PropertyWithGetterSetterS_FS1_m1bSi
+// CHECK-NEXT:  method #PropertyWithGetterSetter.b!getter.1: {{.*}} : @_T09protocols21ClassWithGetterSetterCAA08PropertycdE0A2aDP1bSifgTW
+// CHECK-NEXT:  method #PropertyWithGetterSetter.b!setter.1: {{.*}} : @_T09protocols21ClassWithGetterSetterCAA08PropertycdE0A2aDP1bSifsTW
+// CHECK-NEXT:  method #PropertyWithGetterSetter.b!materializeForSet.1: {{.*}} : @_T09protocols21ClassWithGetterSetterCAA08PropertycdE0A2aDP1bSifmTW
 // CHECK-NEXT: }
 
 // CHECK-LABEL: sil_witness_table hidden ClassWithGetterSetter: PropertyWithGetter module protocols {
-// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: @_TTWC9protocols21ClassWithGetterSetterS_18PropertyWithGetterS_FS1_g1aSi
+// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: {{.*}} : @_T09protocols21ClassWithGetterSetterCAA08PropertycD0A2aDP1aSifgTW
 // CHECK-NEXT: }
 
 // CHECK-LABEL: sil_witness_table hidden StructWithStoredProperty: PropertyWithGetter module protocols {
-// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: @_TTWV9protocols24StructWithStoredPropertyS_18PropertyWithGetterS_FS1_g1aSi
+// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: {{.*}} : @_T09protocols24StructWithStoredPropertyVAA0eC6GetterA2aDP1aSifgTW
 // CHECK-NEXT: }
 
 // CHECK-LABEL: sil_witness_table hidden StructWithStoredClassProperty: PropertyWithGetter module protocols {
-// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: @_TTWV9protocols29StructWithStoredClassPropertyS_18PropertyWithGetterS_FS1_g1aSi
+// CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: {{.*}} : @_T09protocols29StructWithStoredClassPropertyVAA0fC6GetterA2aDP1aSifgTW
 // CHECK-NEXT: }

@@ -24,14 +24,14 @@ public func f(_ i : Int) -> Int { // 301
   return g(i)                     // 302
 }
 
-// CHECK-SIL: sil {{.*}}@_TF9inlinedAt1fFSiSi :
+// CHECK-SIL: sil {{.*}}@_T09inlinedAt1fS2iF :
 // CHECK-SIL-NOT: return
 // CHECK-SIL: debug_value %0 : $Int, let, name "k", argno 1
 // CHECK-SIL-SAME: line:101:10:in_prologue
 // CHECK-SIL-SAME: perf_inlined_at line:203:10
 // CHECK-SIL-SAME: perf_inlined_at line:302:10
 
-// CHECK: define {{.*}}@_TF9inlinedAt1fFSiSi({{.*}})
+// CHECK: define {{.*}}@_T09inlinedAt1fS2iF({{.*}})
 // CHECK-NOT: ret
 // CHECK: @llvm.dbg.value
 // CHECK: @llvm.dbg.value
@@ -51,3 +51,4 @@ public func f(_ i : Int) -> Int { // 301
 // CHECK-SAME:                  inlinedAt: ![[L2:.*]])
 // CHECK: ![[L2]] = !DILocation(line: 203, column: 13, scope: ![[G_SCOPE]],
 // CHECK-SAME:                  inlinedAt: ![[L3]])
+

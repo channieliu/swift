@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -51,7 +51,7 @@ struct Node {
   SmallVector<Element, 4> elements;
   SmallVector<unsigned, 4> childIndices;
 };
-}
+} // end anonymous namespace
 
 struct DocStructureArrayBuilder::Implementation {
   typedef CompactArrayBuilder<StringRef> InheritedTypesBuilder;
@@ -342,7 +342,7 @@ private:
                              >
       StructureReader;
 };
-}
+} // end anonymous namespace
 
 DocStructureArrayReader::DocStructureArrayReader(void *buffer)
     : buffer(buffer) {}
@@ -392,7 +392,8 @@ struct ElementReader {
 
   static bool
   dictionary_apply(void *buffer, size_t index,
-                   sourcekitd_variant_dictionary_applier_t applier) {
+                   llvm::function_ref<bool(sourcekitd_uid_t,
+                                           sourcekitd_variant_t)> applier) {
 
     CompactArrayReaderTy reader(buffer);
     sourcekitd_uid_t kind;
@@ -411,7 +412,8 @@ struct InheritedTypeReader {
 
   static bool
   dictionary_apply(void *buffer, size_t index,
-                   sourcekitd_variant_dictionary_applier_t applier) {
+                   llvm::function_ref<bool(sourcekitd_uid_t,
+                                           sourcekitd_variant_t)> applier) {
 
     CompactArrayReaderTy reader(buffer);
     const char *value = nullptr;
@@ -427,7 +429,8 @@ struct AttributesReader {
 
   static bool
   dictionary_apply(void *buffer, size_t index,
-                   sourcekitd_variant_dictionary_applier_t applier) {
+                   llvm::function_ref<bool(sourcekitd_uid_t,
+                                           sourcekitd_variant_t)> applier) {
 
     CompactArrayReaderTy reader(buffer);
     sourcekitd_uid_t value;
@@ -440,7 +443,8 @@ struct AttributesReader {
 struct DocStructureReader {
   static bool
   dictionary_apply(void *buffer, size_t index,
-                   sourcekitd_variant_dictionary_applier_t applier) {
+                   llvm::function_ref<bool(sourcekitd_uid_t,
+                                           sourcekitd_variant_t)> applier) {
     auto reader = DocStructureArrayReader(buffer);
     auto node = reader.readStructure(index);
 

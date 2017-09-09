@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,8 +38,6 @@
 ///   returns the next element.
 /// - Returns: A sequence that starts with `first` and continues with every
 ///   value returned by passing the previous element to `next`.
-///
-/// - SeeAlso: `sequence(state:next:)`
 public func sequence<T>(first: T, next: @escaping (T) -> T?) -> UnfoldFirstSequence<T> {
   // The trivial implementation where the state is the next value to return
   // has the downside of being unnecessarily eager (it evaluates `next` one
@@ -84,8 +82,6 @@ public func sequence<T>(first: T, next: @escaping (T) -> T?) -> UnfoldFirstSeque
 /// - Parameter next: A closure that accepts an `inout` state and returns the
 ///   next element of the sequence.
 /// - Returns: A sequence that yields each successive value from `next`.
-///
-/// - SeeAlso: `sequence(first:next:)`
 public func sequence<T, State>(state: State, next: @escaping (inout State) -> T?)
   -> UnfoldSequence<T, State> {
   return UnfoldSequence(_state: state, _next: next)
@@ -102,8 +98,6 @@ public typealias UnfoldFirstSequence<T> = UnfoldSequence<T, (T?, Bool)>
 ///
 /// Instances of `UnfoldSequence` are created with the functions
 /// `sequence(first:next:)` and `sequence(state:next:)`.
-///
-/// - SeeAlso: `sequence(first:next:)`, `sequence(state:next:)`
 public struct UnfoldSequence<Element, State> : Sequence, IteratorProtocol {
   public mutating func next() -> Element? {
     guard !_done else { return nil }

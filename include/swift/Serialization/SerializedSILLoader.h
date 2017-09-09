@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -90,11 +90,10 @@ public:
   ~SerializedSILLoader();
 
   SILFunction *lookupSILFunction(SILFunction *Callee);
-  SILFunction *lookupSILFunction(SILDeclRef Decl);
   SILFunction *
   lookupSILFunction(StringRef Name, bool declarationOnly = false,
-                    SILLinkage linkage = SILLinkage::Private);
-  bool hasSILFunction(StringRef Name, SILLinkage linkage = SILLinkage::Private);
+                    Optional<SILLinkage> linkage = None);
+  bool hasSILFunction(StringRef Name, Optional<SILLinkage> linkage = None);
   SILVTable *lookupVTable(Identifier Name);
   SILVTable *lookupVTable(const ClassDecl *C) {
     return lookupVTable(C->getName());
@@ -113,6 +112,12 @@ public:
 
   /// Deserialize all SILFunctions, VTables, and WitnessTables for
   /// a given Module.
+  ///
+  /// If PrimaryFile is nullptr, all definitions are brought in with
+  /// definition linkage.
+  ///
+  /// Otherwise, definitions not in the primary file are brought in
+  /// with external linkage.
   void getAllForModule(Identifier Mod, FileUnit *PrimaryFile);
 
   /// Deserialize all SILFunctions in all SILModules.

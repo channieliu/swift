@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -75,6 +75,9 @@ public:
 
   /// The command line string that is to be stored in the DWARF debug info.
   std::string DWARFDebugFlags;
+
+  /// List of -Xcc -D macro definitions.
+  std::vector<std::string> ClangDefines;
 
   /// The libraries and frameworks specified on the command line.
   SmallVector<LinkLibrary, 4> LinkLibraries;
@@ -208,6 +211,12 @@ public:
     } else {
       return OutputKind == IRGenOutputKind::LLVMAssembly;
     }
+  }
+
+  /// Return a hash code of any components from these options that should
+  /// contribute to a Swift Bridging PCH hash.
+  llvm::hash_code getPCHHashComponents() const {
+    return llvm::hash_value(0);
   }
 };
 

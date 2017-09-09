@@ -2,8 +2,8 @@
 
 // REQUIRES: CPU=x86_64
 
-// FIXME: https://bugs.swift.org/browse/SR-2808
-// XFAIL: resilient_stdlib
+// rdar://30579970
+// REQUIRES: optimized_stdlib
 
 // We were missing target transform info and not vectorizing the loop below.
 

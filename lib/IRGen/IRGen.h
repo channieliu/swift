@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,7 @@
 
 #include "llvm/Support/DataTypes.h"
 #include "clang/AST/CharUnits.h"
+#include "clang/CodeGen/ConstantInitFuture.h"
 #include "swift/AST/ResilienceExpansion.h"
 #include "swift/SIL/AbstractionPattern.h"
 #include <cassert>
@@ -35,6 +36,7 @@ namespace swift {
   
 namespace irgen {
   using Lowering::AbstractionPattern;
+  using clang::CodeGen::ConstantInitFuture;
 
 /// In IRGen, we use Swift's ClusteredBitVector data structure to
 /// store vectors of spare bits.
@@ -221,6 +223,72 @@ enum class ConstructorKind : uint8_t {
   Initializing
 };
 
+/// An initial value for a definition of an llvm::GlobalVariable.
+class ConstantInit {
+  llvm::PointerUnion<ConstantInitFuture, llvm::Type*> Data;
+public:
+  /// No initializer is given.  When this is used as an argument to
+  /// a getAddrOf... API, it means that only a declaration is being
+  /// requested.
+  ConstantInit() {}
+
+  /// Use a concrete value as a concrete initializer.
+  ConstantInit(llvm::Constant *initializer)
+    : Data(ConstantInitFuture(initializer)) {}
+
+  /// Use a ConstantInitBuilder future as a concrete initializer.
+  /*implicit*/ ConstantInit(ConstantInitFuture future) : Data(future) {
+    assert(future && "don't pass around null futures");
+  }
+
+  /// There will be a definition (with the given type), but we don't
+  /// have it yet.
+  static ConstantInit getDelayed(llvm::Type *type) {
+    auto result = ConstantInit();
+    result.Data = type;
+    return result;
+  }
+
+  explicit operator bool() const { return bool(Data); }
+
+  inline llvm::Type *getType() const {
+    assert(Data && "not a definition");
+    if (auto type = Data.dyn_cast<llvm::Type*>()) {
+      return type;
+    } else {
+      return Data.get<ConstantInitFuture>().getType();
+    }
+  }
+
+  bool hasInit() const {
+    return Data.is<ConstantInitFuture>();
+  }
+  ConstantInitFuture getInit() const {
+    return Data.get<ConstantInitFuture>();
+  }
+};
+
+/// An abstraction for computing the cost of an operation.
+enum class OperationCost : unsigned {
+  Free = 0,
+  Arithmetic = 1,
+  Load = 3, // TODO: split into static- and dynamic-offset cases?
+  Call = 10
+};
+inline OperationCost operator+(OperationCost l, OperationCost r) {
+  return OperationCost(unsigned(l) + unsigned(r));
+}
+inline OperationCost &operator+=(OperationCost &l, OperationCost r) {
+  l = l + r;
+  return l;
+}
+inline bool operator<(OperationCost l, OperationCost r) {
+  return unsigned(l) < unsigned(r);
+}
+inline bool operator<=(OperationCost l, OperationCost r) {
+  return unsigned(l) <= unsigned(r);
+}
+
 /// An alignment value, in eight-bit units.
 class Alignment {
 public:
@@ -240,6 +308,13 @@ public:
 
   unsigned log2() const {
     return llvm::Log2_64(Value);
+  }
+
+  operator clang::CharUnits() const {
+    return asCharUnits();
+  }
+  clang::CharUnits asCharUnits() const {
+    return clang::CharUnits::fromQuantity(getValue());
   }
 
   explicit operator bool() const { return Value != 0; }
@@ -330,6 +405,9 @@ public:
     return llvm::Log2_64(Value);
   }
 
+  operator clang::CharUnits() const {
+    return asCharUnits();
+  }
   clang::CharUnits asCharUnits() const {
     return clang::CharUnits::fromQuantity(getValue());
   }

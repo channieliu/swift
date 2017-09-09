@@ -1,12 +1,11 @@
 // RUN: rm -f %t.*
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module -o %t %S/Inputs/ambiguous_left.swift
 // RUN: %target-swift-frontend -emit-module -o %t %S/Inputs/ambiguous_right.swift
 // RUN: %target-swift-frontend -emit-module -o %t -I %t %S/Inputs/ambiguous.swift
 
 // RUN: echo "public var x = Int()" | %target-swift-frontend -module-name FooBar -emit-module -o %t -
-// RUN: %target-swift-frontend -parse -I %t -serialize-diagnostics-path %t.dia %s -verify
+// RUN: %target-swift-frontend -typecheck -I %t -serialize-diagnostics-path %t.dia %s -verify
 // RUN: c-index-test -read-diagnostics %t.dia > %t.deserialized_diagnostics.txt 2>&1
 // RUN: %FileCheck --input-file=%t.deserialized_diagnostics.txt %s
 

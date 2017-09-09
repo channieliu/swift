@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 func markUsed<T>(_ t: T) {}
 
@@ -7,8 +7,8 @@ let bad_property_1: Int {    // expected-error {{'let' declarations cannot be co
     return 42
   }
 }
-let bad_property_2: Int = 0 {
-  get { // expected-error {{use of unresolved identifier 'get'}}
+let bad_property_2: Int = 0 { // expected-error {{'let' declarations cannot be computed properties}} expected-error {{variable with getter/setter cannot have an initial value}}
+  get {
     return 42
   }
 }
@@ -345,14 +345,14 @@ func testSelectorStyleArguments3(_ x: Int, bar y: Int) {
   ++y  // expected-error {{cannot pass immutable value to mutating operator: 'y' is a 'let' constant}}
 }
 
-func invalid_inout(inout var x : Int) { // expected-error {{parameter may not have multiple 'inout', 'var', or 'let' specifiers}} {{26-30=}}
+func invalid_inout(inout var x : Int) { // expected-error {{parameter may not have multiple '__owned', 'inout', '__shared', 'var', or 'let' specifiers}} {{26-30=}}
 // expected-error @-1 {{'inout' before a parameter name is not allowed, place it before the parameter type instead}}{{20-25=}}{{34-34=inout }}
 }
-func invalid_var(var x: Int) { // expected-error {{parameters may not have the 'var' specifier}}{{18-21=}} {{1-1=    var x = x\n}}
+func invalid_var(var x: Int) { // expected-error {{'var' as a parameter attribute is not allowed}}
   
 }
 func takesClosure(_: (Int) -> Int) {
-  takesClosure { (var d) in d } // expected-error {{parameters may not have the 'var' specifier}}
+  takesClosure { (var d) in d } // expected-error {{'var' as a parameter attribute is not allowed}}
 }
 
 func updateInt(_ x : inout Int) {}
@@ -573,3 +573,38 @@ func f(a : FooClass, b : LetStructMembers) {
   a.baz = 1 // expected-error {{cannot assign to property: 'baz' is a method}}
   b.f = 42     // expected-error {{cannot assign to property: 'f' is a method}}
 }
+
+// SR-2354: Reject subscript declarations with mutable parameters.
+class MutableSubscripts {
+  var x : Int = 0
+
+  subscript(x: inout Int) -> () { x += 1 } // expected-error {{'inout' may not be used on subscript parameters}}
+  subscript<T>(x: inout T) -> () { // expected-error {{'inout' may not be used on subscript parameters}}
+    fatalError()
+  }
+
+  static func initialize(from state: inout MutableSubscripts) -> MutableSubscripts {
+    return state
+  }
+}
+
+
+// SR-4214: Misleading location-less diagnostic when closure parameter type
+// is inferred to be inout.
+func sr4214() {
+  func sequence<T>(_ x : T, _ f : (T) -> T) -> T {
+    return f(x)
+  }
+
+  // expected-error@+1 {{expression type '(inout MutableSubscripts) -> ()' is ambiguous without more context}}
+  let closure = { val in val.x = 7 } as (inout MutableSubscripts) -> ()
+  var v = MutableSubscripts()
+  closure(&v)
+  // FIXME: This diagnostic isn't really all that much better
+  // expected-error@+1 {{cannot convert value of type '(inout MutableSubscripts) -> ()' to expected argument type '(_) -> _'}}
+  sequence(v) { (state : inout MutableSubscripts) -> () in
+    _ = MutableSubscripts.initialize(from: &state)
+    return ()
+  }
+}
+

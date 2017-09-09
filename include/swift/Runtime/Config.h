@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,6 +16,9 @@
 
 #ifndef SWIFT_RUNTIME_CONFIG_H
 #define SWIFT_RUNTIME_CONFIG_H
+
+// Bring in visibility attribute macros for library visibility.
+#include "llvm/Support/Compiler.h"
 
 /// Does the current Swift platform support "unbridged" interoperation
 /// with Objective-C?  If so, the implementations of various types must
@@ -33,7 +36,9 @@
 /// Does the current Swift platform use LLVM's intrinsic "swiftcall"
 /// calling convention for Swift functions?
 #ifndef SWIFT_USE_SWIFTCALL
-#ifdef __s390x__
+// Clang doesn't support mangling functions with the swiftcall attribute
+// on Windows and crashes during compilation: http://bugs.llvm.org/show_bug.cgi?id=32000
+#if (__has_attribute(swiftcall) || defined(__linux__)) && !defined(_WIN32)
 #define SWIFT_USE_SWIFTCALL 1
 #else
 #define SWIFT_USE_SWIFTCALL 0
@@ -128,6 +133,11 @@
 
 #define SWIFT_LLVM_CC_RegisterPreservingCC llvm::CallingConv::PreserveMost
 
+#if SWIFT_USE_SWIFTCALL
+#define SWIFT_LLVM_CC_SwiftCC llvm::CallingConv::Swift
+#else
+#define SWIFT_LLVM_CC_SwiftCC llvm::CallingConv::C
+#endif
 
 // If defined, it indicates that runtime function wrappers
 // should be used on all platforms, even they do not support
@@ -180,9 +190,6 @@
 
 #endif
 
-// Bring in visibility attribute macros for library visibility.
-#include "llvm/Support/Compiler.h"
-
 // Generates a name of the runtime entry's implementation by
 // adding an underscore as a prefix and a suffix.
 #define SWIFT_RT_ENTRY_IMPL(Name) _##Name##_
@@ -230,26 +237,5 @@
 #define SWIFT_RT_ENTRY_IMPL_VISIBILITY LLVM_LIBRARY_VISIBILITY
 
 #endif
-
-#if !defined(__USER_LABEL_PREFIX__)
-#error __USER_LABEL_PREFIX__ is undefined
-#endif
-
-// Workaround the bug of clang in Cygwin 64bit
-// https://llvm.org/bugs/show_bug.cgi?id=26744
-#if defined(__CYGWIN__) && defined(__x86_64__)
-#undef __USER_LABEL_PREFIX__
-#define __USER_LABEL_PREFIX__
-#endif
-
-#define SWIFT_GLUE_EXPANDED(a, b) a##b
-#define SWIFT_GLUE(a, b) SWIFT_GLUE_EXPANDED(a, b)
-#define SWIFT_SYMBOL_NAME(name) SWIFT_GLUE(__USER_LABEL_PREFIX__, name)
-
-#define SWIFT_QUOTE_EXPANDED(literal) #literal
-#define SWIFT_QUOTE(literal) SWIFT_QUOTE_EXPANDED(literal)
-
-#define SWIFT_QUOTED_SYMBOL_NAME(name)                                   \
-  SWIFT_QUOTE(SWIFT_SYMBOL_NAME(name))
 
 #endif // SWIFT_RUNTIME_CONFIG_H

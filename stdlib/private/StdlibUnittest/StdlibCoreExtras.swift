@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,7 +14,7 @@ import SwiftPrivate
 import SwiftPrivateLibcExtras
 #if os(OSX) || os(iOS)
 import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android)
+#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin)
 import Glibc
 #endif
 
@@ -27,6 +27,10 @@ import Foundation
 // useful in tests, and stdlib does not have such facilities yet.
 //
 
+func findSubstring(_ haystack: Substring, _ needle: String) -> String.Index? {
+  return findSubstring(String(haystack._ephemeralContent), needle)
+}
+
 func findSubstring(_ string: String, _ substring: String) -> String.Index? {
   if substring.isEmpty {
     return string.startIndex
@@ -36,7 +40,7 @@ func findSubstring(_ string: String, _ substring: String) -> String.Index? {
 #else
   // FIXME(performance): This is a very non-optimal algorithm, with a worst
   // case of O((n-m)*m). When non-objc String has a match function that's better,
-  // this should be removed in favour of using that.
+  // this should be removed in favor of using that.
 
   // Operate on unicode scalars rather than codeunits.
   let haystack = string.unicodeScalars
@@ -48,7 +52,7 @@ func findSubstring(_ string: String, _ substring: String) -> String.Index? {
     while true {
       if needleIndex == needle.endIndex {
         // if we hit the end of the search string, we found the needle
-        return matchStartIndex.samePosition(in: string)
+        return matchStartIndex
       }
       if matchIndex == haystack.endIndex {
         // if we hit the end of the string before finding the end of the needle,
@@ -149,7 +153,7 @@ extension MutableCollection
     var f = subrange.lowerBound
     var l = index(before: subrange.upperBound)
     while f < l {
-      swap(&self[f], &self[l])
+      swapAt(f, l)
       formIndex(after: &f)
       formIndex(before: &l)
     }
@@ -195,7 +199,7 @@ extension MutableCollection
         repeat {
           formIndex(before: &j)
         } while !(elementAtBeforeI < self[j])
-        swap(&self[beforeI], &self[j])
+        swapAt(beforeI, j)
         _reverseSubrange(i..<endIndex)
         return .success
       }
@@ -245,3 +249,11 @@ public func cartesianProduct<C1 : Collection, C2 : Collection>(
   return result
 }
 
+/// Return true if the standard library was compiled in a debug configuration.
+public func _isStdlibDebugConfiguration() -> Bool {
+#if SWIFT_STDLIB_DEBUG
+  return true
+#else
+  return false
+#endif
+}

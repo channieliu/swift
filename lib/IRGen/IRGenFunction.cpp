@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,6 +17,7 @@
 
 #include "swift/AST/IRGenOptions.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/IRGen/Linking.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
@@ -25,7 +26,6 @@
 #include "IRGenDebugInfo.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
-#include "Linking.h"
 #include "LoadableTypeInfo.h"
 
 using namespace swift;
@@ -46,14 +46,6 @@ IRGenFunction::IRGenFunction(IRGenModule &IGM, llvm::Function *Fn,
     // after we're done with this function.
     IGM.DebugInfo->pushLoc();
   }
-
-  // Apply sanitizer attributes to the function.
-  // TODO: Check if the function is ASan black listed either in the external
-  // file or via annotations.
-  if (IGM.IRGen.Opts.Sanitize == SanitizerKind::Address)
-    Fn->addFnAttr(llvm::Attribute::SanitizeAddress);
-  if (IGM.IRGen.Opts.Sanitize == SanitizerKind::Thread)
-    Fn->addFnAttr(llvm::Attribute::SanitizeThread);
 
   emitPrologue();
 }
@@ -80,6 +72,11 @@ Lowering::TypeConverter &IRGenFunction::getSILTypes() const {
   return IGM.getSILTypes();
 }
 
+// Returns the default atomicity of the module.
+Atomicity IRGenFunction::getDefaultAtomicity() {
+  return getSILModule().isDefaultAtomic() ? Atomicity::Atomic : Atomicity::NonAtomic;
+}
+
 /// Call the llvm.memcpy intrinsic.  The arguments need not already
 /// be of i8* type.
 void IRGenFunction::emitMemCpy(llvm::Value *dest, llvm::Value *src,
@@ -103,8 +100,8 @@ void IRGenFunction::emitMemCpy(Address dest, Address src, llvm::Value *size) {
 }
 
 static llvm::Value *emitAllocatingCall(IRGenFunction &IGF,
-                                       llvm::Value *fn,
-                                       std::initializer_list<llvm::Value*> args,
+                                       llvm::Constant *fn,
+                                       ArrayRef<llvm::Value*> args,
                                        const llvm::Twine &name) {
   auto allocAttrs = IGF.IGM.getAllocAttrs();
   llvm::CallInst *call =
@@ -166,6 +163,24 @@ void IRGenFunction::emitAllocBoxCall(llvm::Value *typeMetadata,
   valueAddress = Builder.CreateExtractValue(call, 1);
 }
 
+void IRGenFunction::emitMakeBoxUniqueCall(llvm::Value *box,
+                                          llvm::Value *typeMetadata,
+                                          llvm::Value *alignMask,
+                                          llvm::Value *&outBox,
+                                          llvm::Value *&outValueAddress) {
+  auto attrs = llvm::AttributeSet::get(IGM.LLVMContext,
+                                       llvm::AttributeSet::FunctionIndex,
+                                       llvm::Attribute::NoUnwind);
+
+  llvm::CallInst *call = Builder.CreateCall(IGM.getMakeBoxUniqueFn(),
+                                            {box, typeMetadata, alignMask});
+  call->setAttributes(attrs);
+
+  outBox = Builder.CreateExtractValue(call, 0);
+  outValueAddress = Builder.CreateExtractValue(call, 1);
+}
+
+
 void IRGenFunction::emitDeallocBoxCall(llvm::Value *box,
                                         llvm::Value *typeMetadata) {
   auto attrs = llvm::AttributeSet::get(IGM.LLVMContext,
@@ -194,6 +209,20 @@ llvm::Value *IRGenFunction::emitProjectBoxCall(llvm::Value *box,
   return call;
 }
 
+llvm::Value *IRGenFunction::emitAllocEmptyBoxCall() {
+  llvm::Attribute::AttrKind attrKinds[] = {
+    llvm::Attribute::NoUnwind,
+  };
+  auto attrs = llvm::AttributeSet::get(IGM.LLVMContext,
+                                       llvm::AttributeSet::FunctionIndex,
+                                       attrKinds);
+  llvm::CallInst *call =
+    Builder.CreateCall(IGM.getAllocEmptyBoxFn(), {});
+  call->setCallingConv(IGM.DefaultCC);
+  call->setAttributes(attrs);
+  return call;
+}
+
 static void emitDeallocatingCall(IRGenFunction &IGF, llvm::Constant *fn,
                                  std::initializer_list<llvm::Value *> args) {
   auto cc = IGF.IGM.DefaultCC;
@@ -216,6 +245,25 @@ void IRGenFunction::emitDeallocRawCall(llvm::Value *pointer,
   return emitDeallocatingCall(*this, IGM.getSlowDeallocFn(),
                               {pointer, size, alignMask});
 }
+
+void IRGenFunction::emitTSanInoutAccessCall(llvm::Value *address) {
+  llvm::Function *fn = cast<llvm::Function>(IGM.getTSanInoutAccessFn());
+
+  llvm::Value *castAddress = Builder.CreateBitCast(address, IGM.Int8PtrTy);
+
+  // Passing 0 as the caller PC causes compiler-rt to get our PC.
+  llvm::Value *callerPC = llvm::ConstantPointerNull::get(IGM.Int8PtrTy);
+
+  // A magic number agreed upon with compiler-rt to indicate a modifying
+  // access.
+  const unsigned kExternalTagSwiftModifyingAccess = 0x1;
+  llvm::Value *tagValue =
+      llvm::ConstantInt::get(IGM.SizeTy, kExternalTagSwiftModifyingAccess);
+  llvm::Value *castTag = Builder.CreateIntToPtr(tagValue, IGM.Int8PtrTy);
+
+  Builder.CreateCall(fn, {castAddress, callerPC, castTag});
+}
+
 
 /// Initialize a relative indirectable pointer to the given value.
 /// This always leaves the value in the direct state; if it's not a

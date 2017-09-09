@@ -1,13 +1,13 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P1 { associatedtype AssocType }
 protocol P2 : P1 { }
 protocol P3 { }
 
 struct X<T : P1, U : P2, V> { 
-  struct Inner<A, B : P3> { } // expected-error{{generic type 'Inner' cannot be nested in type 'X'}}
+  struct Inner<A, B : P3> { }
 
-  struct NonGenericInner { } // expected-error{{nested in generic type}}
+  struct NonGenericInner { }
 }
 
 extension Int : P1 {
@@ -138,7 +138,7 @@ extension GenericClass : P3 where T : P3 { } // expected-error{{extension of typ
 
 extension GenericClass where Self : P3 { }
 // expected-error@-1{{'Self' is only available in a protocol or as the result of a method in a class; did you mean 'GenericClass'?}} {{30-34=GenericClass}}
-// expected-error@-2{{type 'GenericClass' in conformance requirement does not refer to a generic parameter or associated type}}
+// expected-error@-2{{type 'GenericClass<T>' in conformance requirement does not refer to a generic parameter or associated type}}
 
 protocol P4 {
   associatedtype T
@@ -151,4 +151,16 @@ struct S4<Q>: P4 {
   init(_: Q) { }
 }
 
-extension S4 where T : P5 {} // expected-FIXME-error{{type 'T' in conformance requirement does not refer to a generic parameter or associated type}}
+extension S4 where T : P5 {}
+
+struct S5<Q> {
+  init(_: Q) { }
+}
+
+extension S5 : P4 {}
+
+// rdar://problem/21607421
+public typealias Array2 = Array
+extension Array2 where QQQ : VVV {}
+// expected-error@-1 {{use of undeclared type 'QQQ'}}
+// expected-error@-2 {{use of undeclared type 'VVV'}}

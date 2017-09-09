@@ -7,6 +7,7 @@ import StdlibCollectionUnittest
 import Foundation
 
 var DataTestSuite = TestSuite("Data")
+
 DataTestSuite.test("Data.Iterator semantics") {
   // Empty data
   checkSequence([], Data())
@@ -35,11 +36,35 @@ DataTestSuite.test("associated types") {
   expectRandomAccessCollectionAssociatedTypes(
     collectionType: Subject.self,
     iteratorType: Data.Iterator.self,
-    subSequenceType: MutableRangeReplaceableRandomAccessSlice<Subject>.self,
+    subSequenceType: Subject.self,
     indexType: Int.self,
     indexDistanceType: Int.self,
     indicesType: CountableRange<Int>.self)
 }
 
+DataTestSuite.test("Data SubSequence") {
+  let array: [UInt8] = [0, 1, 2, 3, 4, 5, 6, 7]
+  var data = Data(bytes: array)
+
+  checkRandomAccessCollection(array, data)
+
+  for i in 0..<data.count {
+    for j in i..<data.count {
+      var dataSlice = data[i..<j]
+      let arraySlice = array[i..<j]
+      if dataSlice.count > 0 {
+        expectEqual(dataSlice.startIndex, i)
+        expectEqual(dataSlice.endIndex, j)
+        
+        expectEqual(dataSlice[i], arraySlice[i])
+
+        dataSlice[i] = 0xFF
+        
+        expectEqual(dataSlice.startIndex, i)
+        expectEqual(dataSlice.endIndex, j)
+      }
+    }
+  }
+}
 
 runAllTests()

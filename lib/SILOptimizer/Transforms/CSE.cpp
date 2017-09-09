@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -376,7 +376,7 @@ public:
   }
 
   hash_code visitOpenExistentialRefInst(OpenExistentialRefInst *X) {
-    auto ArchetypeTy = cast<ArchetypeType>(X->getType().getSwiftRValueType());
+    auto ArchetypeTy = X->getType().castTo<ArchetypeType>();
     auto ConformsTo = ArchetypeTy->getConformsTo();
     return llvm::hash_combine(
         X->getKind(), X->getOperand(),
@@ -406,11 +406,9 @@ bool llvm::DenseMapInfo<SimpleValue>::isEqual(SimpleValue LHS,
 
     // Consider the types of two open_existential_ref instructions to be equal,
     // if the sets of protocols they conform to are equal.
-    auto LHSArchetypeTy =
-        cast<ArchetypeType>(LHSI->getType().getSwiftRValueType());
+    auto LHSArchetypeTy = LHSI->getType().castTo<ArchetypeType>();
     auto LHSConformsTo = LHSArchetypeTy->getConformsTo();
-    auto RHSArchetypeTy =
-        cast<ArchetypeType>(RHSI->getType().getSwiftRValueType());
+    auto RHSArchetypeTy = RHSI->getType().castTo<ArchetypeType>();
     auto RHSConformsTo = RHSArchetypeTy->getConformsTo();
     return LHSConformsTo == RHSConformsTo;
   }
@@ -512,7 +510,7 @@ private:
   bool processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
                                  SILBasicBlock::iterator &I);
 };
-}  // end anonymous namespace
+} // namespace swift
 
 //===----------------------------------------------------------------------===//
 //                             CSE Implementation
@@ -593,22 +591,29 @@ namespace {
     }
     SILBasicBlock *remapBasicBlock(SILBasicBlock *BB) { return BB; }
   };
-}
+} // end anonymous namespace
 
 /// Update SIL basic block's arguments types which refer to opened
 /// archetypes. Replace such types by performing type substitutions
 /// according to the provided type substitution map.
 static void updateBasicBlockArgTypes(SILBasicBlock *BB,
-                                     TypeSubstitutionMap &TypeSubstMap) {
+                                     ArchetypeType *OldOpenedArchetype,
+                                     ArchetypeType *NewOpenedArchetype) {
   // Check types of all BB arguments.
-  for (auto &Arg : BB->getBBArgs()) {
-    if (!Arg->getType().getSwiftRValueType()->hasOpenedExistential())
+  for (auto *Arg : BB->getPHIArguments()) {
+    if (!Arg->getType().hasOpenedExistential())
       continue;
     // Type of this BB argument uses an opened existential.
     // Try to apply substitutions to it and if it produces a different type,
     // use this type as new type of the BB argument.
-    auto NewArgType = Arg->getType().subst(
-        BB->getModule(), BB->getModule().getSwiftModule(), TypeSubstMap);
+    auto OldArgType = Arg->getType();
+    auto NewArgType = OldArgType.subst(BB->getModule(),
+                                       [&](SubstitutableType *type) -> Type {
+                                         if (type == OldOpenedArchetype)
+                                           return NewOpenedArchetype;
+                                         return type;
+                                       },
+                                       MakeAbstractConformanceForGenericType());
     if (NewArgType == Arg->getType())
       continue;
     // Replace the type of this BB argument. The type of a BBArg
@@ -623,10 +628,12 @@ static void updateBasicBlockArgTypes(SILBasicBlock *BB,
     // Then replace all uses by an undef.
     Arg->replaceAllUsesWith(SILUndef::get(Arg->getType(), BB->getModule()));
     // Replace the type of the BB argument.
-    BB->replaceBBArg(Arg->getIndex(), NewArgType, Arg->getDecl());
+    auto *NewArg = BB->replacePHIArgument(Arg->getIndex(), NewArgType,
+                                          Arg->getOwnershipKind(),
+                                          Arg->getDecl());
     // Restore all uses to refer to the BB argument with updated type.
     for (auto ArgUse : OriginalArgUses) {
-      ArgUse->set(Arg);
+      ArgUse->set(NewArg);
     }
   }
 }
@@ -643,8 +650,7 @@ bool CSE::processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
   llvm::SmallSetVector<SILInstruction *, 16> Candidates;
   auto OldOpenedArchetype = getOpenedArchetypeOf(Inst);
   auto NewOpenedArchetype = getOpenedArchetypeOf(dyn_cast<SILInstruction>(V));
-  TypeSubstitutionMap TypeSubstMap;
-  TypeSubstMap[OldOpenedArchetype.getPointer()] = NewOpenedArchetype;
+
   // Collect all candidates that may contain opened archetypes
   // that need to be replaced.
   for (auto Use : Inst->getUses()) {
@@ -666,10 +672,12 @@ bool CSE::processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
     // those uses by the new opened archetype.
     auto Successors = User->getParent()->getSuccessorBlocks();
     for (auto Successor : Successors) {
-      if (Successor->bbarg_empty())
+      if (Successor->args_empty())
         continue;
       // If a BB has any arguments, update their types if necessary.
-      updateBasicBlockArgTypes(Successor, TypeSubstMap);
+      updateBasicBlockArgTypes(Successor,
+                               OldOpenedArchetype,
+                               NewOpenedArchetype);
     }
   }
   // Now process candidates.
@@ -695,15 +703,13 @@ bool CSE::processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
     // True if a candidate depends on the old opened archetype.
     bool DependsOnOldOpenedArchetype = !Candidate->getTypeDependentOperands().empty();
     if (!Candidate->use_empty() &&
-        Candidate->getType().getSwiftRValueType()->hasOpenedExistential()) {
+        Candidate->getType().hasOpenedExistential()) {
       // Check if the result type of the candidate depends on the opened
       // existential in question.
       auto ResultDependsOnOldOpenedArchetype =
           Candidate->getType().getSwiftRValueType().findIf(
               [&OldOpenedArchetype](Type t) -> bool {
-                if (t.getCanonicalTypeOrNull() == OldOpenedArchetype)
-                  return true;
-                return false;
+                return (CanType(t) == OldOpenedArchetype);
               });
       if (ResultDependsOnOldOpenedArchetype) {
         DependsOnOldOpenedArchetype |= ResultDependsOnOldOpenedArchetype;
@@ -816,10 +822,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
         case ArrayCallKind::kGetCapacity:
         case ArrayCallKind::kCheckIndex:
         case ArrayCallKind::kCheckSubscript:
-          if (SemCall.hasGuaranteedSelf()) {
-            return true;
-          }
-          return false;
+          return SemCall.hasGuaranteedSelf();
         default:
           return false;
       }
@@ -1006,10 +1009,7 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
       Args.push_back(Op == From ? To : Op);
   }
 
-  auto FnTy = ToAI->getSubstCalleeSILType();
-  auto ResTy = FnTy.castTo<SILFunctionType>()->getSILResult();
-
-  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI, FnTy, ResTy,
+  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI,
                                        ToAI->getSubstitutions(), Args,
                                        ToAI->isNonThrowing());
   FromAI->replaceAllUsesWith(NAI);
@@ -1020,7 +1020,8 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
 
 /// Try to CSE the users of the protocol that's passed in argument \p Arg.
 /// \returns True if some instructions were modified.
-static bool CSExistentialInstructions(SILArgument *Arg, DominanceInfo *DA) {
+static bool CSExistentialInstructions(SILFunctionArgument *Arg,
+                                      DominanceInfo *DA) {
   ParameterConvention Conv = Arg->getKnownParameterInfo().getConvention();
   // We can assume that the address of Proto does not alias because the
   // calling convention is In or In-guaranteed.
@@ -1107,8 +1108,10 @@ static bool CSExistentialInstructions(SILArgument *Arg, DominanceInfo *DA) {
 static bool CSEExistentialCalls(SILFunction *Func, DominanceInfo *DA) {
   bool Changed = false;
   for (auto *Arg : Func->getArgumentsWithoutIndirectResults()) {
-    if (Arg->getType().isExistentialType())
-      Changed |= CSExistentialInstructions(Arg, DA);
+    if (Arg->getType().isExistentialType()) {
+      auto *FArg = cast<SILFunctionArgument>(Arg);
+      Changed |= CSExistentialInstructions(FArg, DA);
+    }
   }
 
   return Changed;
@@ -1145,10 +1148,6 @@ class SILCSE : public SILFunctionTransform {
     }
   }
 
-  StringRef getName() override {
-    return RunsOnHighLevelSil ? "High-level CSE" : "CSE";
-  }
-  
 public:
   SILCSE(bool RunsOnHighLevelSil) : RunsOnHighLevelSil(RunsOnHighLevelSil) {}
 };

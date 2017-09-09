@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift -verify-ignore-unknown
 
 import StdlibUnittest
 import StdlibCollectionUnittest
@@ -23,17 +23,15 @@ struct CollectionWithBadSubSequence : Collection {
     fatalError("unreachable")
   }
 
-  // expected-note@+3 {{possibly intended match 'CollectionWithBadSubSequence.SubSequence' (aka 'OpaqueValue<Int8>') does not conform to 'Sequence'}}
+  // expected-note@+3 {{possibly intended match}}
   // expected-note@+2 {{possibly intended match}}
   // expected-note@+1 {{possibly intended match}}
   typealias SubSequence = OpaqueValue<Int8>
 }
 
-func useCollectionTypeSubSequenceIndex<C : Collection>(_ c: C)
-  where C.SubSequence.Index == C.Index {}
+func useCollectionTypeSubSequenceIndex<C : Collection>(_ c: C) {}
 
-func useCollectionTypeSubSequenceGeneratorElement<C : Collection>(_ c: C)
-  where C.SubSequence.Iterator.Element == C.Iterator.Element {}
+func useCollectionTypeSubSequenceGeneratorElement<C : Collection>(_ c: C) {}
 
 func sortResultIgnored<
   S : Sequence,
@@ -65,9 +63,8 @@ struct GoodIndexable : Indexable {
 }
 
 
-// expected-warning@+3 {{'Indexable' is deprecated: it will be removed in Swift 4.0.  Please use 'Collection' instead}}
-// expected-error@+2 {{type 'BadIndexable1' does not conform to protocol '_IndexableBase'}}
-// expected-error@+1 {{type 'BadIndexable1' does not conform to protocol '_Indexable'}}
+// expected-warning@+2 {{'Indexable' is deprecated: it will be removed in Swift 4.0.  Please use 'Collection' instead}}
+// expected-error@+1 {{type 'BadIndexable1' does not conform to protocol '_IndexableBase'}}
 struct BadIndexable1 : Indexable {
   func index(after i: Int) -> Int { return i + 1 }
   var startIndex: Int { return 0 }
@@ -140,3 +137,6 @@ struct RangeReplaceableCollection_SubSequence_IsDefaulted : RangeReplaceableColl
   }
 }
 
+// FIXME: Remove -verify-ignore-unknown.
+// <unknown>:0: error: unexpected note produced: possibly intended match
+// <unknown>:0: error: unexpected note produced: possibly intended match

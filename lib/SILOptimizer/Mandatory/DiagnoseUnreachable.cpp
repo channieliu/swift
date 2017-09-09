@@ -2,17 +2,20 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "diagnose-unreachable"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/AST/DiagnosticsSIL.h"
+#include "swift/AST/Expr.h"
+#include "swift/AST/Pattern.h"
+#include "swift/AST/Stmt.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILUndef.h"
@@ -109,7 +112,7 @@ static void propagateBasicBlockArgs(SILBasicBlock &BB) {
   //     use(%2 : $Builtin.Int1)
 
   // If there are no predecessors or no arguments, there is nothing to do.
-  if (BB.pred_empty() || BB.bbarg_empty())
+  if (BB.pred_empty() || BB.args_empty())
     return;
 
   // Check if all the predecessors supply the same arguments to the BB.
@@ -163,9 +166,8 @@ static void propagateBasicBlockArgs(SILBasicBlock &BB) {
   // Drop the parameters from basic blocks and replace all uses with the passed
   // in arguments.
   unsigned Idx = 0;
-  for (SILBasicBlock::bbarg_iterator AI = BB.bbarg_begin(),
-                                     AE = BB.bbarg_end();
-                                     AI != AE; ++AI, ++Idx) {
+  for (SILBasicBlock::arg_iterator AI = BB.args_begin(), AE = BB.args_end();
+       AI != AE; ++AI, ++Idx) {
     // FIXME: These could be further propagatable now, we might want to move
     // this to CCP and trigger another round of copy propagation.
     SILArgument *Arg = *AI;
@@ -176,7 +178,7 @@ static void propagateBasicBlockArgs(SILBasicBlock &BB) {
   }
 
   // Remove args from the block.
-  BB.dropAllBBArgs();
+  BB.dropAllArguments();
 
   // The old branch instructions are no longer used, erase them.
   recursivelyDeleteTriviallyDeadInstructions(ToBeDeleted, true);
@@ -188,9 +190,9 @@ static bool constantFoldTerminator(SILBasicBlock &BB,
   TermInst *TI = BB.getTerminator();
 
   // Process conditional branches with constant conditions.
-  if (CondBranchInst *CBI = dyn_cast<CondBranchInst>(TI)) {
+  if (auto *CBI = dyn_cast<CondBranchInst>(TI)) {
     SILValue V = CBI->getCondition();
-    SILInstruction *CondI = dyn_cast<SILInstruction>(V);
+    auto *CondI = dyn_cast<SILInstruction>(V);
     SILLocation Loc = CBI->getLoc();
 
     if (IntegerLiteralInst *ConstCond =
@@ -247,8 +249,8 @@ static bool constantFoldTerminator(SILBasicBlock &BB,
   //                            case #Bool.false!unionelt: bb2
   // =>
   //   br bb2
-  if (SwitchEnumInst *SUI = dyn_cast<SwitchEnumInst>(TI)) {
-    if (EnumInst *TheEnum = dyn_cast<EnumInst>(SUI->getOperand())) {
+  if (auto *SUI = dyn_cast<SwitchEnumInst>(TI)) {
+    if (auto *TheEnum = dyn_cast<EnumInst>(SUI->getOperand())) {
       const EnumElementDecl *TheEnumElem = TheEnum->getElement();
       SILBasicBlock *TheSuccessorBlock = nullptr;
       int ReachableBlockIdx = -1;
@@ -282,7 +284,7 @@ static bool constantFoldTerminator(SILBasicBlock &BB,
       // Replace the switch with a branch to the TheSuccessorBlock.
       SILBuilderWithScope B(&BB, TI);
       SILLocation Loc = TI->getLoc();
-      if (!TheSuccessorBlock->bbarg_empty()) {
+      if (!TheSuccessorBlock->args_empty()) {
         assert(TheEnum->hasOperand());
         B.createBranch(Loc, TheSuccessorBlock, TheEnum->getOperand());
       } else
@@ -332,10 +334,10 @@ static bool constantFoldTerminator(SILBasicBlock &BB,
   //   switch_value %1 : $Builtin.Int64, case 1: bb1, case 2: bb2
   // =>
   //   br bb2
-  if (SwitchValueInst *SUI = dyn_cast<SwitchValueInst>(TI)) {
+  if (auto *SUI = dyn_cast<SwitchValueInst>(TI)) {
     if (IntegerLiteralInst *SwitchVal =
           dyn_cast<IntegerLiteralInst>(SUI->getOperand())) {
-      SILBasicBlock *TheSuccessorBlock = 0;
+      SILBasicBlock *TheSuccessorBlock = nullptr;
       for (unsigned Idx = 0; Idx < SUI->getNumCases(); ++Idx) {
         APInt AI;
         SILValue EI;
@@ -417,14 +419,7 @@ static SILInstruction *getAsCallToNoReturn(SILInstruction *I) {
       return AI;
   
   if (auto *BI = dyn_cast<BuiltinInst>(I)) {
-    // TODO: We should have an "isNoReturn" bit on Swift's BuiltinInfo, but for
-    // now, let's recognize noreturn intrinsics and builtins specially here.
-    if (BI->getIntrinsicInfo().hasAttribute(llvm::Attribute::NoReturn))
-      return BI;
-    if (BI->getBuiltinInfo().ID == BuiltinValueKind::Unreachable
-        || BI->getBuiltinInfo().ID == BuiltinValueKind::CondUnreachable
-        || BI->getBuiltinInfo().ID == BuiltinValueKind::UnexpectedError
-        || BI->getBuiltinInfo().ID == BuiltinValueKind::ErrorInMain)
+    if (BI->getModule().isNoReturnBuiltinOrIntrinsic(BI->getName()))
       return BI;
   }
   return nullptr;
@@ -546,13 +541,17 @@ static bool simplifyBlocksWithCallsToNoReturn(SILBasicBlock &BB,
     }
   }
 
+  auto *Scope = NoReturnCall->getDebugScope();
   recursivelyDeleteTriviallyDeadInstructions(ToBeDeleted, true);
   NumInstructionsRemoved += ToBeDeleted.size();
 
   // Add an unreachable terminator. The terminator has an invalid source
   // location to signal to the DataflowDiagnostic pass that this code does
   // not correspond to user code.
+  // Share the scope with the preceding BB. This causes the debug info to be
+  // much smaller and easier to read, but otherwise has no effect.
   SILBuilder B(&BB);
+  B.setCurrentDebugScope(Scope);
   B.createUnreachable(ArtificialUnreachableLocation());
 
   return true;
@@ -732,7 +731,8 @@ static bool removeUnreachableBlocks(SILFunction &F, SILModule &M,
 /// diagnose any user code after it as being unreachable.  This pass happens
 /// before the definite initialization pass so that it doesn't see infeasible
 /// control flow edges.
-static void performNoReturnFunctionProcessing(SILModule *M) {
+static void performNoReturnFunctionProcessing(SILModule *M,
+                                              SILModuleTransform *T) {
   for (auto &Fn : *M) {
     DEBUG(llvm::errs() << "*** No return function processing: "
           << Fn.getName() << "\n");
@@ -742,10 +742,11 @@ static void performNoReturnFunctionProcessing(SILModule *M) {
       // function.
       simplifyBlocksWithCallsToNoReturn(BB, nullptr);
     }
+    T->invalidateAnalysis(&Fn, SILAnalysis::InvalidationKind::FunctionBody);
   }
 }
 
-void swift::performSILDiagnoseUnreachable(SILModule *M) {
+void swift::performSILDiagnoseUnreachable(SILModule *M, SILModuleTransform *T) {
   for (auto &Fn : *M) {
     DEBUG(llvm::errs() << "*** Diagnose Unreachable processing: "
           << Fn.getName() << "\n");
@@ -783,19 +784,19 @@ void swift::performSILDiagnoseUnreachable(SILModule *M) {
 
     // Remove unreachable blocks.
     removeUnreachableBlocks(Fn, *M, &State);
+
+    if (T)
+      T->invalidateAnalysis(&Fn, SILAnalysis::InvalidationKind::FunctionBody);
   }
 }
 
 namespace {
   class NoReturnFolding : public SILModuleTransform {
     void run() override {
-      performNoReturnFunctionProcessing(getModule());
-      invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
+      performNoReturnFunctionProcessing(getModule(), this);
     }
-    
-    StringRef getName() override { return "NoReturnFolding"; }
   };
-}
+} // end anonymous namespace
 
 SILTransform *swift::createNoReturnFolding() {
   return new NoReturnFolding();
@@ -805,13 +806,10 @@ SILTransform *swift::createNoReturnFolding() {
 namespace {
   class DiagnoseUnreachable : public SILModuleTransform {
     void run() override {
-      performSILDiagnoseUnreachable(getModule());
-      invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
+      performSILDiagnoseUnreachable(getModule(), this);
     }
-
-    StringRef getName() override { return "Diagnose Unreachable"; }
   };
-}
+} // end anonymous namespace
 
 SILTransform *swift::createDiagnoseUnreachable() {
   return new DiagnoseUnreachable();

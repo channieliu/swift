@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -116,26 +116,32 @@ public:
     asDerived().emitScalarRelease(IGF, value, atomicity);
   }
 
-  void strongRetainUnowned(IRGenFunction &IGF, Explosion &e) const override {
+  void strongRetainUnowned(IRGenFunction &IGF, Explosion &e,
+                           Atomicity atomicity) const override {
     llvm::Value *value = e.claimNext();
-    IGF.emitStrongRetainUnowned(value, asDerived().getReferenceCounting());
+    IGF.emitStrongRetainUnowned(value, asDerived().getReferenceCounting(),
+                                atomicity);
   }
 
   void strongRetainUnownedRelease(IRGenFunction &IGF,
-                                  Explosion &e) const override {
+                                  Explosion &e,
+                                  Atomicity atomicity) const override {
     llvm::Value *value = e.claimNext();
     IGF.emitStrongRetainAndUnownedRelease(value,
-                                          asDerived().getReferenceCounting());
+                                          asDerived().getReferenceCounting(),
+                                          atomicity);
   }
 
-  void unownedRetain(IRGenFunction &IGF, Explosion &e) const override {
+  void unownedRetain(IRGenFunction &IGF, Explosion &e,
+                     Atomicity atomicity) const override {
     llvm::Value *value = e.claimNext();
-    IGF.emitUnownedRetain(value, asDerived().getReferenceCounting());
+    IGF.emitUnownedRetain(value, asDerived().getReferenceCounting(), atomicity);
   }
 
-  void unownedRelease(IRGenFunction &IGF, Explosion &e) const override {
+  void unownedRelease(IRGenFunction &IGF, Explosion &e,
+                      Atomicity atomicity) const override {
     llvm::Value *value = e.claimNext();
-    IGF.emitUnownedRelease(value, asDerived().getReferenceCounting());
+    IGF.emitUnownedRelease(value, asDerived().getReferenceCounting(), atomicity);
   }
 
   void unownedLoadStrong(IRGenFunction &IGF, Address src,

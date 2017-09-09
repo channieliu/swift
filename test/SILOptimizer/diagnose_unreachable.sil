@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -assume-parsing-unqualified-ownership-sil -enable-sil-verify-all %s -diagnose-unreachable | %FileCheck %s
+// RUN: %target-sil-opt -assume-parsing-unqualified-ownership-sil -enable-sil-verify-all %s -diagnose-unreachable -sil-print-debuginfo | %FileCheck %s
 
 import Builtin
 import Swift
@@ -137,14 +137,14 @@ bb0:
 // CHECK-LABEL: sil @removeTriviallyDeadInstructions
 sil @removeTriviallyDeadInstructions : $@convention(thin) (@owned B) -> () {
 bb0(%0 : $B):
-  %1 = alloc_box $B
-  %1a = project_box %1 : $@box B, 0
+  %1 = alloc_box $<τ_0_0> { var τ_0_0 } <B>
+  %1a = project_box %1 : $<τ_0_0> { var τ_0_0 } <B>, 0
   %2 = store %0 to %1a : $*B                 // CHECK: store
   %3 = load %1a : $*B
   %4 = strong_retain %3 : $B                         // CHECK: strong_retain
   %5 = unchecked_ref_cast %3 : $B to $Builtin.NativeObject     // CHECK-NOT: unchecked_ref_cast
   %7 = strong_release %3 : $B                        // CHECK: strong_release
-  %8 = strong_release %1 : $@box B  // CHECK-NEXT: strong_release
+  %8 = strong_release %1 : $<τ_0_0> { var τ_0_0 } <B>  // CHECK-NEXT: strong_release
   %9 = function_ref @exit : $@convention(thin) () -> Never
   %10 = apply %9() : $@convention(thin) () -> Never
   %6 = unchecked_ref_cast %5 : $Builtin.NativeObject to $B // CHECK-NOT: unchecked_ref_cast
@@ -293,7 +293,7 @@ b2:
   br bb1(%111 : $(Int, UnicodeScalar))
 
 // CHECK-LABEL: sil @constant_fold_switch_enum_with_payload
-// CHECK: bb0(%{{[0-9]+}} : $Int, %{{[0-9]+}} : $UnicodeScalar):
+// CHECK: bb0(%{{[0-9]+}} : $Int, %{{[0-9]+}} : $Unicode.Scalar):
 // CHECK:   br bb1
 // CHECK: bb1:
 // CHECK:   return
@@ -387,19 +387,24 @@ bb2(%3 : $Error):
   throw %3 : $Error
 }
 
+sil_scope 0 { loc "f.swift":1:1 parent @try_apply_2 : $@convention(thin) (Builtin.Int1) -> @error Error }
+// CHECK: sil_scope [[F:[0-9]+]] { loc "f.swift":1:1 parent @try_apply_2
+sil_scope 1 { loc "f.swift":2:1 parent 0 }
+// CHECK: sil_scope [[S:[0-9]+]] { loc "f.swift":2:1 parent [[F]] }
 // CHECK-LABEL:sil @try_apply_2
-// CHECK:    bb3(
-// CHECK-NEXT: {{ unreachable}}
+// CHECK:    bb3({{.*}}$Never):
+// CHECK-NEXT: {{ unreachable }}, scope [[S]]
 // CHECK:    bb4(
 // CHECK-NEXT: throw
+
 sil @try_apply_2 : $@convention(thin) (Builtin.Int1) -> @error Error {
 bb0(%0 : $Builtin.Int1):
   %1 = function_ref @throwing_noreturn : $@convention(thin) () -> (Never, @error Error)
   cond_br %0, bb1, bb2
 bb1:
-  try_apply %1() : $@convention(thin) () -> (Never, @error Error), normal bb3, error bb4
+  try_apply %1() : $@convention(thin) () -> (Never, @error Error), normal bb3, error bb4, scope 0
 bb2:
-  try_apply %1() : $@convention(thin) () -> (Never, @error Error), normal bb3, error bb4
+  try_apply %1() : $@convention(thin) () -> (Never, @error Error), normal bb3, error bb4, scope 1
 bb3(%2 : $Never):
   %3 = tuple ()
   return %3 : $()

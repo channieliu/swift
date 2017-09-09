@@ -226,6 +226,20 @@ func f(x: Int) -> Int {
   // string interpolation is the best
   // CHECK: <str>"This is string </str>\<anchor>(</anchor>genFn({(a:<type>Int</type> -> <type>Int</type>) <kw>in</kw> a})<anchor>)</anchor><str> interpolation"</str>
   "This is string \(genFn({(a:Int -> Int) in a})) interpolation"
+
+  // CHECK: <str>"""
+  // CHECK-NEXT: This is a multiline string.
+  // CHECK-NEXT: """</str>
+  """
+  This is a multiline string.
+"""
+
+  // CHECK: <str>"""
+  // CHECK-NEXT: This is a multiline</str>\<anchor>(</anchor> <str>"interpolated"</str> <anchor>)</anchor><str>string
+  // CHECK-NEXT: """</str>
+  """
+      This is a multiline\( "interpolated" )string
+   """
 }
 
 // CHECK: <kw>func</kw> bar(x: <type>Int</type>) -> (<type>Int</type>, <type>Float</type>) {
@@ -273,7 +287,7 @@ func test3(o: AnyObject) {
   let x = o as! MyCls
 }
 
-// CHECK: <kw>func</kw> test4(inout a: <type>Int</type>) {{{$}}
+// CHECK: <kw>func</kw> test4(<kw>inout</kw> a: <type>Int</type>) {{{$}}
 func test4(inout a: Int) {
   // CHECK: <kw>if</kw> <kw>#available</kw> (<kw>OSX</kw> >= <float>10.10</float>, <kw>iOS</kw> >= <float>8.01</float>) {<kw>let</kw> OSX = <str>"iOS"</str>}}{{$}}
   if #available (OSX >= 10.10, iOS >= 8.01) {let OSX = "iOS"}}
@@ -580,6 +594,15 @@ func foo2(O1 : Int?, O2: Int?, O3: Int?) {
 // CHECK:  <kw>guard</kw> <kw>let</kw> <kw>_</kw> = O1, <kw>var</kw> <kw>_</kw> = O2, <kw>let</kw> <kw>_</kw> = O3 <kw>else</kw> { }
   if let _ = O1, var _ = O2, let _ = O3 {}
 // CHECK: <kw>if</kw> <kw>let</kw> <kw>_</kw> = O1, <kw>var</kw> <kw>_</kw> = O2, <kw>let</kw> <kw>_</kw> = O3 {}
+}
+
+func keywordInCaseAndLocalArgLabel(_ for: Int, for in: Int, class _: Int) {
+// CHECK:  <kw>func</kw> keywordInCaseAndLocalArgLabel(<kw>_</kw> for: <type>Int</type>, for in: <type>Int</type>, class <kw>_</kw>: <type>Int</type>) {
+  switch(`for`, `in`) {
+  case (let x, let y):
+// CHECK: <kw>case</kw> (<kw>let</kw> x, <kw>let</kw> y):
+    print(x, y)
+  }
 }
 
 // Keep this as the last test

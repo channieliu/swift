@@ -2,15 +2,15 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements semantic analysis for expressions, analysing an
+// This file implements semantic analysis for expressions, analyzing an
 // expression tree in post-order, bottom-up, from leaves up to the root.
 //
 //===----------------------------------------------------------------------===//
@@ -18,6 +18,7 @@
 #include "TypeChecker.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/Initializer.h"
 #include "swift/Parse/Lexer.h"
 using namespace swift;
 
@@ -166,13 +167,13 @@ TypeChecker::lookupPrecedenceGroupForInfixOperator(DeclContext *DC, Expr *E) {
                                      castExpr->getAsLoc());
   }
 
-  if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
-    Identifier name = DRE->getDecl()->getName();
+  if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
+    Identifier name = DRE->getDecl()->getBaseName().getIdentifier();
     return lookupPrecedenceGroupForOperator(*this, DC, name, DRE->getLoc());
   }
 
-  if (OverloadedDeclRefExpr *OO = dyn_cast<OverloadedDeclRefExpr>(E)) {
-    Identifier name = OO->getDecls()[0]->getName();
+  if (auto *OO = dyn_cast<OverloadedDeclRefExpr>(E)) {
+    Identifier name = OO->getDecls()[0]->getBaseName().getIdentifier();
     return lookupPrecedenceGroupForOperator(*this, DC, name, OO->getLoc());
   }
 
@@ -206,7 +207,7 @@ static Expr *makeBinOp(TypeChecker &TC, Expr *Op, Expr *LHS, Expr *RHS,
     return nullptr;
 
   // If the left-hand-side is a 'try', hoist it up.
-  AnyTryExpr *tryEval = dyn_cast<AnyTryExpr>(LHS);
+  auto *tryEval = dyn_cast<AnyTryExpr>(LHS);
   if (tryEval) {
     LHS = tryEval->getSubExpr();
   }
@@ -326,7 +327,7 @@ static Expr *makeBinOp(TypeChecker &TC, Expr *Op, Expr *LHS, Expr *RHS,
   TupleExpr *Arg = TupleExpr::create(TC.Context,
                                      SourceLoc(), 
                                      ArgElts2, { }, { }, SourceLoc(),
-                                     /*hasTrailingClosure=*/false,
+                                     /*HasTrailingClosure=*/false,
                                      /*Implicit=*/true);
 
   
@@ -352,7 +353,7 @@ namespace {
                == Associativity::Left;
     }
   };
-}
+} // end anonymous namespace
 
 /// foldSequence - Take a sequence of expressions and fold a prefix of
 /// it into a tree of BinaryExprs using precedence parsing.
@@ -491,31 +492,6 @@ static Expr *foldSequence(TypeChecker &TC, DeclContext *DC,
   return makeBinOp(TC, op1.op, LHS, RHS, op1.precedence, S.empty());
 }
 
-Type TypeChecker::getTypeOfRValue(ValueDecl *value, bool wantInterfaceType) {
-  validateDecl(value);
-
-  Type type;
-  if (wantInterfaceType)
-    type = value->getInterfaceType();
-  else
-    type = value->getType();
-
-  // Uses of inout argument values are lvalues.
-  if (auto iot = type->getAs<InOutType>())
-    return iot->getObjectType();
-  
-  // Uses of values with lvalue type produce their rvalue.
-  if (auto LV = type->getAs<LValueType>())
-    return LV->getObjectType();
-
-  // Ignore 'unowned', 'weak' and @unmanaged qualification.
-  if (type->is<ReferenceStorageType>())
-    return type->getReferenceStorageReferent();
-
-  // No other transforms necessary.
-  return type;
-}
-
 bool TypeChecker::requireOptionalIntrinsics(SourceLoc loc) {
   if (Context.hasOptionalIntrinsics(this)) return false;
 
@@ -537,78 +513,7 @@ bool TypeChecker::requireArrayLiteralIntrinsics(SourceLoc loc) {
   return true;
 }
 
-/// Does a var or subscript produce an l-value?
-///
-/// \param baseType - the type of the base on which this object
-///   is being accessed; must be null if and only if this is not
-///   a type member
-static bool doesStorageProduceLValue(TypeChecker &TC,
-                                     AbstractStorageDecl *storage,
-                                     Type baseType, DeclContext *useDC,
-                                     const DeclRefExpr *base = nullptr) {
-  // Unsettable storage decls always produce rvalues.
-  if (!storage->isSettable(useDC, base))
-    return false;
-  
-  if (TC.Context.LangOpts.EnableAccessControl &&
-      !storage->isSetterAccessibleFrom(useDC))
-    return false;
-
-  // If there is no base, or if the base isn't being used, it is settable.
-  // This is only possible for vars.
-  if (auto var = dyn_cast<VarDecl>(storage)) {
-    if (!baseType || var->isStatic())
-      return true;
-  }
-
-  // If the base is an lvalue, then a reference produces an lvalue.
-  if (baseType->is<LValueType>())
-    return true;
-
-  // Stored properties of reference types produce lvalues.
-  if (baseType->hasReferenceSemantics() && storage->hasStorage())
-    return true;
-
-  // So the base is an rvalue type. The only way an accessor can
-  // produce an lvalue is if we have a property where both the
-  // getter and setter are nonmutating.
-  return !storage->hasStorage() &&
-      !storage->isGetterMutating() &&
-      storage->isSetterNonMutating();
-}
-
-Type TypeChecker::getUnopenedTypeOfReference(ValueDecl *value, Type baseType,
-                                             DeclContext *UseDC,
-                                             const DeclRefExpr *base,
-                                             bool wantInterfaceType) {
-  validateDecl(value);
-  if (value->isInvalid())
-    return ErrorType::get(Context);
-
-  Type requestedType = getTypeOfRValue(value, wantInterfaceType);
-
-  // Qualify storage declarations with an lvalue when appropriate.
-  // Otherwise, they yield rvalues (and the access must be a load).
-  if (auto *storage = dyn_cast<AbstractStorageDecl>(value)) {
-    if (doesStorageProduceLValue(*this, storage, baseType, UseDC, base)) {
-      // Vars are simply lvalues of their rvalue type.
-      if (isa<VarDecl>(storage))
-        return LValueType::get(requestedType);
-
-      // Subscript decls have function type.  For the purposes of later type
-      // checker consumption, model this as returning an lvalue.
-      assert(isa<SubscriptDecl>(storage));
-      auto *RFT = requestedType->castTo<FunctionType>();
-      return FunctionType::get(RFT->getInput(),
-                               LValueType::get(RFT->getResult()),
-                               RFT->getExtInfo());
-    }
-  }
-
-  return requestedType;
-}
-
-Expr *TypeChecker::buildCheckedRefExpr(ValueDecl *value, DeclContext *UseDC,
+Expr *TypeChecker::buildCheckedRefExpr(VarDecl *value, DeclContext *UseDC,
                                        DeclNameLoc loc, bool Implicit) {
   auto type = getUnopenedTypeOfReference(value, Type(), UseDC);
   AccessSemantics semantics = value->getAccessSemanticsFromContext(UseDC);
@@ -617,22 +522,16 @@ Expr *TypeChecker::buildCheckedRefExpr(ValueDecl *value, DeclContext *UseDC,
 
 Expr *TypeChecker::buildRefExpr(ArrayRef<ValueDecl *> Decls,
                                 DeclContext *UseDC, DeclNameLoc NameLoc,
-                                bool Implicit, bool isSpecialized,
-                                FunctionRefKind functionRefKind) {
+                                bool Implicit, FunctionRefKind functionRefKind) {
   assert(!Decls.empty() && "Must have at least one declaration");
 
   if (Decls.size() == 1 && !isa<ProtocolDecl>(Decls[0]->getDeclContext())) {
     AccessSemantics semantics = Decls[0]->getAccessSemanticsFromContext(UseDC);
-    auto result = new (Context) DeclRefExpr(Decls[0], NameLoc, Implicit,
-                                            semantics);
-    if (isSpecialized)
-      result->setSpecialized();
-    return result;
+    return new (Context) DeclRefExpr(Decls[0], NameLoc, Implicit, semantics);
   }
 
   Decls = Context.AllocateCopy(Decls);
   auto result = new (Context) OverloadedDeclRefExpr(Decls, NameLoc, 
-                                                    isSpecialized,
                                                     functionRefKind,
                                                     Implicit);
   return result;
@@ -651,7 +550,13 @@ static Type lookupDefaultLiteralType(TypeChecker &TC, DeclContext *dc,
   if (!TD)
     return Type();
   TC.validateDecl(TD);
-  return TD->getDeclaredType();
+
+  if (TD->isInvalid())
+    return Type();
+
+  if (auto *NTD = dyn_cast<NominalTypeDecl>(TD))
+    return NTD->getDeclaredType();
+  return cast<TypeAliasDecl>(TD)->getDeclaredInterfaceType();
 }
 
 Type TypeChecker::getDefaultType(ProtocolDecl *protocol, DeclContext *dc) {
@@ -754,7 +659,7 @@ Type TypeChecker::getDefaultType(ProtocolDecl *protocol, DeclContext *dc) {
     // the name of the typealias itself anywhere.
     if (type && *type) {
       if (auto typeAlias = dyn_cast<NameAliasType>(type->getPointer()))
-        *type = typeAlias->getDecl()->getUnderlyingType();
+        *type = typeAlias->getSinglyDesugaredType();
     }
   }
 

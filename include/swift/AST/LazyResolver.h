@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -52,22 +52,6 @@ public:
   virtual void resolveWitness(const NormalProtocolConformance *conformance,
                               ValueDecl *requirement) = 0;
 
-  /// Resolve an inherited conformance.
-  virtual ProtocolConformance *resolveInheritedConformance(
-                                 const NormalProtocolConformance *conformance,
-                                 ProtocolDecl *inherited) = 0;
-
-  /// Resolve a member type.
-  ///
-  /// \param dc The context in which to resolve the type.
-  /// \param type The type in which we will search for the member type.
-  /// \param name The name of the member type.
-  ///
-  /// \returns the member type, or an empty type if no such type could be
-  /// found.
-  virtual Type resolveMemberType(DeclContext *dc, Type type,
-                                 Identifier name) = 0;
-
   /// Resolve the accessibility of a value.
   ///
   /// It does no type-checking.
@@ -98,9 +82,6 @@ public:
   /// Bind an extension to its extended type.
   virtual void bindExtension(ExtensionDecl *ext) = 0;
 
-  /// Introduce the accessors for a 'lazy' variable.
-  virtual void introduceLazyVarAccessors(VarDecl *var) = 0;
-
   /// Resolve the type of an extension.
   ///
   /// This can be called to ensure that the members of an extension can be
@@ -109,6 +90,9 @@ public:
 
   /// Resolve any implicitly-declared constructors within the given nominal.
   virtual void resolveImplicitConstructors(NominalTypeDecl *nominal) = 0;
+
+  /// Resolve an implicitly-generated member with the given name.
+  virtual void resolveImplicitMember(NominalTypeDecl *nominal, DeclName member) = 0;
 
   /// Resolve any implicitly-generated members and conformances for generated
   /// external decls.
@@ -136,16 +120,6 @@ public:
   void resolveWitness(const NormalProtocolConformance *conformance,
                       ValueDecl *requirement) override {
     Principal.resolveWitness(conformance, requirement);
-  }
-
-  ProtocolConformance *resolveInheritedConformance(
-                         const NormalProtocolConformance *conformance,
-                         ProtocolDecl *inherited) override {
-    return Principal.resolveInheritedConformance(conformance, inherited);
-  }
-
-  Type resolveMemberType(DeclContext *dc, Type type, Identifier name) override {
-    return Principal.resolveMemberType(dc, type, name);
   }
 
   void resolveAccessibility(ValueDecl *VD) override {
@@ -177,16 +151,16 @@ public:
     Principal.bindExtension(ext);
   }
 
-  void introduceLazyVarAccessors(VarDecl *var) override {
-    Principal.introduceLazyVarAccessors(var);
-  }
-
   void resolveExtension(ExtensionDecl *ext) override {
     Principal.resolveExtension(ext);
   }
 
   void resolveImplicitConstructors(NominalTypeDecl *nominal) override {
     Principal.resolveImplicitConstructors(nominal);
+  }
+
+  void resolveImplicitMember(NominalTypeDecl *nominal, DeclName member) override {
+    Principal.resolveImplicitMember(nominal, member);
   }
 
   void resolveExternalDeclImplicitMembers(NominalTypeDecl *nominal) override {
@@ -199,6 +173,33 @@ public:
   }
 };
 
+class LazyMemberLoader;
+
+/// Context data for lazy deserialization.
+class LazyContextData {
+public:
+  /// The lazy member loader for this context.
+  LazyMemberLoader *loader;
+};
+
+/// Context data for generic contexts.
+class LazyGenericContextData : public LazyContextData {
+public:
+  /// The context data used for loading the generic environment.
+  uint64_t genericEnvData = 0;
+};
+
+/// Context data for iterable decl contexts.
+class LazyIterableDeclContextData : public LazyGenericContextData {
+public:
+  /// The context data used for loading all of the members of the iterable
+  /// context.
+  uint64_t memberData = 0;
+
+  /// The context data used for loading all of the conformances of the
+  /// iterable context.
+  uint64_t allConformancesData = 0;
+};
 
 /// A class that can lazily load members from a serialized format.
 class alignas(void*) LazyMemberLoader {
@@ -235,54 +236,11 @@ public:
                                             uint64_t contextData) {
     llvm_unreachable("unimplemented");
   }
-};
 
-/// A placeholder for either an array or a member loader.
-template <typename T>
-class LazyLoaderArray {
-  using LengthTy = llvm::PointerEmbeddedInt<size_t, 31>;
-  PointerUnion<LengthTy, LazyMemberLoader *> lengthOrLoader;
-  uint64_t data = 0;
-public:
-  explicit LazyLoaderArray() = default;
-
-  /*implicit*/ LazyLoaderArray(ArrayRef<T> members) {
-    *this = members;
-  }
-
-  LazyLoaderArray(LazyMemberLoader *loader, uint64_t contextData) {
-    setLoader(loader, contextData);
-  }
-
-  LazyLoaderArray &operator=(ArrayRef<T> members) {
-    lengthOrLoader = members.size();
-    data = reinterpret_cast<uint64_t>(members.data());
-    return *this;
-  }
-
-  void setLoader(LazyMemberLoader *loader, uint64_t contextData) {
-    lengthOrLoader = loader;
-    data = contextData;
-  }
-
-  ArrayRef<T> getArray() const {
-    assert(!isLazy());
-    return llvm::makeArrayRef(reinterpret_cast<T *>(data),
-                              lengthOrLoader.get<LengthTy>());
-  }
-
-  LazyMemberLoader *getLoader() const {
-    assert(isLazy());
-    return lengthOrLoader.get<LazyMemberLoader *>();
-  }
-
-  uint64_t getLoaderContextData() const {
-    assert(isLazy());
-    return data;
-  }
-
-  bool isLazy() const {
-    return lengthOrLoader.is<LazyMemberLoader *>();
+  /// Returns the generic environment.
+  virtual GenericEnvironment *loadGenericEnvironment(const DeclContext *decl,
+                                                     uint64_t contextData) {
+    llvm_unreachable("unimplemented");
   }
 };
 

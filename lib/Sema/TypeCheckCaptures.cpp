@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,10 +19,34 @@
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeWalker.h"
 #include "swift/Basic/Defer.h"
 #include "llvm/ADT/SmallPtrSet.h"
 using namespace swift;
+
+static SourceLoc getCaptureLoc(AnyFunctionRef AFR) {
+  if (auto AFD = AFR.getAbstractFunctionDecl()) {
+    if (auto *FD = dyn_cast<FuncDecl>(AFD)) {
+      if (FD->isDeferBody()) {
+        // HACK: Defer statements generate implicit FuncDecls, and hence do
+        // not have valid source locations.  Instead, use the location of
+        // the body.
+        return FD->getBody()->getLBraceLoc();
+      }
+    }
+
+    return AFD->getLoc();
+  } else {
+    auto ACE = AFR.getAbstractClosureExpr();
+    if (auto CE = dyn_cast<ClosureExpr>(ACE)) {
+      if (!CE->getInLoc().isInvalid())
+        return CE->getInLoc();
+    }
+
+    return ACE->getLoc();
+  }
+}
 
 namespace {
 
@@ -49,16 +73,7 @@ public:
         DynamicSelfCaptureLoc(DynamicSelfCaptureLoc),
         DynamicSelf(DynamicSelf),
         AFR(AFR) {
-    if (auto AFD = AFR.getAbstractFunctionDecl())
-      CaptureLoc = AFD->getLoc();
-    else {
-      auto ACE = AFR.getAbstractClosureExpr();
-      if (auto closure = dyn_cast<ClosureExpr>(ACE))
-        CaptureLoc = closure->getInLoc();
-
-      if (CaptureLoc.isInvalid())
-        CaptureLoc = ACE->getLoc();
-    }
+    CaptureLoc = getCaptureLoc(AFR);
   }
 
   /// \brief Check if the type of an expression references any generic
@@ -78,11 +93,11 @@ public:
     
     class TypeCaptureWalker : public TypeWalker {
       AnyFunctionRef AFR;
-      llvm::function_ref<void(Type)> Callback;
+      std::function<void(Type)> Callback;
     public:
       explicit TypeCaptureWalker(AnyFunctionRef AFR,
-                                 llvm::function_ref<void(Type)> callback)
-        : AFR(AFR), Callback(callback) {}
+                                 std::function<void(Type)> callback)
+        : AFR(AFR), Callback(std::move(callback)) {}
     
       Action walkToTypePre(Type ty) override {
         Callback(ty);
@@ -127,14 +142,27 @@ public:
     // Perhaps this entire analysis should happen at the SILGen level,
     // instead, but even there we don't really have enough information to
     // perform it accurately.
-    if (type->hasArchetype()) {
+    if (type->hasArchetype() || type->hasTypeParameter()) {
       type.walk(TypeCaptureWalker(AFR, [&](Type t) {
-        if (t->is<ArchetypeType>() &&
+        if ((t->is<ArchetypeType>() ||
+             t->is<GenericTypeParamType>()) &&
             !t->isOpenedExistential() &&
-          GenericParamCaptureLoc.isInvalid()) {
+            GenericParamCaptureLoc.isInvalid()) {
           GenericParamCaptureLoc = loc;
         }
       }));
+    }
+
+    if (auto *gft = type->getAs<GenericFunctionType>()) {
+      TypeCaptureWalker walker(AFR, [&](Type t) {
+        if (t->is<GenericTypeParamType>() &&
+            GenericParamCaptureLoc.isInvalid()) {
+          GenericParamCaptureLoc = loc;
+        }
+      });
+
+      gft->getInput().walk(walker);
+      gft->getResult().walk(walker);
     }
   }
 
@@ -160,15 +188,19 @@ public:
 
     // Visit the type of the capture, if it isn't a class reference, since
     // we'd need the metadata to do so.
-    if (VD->hasType()
+    if (VD->hasInterfaceType()
         && (!AFR.isObjC()
-            || !VD->getType()->hasRetainablePointerRepresentation()))
-      checkType(VD->getType(), VD->getLoc());
+            || !isa<VarDecl>(VD)
+            || !cast<VarDecl>(VD)->getType()->hasRetainablePointerRepresentation()))
+      checkType(VD->getInterfaceType(), VD->getLoc());
 
     // If VD is a noescape decl, then the closure we're computing this for
     // must also be noescape.
-    if (VD->hasType() && VD->getType()->is<AnyFunctionType>() &&
-        VD->getType()->castTo<AnyFunctionType>()->isNoEscape() &&
+    if (AFR.hasType() &&
+        !AFR.getType()->hasError() &&
+        VD->hasInterfaceType() &&
+        VD->getInterfaceType()->is<AnyFunctionType>() &&
+        VD->getInterfaceType()->castTo<AnyFunctionType>()->isNoEscape() &&
         !capture.isNoEscape() &&
         // Don't repeatedly diagnose the same thing.
         Diagnosed.insert(VD).second) {
@@ -178,20 +210,15 @@ public:
 
       TC.diagnose(Loc, isDecl ? diag::decl_closure_noescape_use
                               : diag::closure_noescape_use,
-                  VD->getName());
+                  VD->getBaseName().getIdentifier());
 
       // If we're a parameter, emit a helpful fixit to add @escaping
       auto paramDecl = dyn_cast<ParamDecl>(VD);
-      bool isAutoClosure =
-          VD->getType()->castTo<AnyFunctionType>()->isAutoClosure();
-      if (paramDecl && !isAutoClosure) {
+      if (paramDecl) {
         TC.diagnose(paramDecl->getStartLoc(), diag::noescape_parameter,
                     paramDecl->getName())
             .fixItInsert(paramDecl->getTypeLoc().getSourceRange().Start,
                          "@escaping ");
-      } else if (isAutoClosure) {
-        // TODO: add in a fixit for autoclosure
-        TC.diagnose(VD->getLoc(), diag::noescape_autoclosure, VD->getName());
       }
     }
   }
@@ -199,10 +226,14 @@ public:
   std::pair<bool, Expr *> walkToDeclRefExpr(DeclRefExpr *DRE) {
     auto *D = DRE->getDecl();
 
-    // Capture the generic parameters of the decl.
-    if (!AFR.isObjC() || !D->isObjC() || isa<ConstructorDecl>(D)) {
-      for (auto sub : DRE->getDeclRef().getSubstitutions()) {
-        checkType(sub.getReplacement(), DRE->getLoc());
+    // Capture the generic parameters of the decl, unless it's a
+    // local declaration in which case we will pick up generic
+    // parameter references transitively.
+    if (!D->getDeclContext()->isLocalContext()) {
+      if (!AFR.isObjC() || !D->isObjC() || isa<ConstructorDecl>(D)) {
+        for (auto sub : DRE->getDeclRef().getSubstitutions()) {
+          checkType(sub.getReplacement(), DRE->getLoc());
+        }
       }
     }
 
@@ -229,7 +260,7 @@ public:
           if (DC->isLocalContext()) {
             TC.diagnose(DRE->getLoc(), diag::capture_across_type_decl,
                         NTD->getDescriptiveKind(),
-                        D->getName());
+                        D->getBaseName().getIdentifier());
 
             TC.diagnose(NTD->getLoc(), diag::type_declared_here);
 
@@ -296,18 +327,18 @@ public:
       if (Diagnosed.insert(capturedDecl).second) {
         if (capturedDecl == DRE->getDecl()) {
           TC.diagnose(DRE->getLoc(), diag::capture_before_declaration,
-                      capturedDecl->getName());
+                      capturedDecl->getBaseName().getIdentifier());
         } else {
           TC.diagnose(DRE->getLoc(),
                       diag::transitive_capture_before_declaration,
-                      DRE->getDecl()->getName(),
-                      capturedDecl->getName());
+                      DRE->getDecl()->getBaseName().getIdentifier(),
+                      capturedDecl->getBaseName().getIdentifier());
           ValueDecl *prevDecl = capturedDecl;
           for (auto path : reversed(capturePath)) {
             TC.diagnose(path->getLoc(),
                         diag::transitive_capture_through_here,
                         path->getName(),
-                        prevDecl->getName());
+                        prevDecl->getBaseName().getIdentifier());
             prevDecl = path;
           }
         }
@@ -320,13 +351,15 @@ public:
     if (!validateForwardCapture(DRE->getDecl()))
       return { false, DRE };
 
-    bool isInOut = D->hasType() && D->getInterfaceType()->is<InOutType>();
+    bool isInOut = (isa<ParamDecl>(D) &&
+                    cast<ParamDecl>(D)->hasType() &&
+                    cast<ParamDecl>(D)->getType()->is<InOutType>());
     bool isNested = false;
     if (auto f = AFR.getAbstractFunctionDecl())
       isNested = f->getDeclContext()->isLocalContext();
 
     if (isInOut && !AFR.isKnownNoEscape() && !isNested) {
-      if (D->getNameStr() == "self") {
+      if (D->getBaseName() == D->getASTContext().Id_self) {
         TC.diagnose(DRE->getLoc(),
           diag::closure_implicit_capture_mutating_self);
       } else {
@@ -382,11 +415,11 @@ public:
 
     if (GenericParamCaptureLoc.isInvalid())
       if (captureInfo.hasGenericParamCaptures())
-        GenericParamCaptureLoc = innerClosure.getLoc();
+        GenericParamCaptureLoc = getCaptureLoc(innerClosure);
 
     if (DynamicSelfCaptureLoc.isInvalid())
       if (captureInfo.hasDynamicSelfCapture()) {
-        DynamicSelfCaptureLoc = innerClosure.getLoc();
+        DynamicSelfCaptureLoc = getCaptureLoc(innerClosure);
         DynamicSelf = captureInfo.getDynamicSelfType();
       }
   }
@@ -426,9 +459,9 @@ public:
     // doesn't require its type metadata.
     if (auto declRef = dyn_cast<DeclRefExpr>(E))
       return (!declRef->getDecl()->isObjC()
-              && !E->getType()->getLValueOrInOutObjectType()
+              && !E->getType()->getWithoutSpecifierType()
                               ->hasRetainablePointerRepresentation()
-              && !E->getType()->getLValueOrInOutObjectType()
+              && !E->getType()->getWithoutSpecifierType()
                               ->is<AnyMetatypeType>());
 
     // Loading classes or metatypes doesn't require their metadata.
@@ -552,8 +585,9 @@ public:
     
     // Assigning an object doesn't require type metadata.
     if (auto assignment = dyn_cast<AssignExpr>(E))
-      return !assignment->getSrc()->getType()
-        ->hasRetainablePointerRepresentation();
+      return assignment->getSrc()->getType() &&
+        !assignment->getSrc()->getType()
+            ->hasRetainablePointerRepresentation();
 
     return true;
   }
@@ -597,7 +631,7 @@ public:
   }
 };
 
-}  // namespace
+} // end anonymous namespace
 
 void TypeChecker::maybeDiagnoseCaptures(Expr *E, AnyFunctionRef AFR) {
   if (!AFR.getCaptureInfo().hasBeenComputed()) {
@@ -641,20 +675,22 @@ void TypeChecker::computeCaptures(AnyFunctionRef AFR) {
   AFR.getBody()->walk(finder);
 
   unsigned inoutCount = 0;
-  for (auto C: Captures) {
-    if (auto type = C.getDecl()->getInterfaceType())
-      if (isa<InOutType>(type.getPointer()))
-        inoutCount++;
+  for (auto C : Captures) {
+    if (auto PD = dyn_cast<ParamDecl>(C.getDecl()))
+      if (PD->hasType())
+        if (auto type = PD->getType())
+          if (isa<InOutType>(type.getPointer()))
+            inoutCount++;
   }
 
   if (inoutCount > 0) {
     if (auto e = AFR.getAbstractFunctionDecl()) {
-      for (auto returnOccurrence: getEscapingFunctionAsReturnValue(e)) {
+      for (auto returnOccurrence : getEscapingFunctionAsReturnValue(e)) {
         diagnose(returnOccurrence->getReturnLoc(),
           diag::nested_function_escaping_inout_capture);
       }
       auto occurrences = getEscapingFunctionAsArgument(e);
-      for (auto occurrence: occurrences) {
+      for (auto occurrence : occurrences) {
         diagnose(occurrence->getLoc(),
           diag::nested_function_with_implicit_capture_argument,
           inoutCount > 1);
@@ -663,7 +699,7 @@ void TypeChecker::computeCaptures(AnyFunctionRef AFR) {
   }
 
   if (AFR.hasType() && !AFR.isObjC()) {
-    finder.checkType(AFR.getType(), AFR.getLoc());
+    finder.checkType(AFR.getType(), getCaptureLoc(AFR));
   }
 
   // If this is an init(), explicitly walk the initializer values for members of

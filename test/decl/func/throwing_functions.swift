@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 enum Exception : Error { case A }
 
@@ -117,7 +117,7 @@ var c4 : () -> Int = {() throws -> Int in 0} // expected-error{{invalid conversi
 var c5 : () -> Int = { try c2() } // expected-error{{invalid conversion from throwing function of type '() throws -> Int' to non-throwing function type '() -> Int'}}
 var c6 : () throws -> Int = { do { _ = try c2() } ; return 0 }
 var c7 : () -> Int = { do { try c2() } ; return 0 } // expected-error{{invalid conversion from throwing function of type '() throws -> _' to non-throwing function type '() -> Int'}}
-var c8 : () -> Int = { do { _ = try c2()  } catch _ { var x = 0 } ; return 0 }
+var c8 : () -> Int = { do { _ = try c2()  } catch _ { var x = 0 } ; return 0 } // expected-warning {{initialization of variable 'x' was never used; consider replacing with assignment to '_' or removing it}}
 var c9 : () -> Int = { do { try c2()  } catch Exception.A { var x = 0 } ; return 0 }// expected-error{{invalid conversion from throwing function of type '() throws -> _' to non-throwing function type '() -> Int'}}
 var c10 : () -> Int = { throw Exception.A; return 0 } // expected-error{{invalid conversion from throwing function of type '() throws -> _' to non-throwing function type '() -> Int'}}
 var c11 : () -> Int = { try! c2() }
@@ -130,6 +130,9 @@ struct A {
 
 func fi1() throws {
     A(doomed: ()) // expected-error {{call can throw but is not marked with 'try'}} // expected-warning{{unused}}
+    // expected-note@-1 {{did you mean to use 'try'?}} {{5-5=try }}
+    // expected-note@-2 {{did you mean to handle error as optional value?}} {{5-5=try? }}
+    // expected-note@-3 {{did you mean to disable error propagation?}} {{5-5=try! }}
 }
 
 struct B {
@@ -138,3 +141,15 @@ struct B {
 }
 
 B(foo: 0) // expected-warning{{unused}}
+
+// rdar://problem/33040113 - Provide fix-it for missing "try" when calling throwing Swift function
+
+class E_33040113 : Error {}
+func rdar33040113() throws -> Int {
+    throw E_33040113()
+}
+
+let _ = rdar33040113() // expected-error {{call can throw but is not marked with 'try'}}
+// expected-note@-1 {{did you mean to use 'try'?}} {{9-9=try }}
+// expected-note@-2 {{did you mean to handle error as optional value?}} {{9-9=try? }}
+// expected-note@-3 {{did you mean to disable error propagation?}} {{9-9=try! }}

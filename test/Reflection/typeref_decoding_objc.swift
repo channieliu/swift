@@ -1,7 +1,10 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift %S/Inputs/ObjectiveCTypes.swift -parse-as-library -emit-module -emit-library -module-name TypesToReflect -o %t/libTypesToReflect.%target-dylib-extension
 // RUN: %target-swift-reflection-dump -binary-filename %t/libTypesToReflect.%target-dylib-extension | %FileCheck %s --check-prefix=CHECK-%target-ptrsize --check-prefix=CHECK
 // REQUIRES: objc_interop
+
+// Disable asan builds until we build swift-reflection-dump and the reflection library with the same compile: rdar://problem/30406870
+// REQUIRES: no_asan
 
 // CHECK: FIELDS:
 // CHECK: =======

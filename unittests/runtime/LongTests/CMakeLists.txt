@@ -16,6 +16,10 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
 #      ${FOUNDATION_LIBRARY}
 #      swiftStdlibUnittest${SWIFT_PRIMARY_VARIANT_SUFFIX}
 #      )
+  elseif(SWIFT_HOST_VARIANT STREQUAL "linux")
+    list(APPEND PLATFORM_TARGET_LINK_LIBRARIES
+      "atomic"
+      )
   elseif(SWIFT_HOST_VARIANT STREQUAL "freebsd")
     find_library(EXECINFO_LIBRARY execinfo)
     list(APPEND PLATFORM_TARGET_LINK_LIBRARIES
@@ -38,6 +42,7 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
   target_link_libraries(SwiftRuntimeLongTests
     swiftCore${SWIFT_PRIMARY_VARIANT_SUFFIX}
     ${PLATFORM_TARGET_LINK_LIBRARIES}
+    ${swift_runtime_test_extra_libraries}
     )
 endif()
 

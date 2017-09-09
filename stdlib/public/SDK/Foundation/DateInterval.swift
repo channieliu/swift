@@ -2,19 +2,20 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported import Foundation // Clang module
+import _SwiftCoreFoundationOverlayShims
 
 /// DateInterval represents a closed date interval in the form of [startDate, endDate].  It is possible for the start and end dates to be the same with a duration of 0.  DateInterval does not support reverse intervals i.e. intervals where the duration is less than 0 and the end date occurs earlier in time than the start date.
 @available(OSX 10.12, iOS 10.0, watchOS 3.0, tvOS 10.0, *)
-public struct DateInterval : ReferenceConvertible, Comparable, Hashable {
+public struct DateInterval : ReferenceConvertible, Comparable, Hashable, Codable {
     public typealias ReferenceType = NSDateInterval
     
     /// The start date.
@@ -157,7 +158,9 @@ public struct DateInterval : ReferenceConvertible, Comparable, Hashable {
     public var hashValue: Int {
         var buf: (UInt, UInt) = (UInt(start.timeIntervalSinceReferenceDate), UInt(end.timeIntervalSinceReferenceDate))
         return withUnsafeMutablePointer(to: &buf) {
-            return Int(bitPattern: CFHashBytes(unsafeBitCast($0, to: UnsafeMutablePointer<UInt8>.self), CFIndex(MemoryLayout<UInt>.size * 2)))
+            $0.withMemoryRebound(to: UInt8.self, capacity: 2 * MemoryLayout<UInt>.size / MemoryLayout<UInt8>.size) {
+                return Int(bitPattern: CFHashBytes($0, CFIndex(MemoryLayout<UInt>.size * 2)))
+            }
         }
     }
     

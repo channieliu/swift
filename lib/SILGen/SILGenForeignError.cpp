@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -32,7 +32,7 @@ namespace {
                                  CanType bridgedError) const = 0;
     virtual void emitRelease(SILGenFunction &gen, SILLocation loc) const = 0;
   };
-}
+} // end anonymous namespace
 
 /// Emit a store of a native error to the foreign-error slot.
 static void emitStoreToForeignErrorSlot(SILGenFunction &gen,
@@ -57,7 +57,8 @@ static void emitStoreToForeignErrorSlot(SILGenFunction &gen,
 
     // If we have the slot, emit a store to it.
     gen.B.emitBlock(hasSlotBB);
-    SILValue slot = hasSlotBB->createBBArg(errorPtrObjectTy);
+    SILValue slot = hasSlotBB->createPHIArgument(errorPtrObjectTy,
+                                                 ValueOwnershipKind::Owned);
     emitStoreToForeignErrorSlot(gen, loc, slot, errorSrc);
     gen.B.createBranch(loc, contBB);
 
@@ -81,7 +82,7 @@ static void emitStoreToForeignErrorSlot(SILGenFunction &gen,
     CanType(bridgedErrorPtrType->getAnyPointerElementType(ptrKind));
 
   FullExpr scope(gen.Cleanups, CleanupLocation::get(loc));
-  WritebackScope writebacks(gen);
+  FormalEvaluationScope writebacks(gen);
 
   // Convert the error to a bridged form.
   SILValue bridgedError = errorSrc.emitBridged(gen, loc, bridgedErrorProto);
@@ -99,6 +100,7 @@ static void emitStoreToForeignErrorSlot(SILGenFunction &gen,
   LValue lvalue =
     gen.emitPropertyLValue(loc, ManagedValue::forUnmanaged(foreignErrorSlot),
                            bridgedErrorPtrType, pointeeProperty,
+                           LValueOptions(),
                            AccessKind::Write,
                            AccessSemantics::Ordinary);
   RValue rvalue(gen, loc, bridgedErrorProto,
@@ -130,24 +132,13 @@ namespace {
 
     SILValue emitBridged(SILGenFunction &gen, SILLocation loc,
                          CanType bridgedErrorProto) const override {
-      bool errorShouldBeOptional = false;
-      CanType bridgedErrorObjectType = bridgedErrorProto;
-      if (auto objectType = bridgedErrorProto.getAnyOptionalObjectType()) {
-        bridgedErrorObjectType = objectType;
-        errorShouldBeOptional = true;
-      }
+      auto nativeErrorType = NativeError->getType().getSwiftRValueType();
+      assert(nativeErrorType == gen.SGM.getASTContext().getExceptionType());
 
       SILValue bridgedError = gen.emitNativeToBridgedError(loc,
                                 gen.emitManagedRValueWithCleanup(NativeError),
-                                bridgedErrorObjectType).forward(gen);
-
-      // Inject into an optional if necessary.
-      if (errorShouldBeOptional) {
-        bridgedError =
-          gen.B.createOptionalSome(loc, bridgedError,
-                                   gen.getLoweredType(bridgedErrorProto));
-      }
-
+                                nativeErrorType,
+                                bridgedErrorProto).forward(gen);
       return bridgedError;
     }
 
@@ -168,7 +159,7 @@ namespace {
     void emitRelease(SILGenFunction &gen, SILLocation loc) const override {
     }
   };
-}
+} // end anonymous namespace
 
 /// Given that we are throwing a native error, turn it into a bridged
 /// error, dispose of it in the correct way, and create the appropriate
@@ -206,7 +197,8 @@ emitBridgeErrorForForeignError(SILLocation loc,
 SILValue SILGenFunction::
 emitBridgeReturnValueForForeignError(SILLocation loc,
                                      SILValue result,
-                                     SILFunctionTypeRepresentation repr,
+                                     CanType formalNativeType,
+                                     CanType formalBridgedType,
                                      SILType bridgedType,
                                      SILValue foreignErrorSlot,
                                const ForeignErrorConvention &foreignError) {
@@ -229,11 +221,10 @@ emitBridgeReturnValueForForeignError(SILLocation loc,
 
   // If an error is signalled by a nil result, inject a non-nil result.
   case ForeignErrorConvention::NilResult: {
-    auto bridgedObjectType =
-      bridgedType.getSwiftRValueType().getAnyOptionalObjectType();
     ManagedValue bridgedResult =
       emitNativeToBridgedValue(loc, emitManagedRValueWithCleanup(result),
-                               repr, bridgedObjectType);
+                               formalNativeType, formalBridgedType,
+                               bridgedType.getAnyOptionalObjectType());
 
     auto someResult =
       B.createOptionalSome(loc, bridgedResult.forward(*this), bridgedType);
@@ -249,7 +240,8 @@ emitBridgeReturnValueForForeignError(SILLocation loc,
     // The actual result value just needs to be bridged normally.
     ManagedValue bridgedValue =
       emitNativeToBridgedValue(loc, emitManagedRValueWithCleanup(result),
-                               repr, bridgedType.getSwiftRValueType());
+                               formalNativeType, formalBridgedType,
+                               bridgedType);
     return bridgedValue.forward(*this);
   }
   }
@@ -260,7 +252,7 @@ emitBridgeReturnValueForForeignError(SILLocation loc,
 /// which loads from the error slot and jumps to the error slot.
 void SILGenFunction::emitForeignErrorBlock(SILLocation loc,
                                            SILBasicBlock *errorBB,
-                                           ManagedValue errorSlot) {
+                                           Optional<ManagedValue> errorSlot) {
   SavedInsertionPoint savedIP(*this, errorBB, FunctionSection::Postmatter);
 
   // Load the error (taking responsibility for it).  In theory, this
@@ -268,8 +260,17 @@ void SILGenFunction::emitForeignErrorBlock(SILLocation loc,
   // conditionally claiming the value.  In practice, claiming it
   // unconditionally is fine because we want to assume it's nil in the
   // other path.
-  SILValue errorV = B.createLoad(loc, errorSlot.forward(*this),
-                                 LoadOwnershipQualifier::Unqualified);
+  SILValue errorV;
+  if (errorSlot.hasValue()) {
+    errorV = B.emitLoadValueOperation(loc, errorSlot.getValue().forward(*this),
+                                      LoadOwnershipQualifier::Take);
+  } else {
+    // If we are not provided with an errorSlot value, then we are passed the
+    // unwrapped optional error as the argument of the errorBB. This value is
+    // passed at +1 meaning that we still need to create a cleanup for errorV.
+    errorV = errorBB->getArgument(0);
+  }
+
   ManagedValue error = emitManagedRValueWithCleanup(errorV);
 
   // Turn the error into an Error value.
@@ -374,7 +375,8 @@ emitResultIsNilErrorCheck(SILGenFunction &gen, SILLocation loc,
   // In the continuation block, take ownership of the now non-optional
   // result value.
   gen.B.emitBlock(contBB);
-  SILValue objectResult = contBB->createBBArg(resultObjectType);
+  SILValue objectResult =
+      contBB->createPHIArgument(resultObjectType, ValueOwnershipKind::Owned);
   return gen.emitManagedRValueWithCleanup(objectResult);
 }
 
@@ -385,20 +387,25 @@ emitErrorIsNonNilErrorCheck(SILGenFunction &gen, SILLocation loc,
   // If we're suppressing the check, just don't check.
   if (suppressErrorCheck) return;
 
-  SILValue optionalError = gen.B.createLoad(
-      loc, errorSlot.getValue(), LoadOwnershipQualifier::Unqualified);
+  SILValue optionalError = gen.B.emitLoadValueOperation(
+      loc, errorSlot.forward(gen), LoadOwnershipQualifier::Take);
 
   ASTContext &ctx = gen.getASTContext();
 
   // Switch on the optional error.
   SILBasicBlock *errorBB = gen.createBasicBlock(FunctionSection::Postmatter);
+  errorBB->createPHIArgument(optionalError->getType().unwrapAnyOptionalType(),
+                             ValueOwnershipKind::Owned);
   SILBasicBlock *contBB = gen.createBasicBlock();
   gen.B.createSwitchEnum(loc, optionalError, /*default*/ nullptr,
                          { { ctx.getOptionalSomeDecl(), errorBB },
                            { ctx.getOptionalNoneDecl(), contBB } });
 
-  // Emit the error block.  Just be lazy and reload the error there.
-  gen.emitForeignErrorBlock(loc, errorBB, errorSlot);
+  // Emit the error block. Pass in none for the errorSlot since we have passed
+  // in the errorSlot as our BB argument so we can pass ownership correctly. In
+  // emitForeignErrorBlock, we will create the appropriate cleanup for the
+  // argument.
+  gen.emitForeignErrorBlock(loc, errorBB, None);
 
   // Return the result.
   gen.B.emitBlock(contBB);

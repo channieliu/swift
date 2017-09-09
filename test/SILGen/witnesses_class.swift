@@ -9,26 +9,29 @@ protocol Fooable: class {
 class Foo: Fooable {
   
   func foo() { }
-  // CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWC15witnesses_class3FooS_7FooableS_FS1_3foo
+  // CHECK-LABEL: sil private [transparent] [thunk] @_T015witnesses_class3FooCAA7FooableA2aDP3foo{{[_0-9a-zA-Z]*}}FTW
   // CHECK-NOT:     function_ref
   // CHECK:         class_method
 
   class func bar() {}
-  // CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWC15witnesses_class3FooS_7FooableS_ZFS1_3bar
+  // CHECK-LABEL: sil private [transparent] [thunk] @_T015witnesses_class3FooCAA7FooableA2aDP3bar{{[_0-9a-zA-Z]*}}FZTW
   // CHECK-NOT:     function_ref
   // CHECK:         class_method
 
   required init() {}
-  // CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWC15witnesses_class3FooS_7FooableS_FS1_C
+  // CHECK-LABEL: sil private [transparent] [thunk] @_T015witnesses_class3FooCAA7FooableA2aDP{{[_0-9a-zA-Z]*}}fCTW
   // CHECK-NOT:     function_ref
   // CHECK:         class_method
 }
 
-// CHECK-LABEL: sil hidden @_TF15witnesses_class3gen
+// CHECK-LABEL: sil hidden @_T015witnesses_class3gen{{[_0-9a-zA-Z]*}}F
 // CHECK:         bb0([[SELF:%.*]] : $T)
 // CHECK:         [[METHOD:%.*]] = witness_method $T
 // CHECK-NOT:     copy_value [[SELF]]
-// CHECK:         apply [[METHOD]]<T>([[SELF]])
+// CHECK:         [[BORROWED_SELF:%.*]] = begin_borrow [[SELF]]
+// CHECK-NOT:     copy_value [[SELF]]
+// CHECK:         apply [[METHOD]]<T>([[BORROWED_SELF]])
+// CHECK:         end_borrow [[BORROWED_SELF]] from [[SELF]]
 // CHECK:         destroy_value [[SELF]]
 // CHECK-NOT:         destroy_value [[SELF]]
 // CHECK:         return
@@ -36,12 +39,14 @@ func gen<T: Fooable>(_ foo: T) {
   foo.foo()
 }
 
-// CHECK-LABEL: sil hidden @_TF15witnesses_class2exFPS_7Fooable_T_
+// CHECK-LABEL: sil hidden @_T015witnesses_class2exyAA7Fooable_pF
 // CHECK: bb0([[SELF:%[0-0]+]] : $Fooable):
-// CHECK:         [[SELF_PROJ:%.*]] = open_existential_ref [[SELF]]
+// CHECK:         [[BORROWED_SELF:%.*]] = begin_borrow [[SELF]]
+// CHECK:         [[SELF_PROJ:%.*]] = open_existential_ref [[BORROWED_SELF]]
 // CHECK:         [[METHOD:%.*]] = witness_method $[[OPENED:@opened(.*) Fooable]],
 // CHECK-NOT:     copy_value [[SELF_PROJ]] : $
 // CHECK:         apply [[METHOD]]<[[OPENED]]>([[SELF_PROJ]])
+// CHECK:         end_borrow [[BORROWED_SELF]] from [[SELF]]
 // CHECK:         destroy_value [[SELF]]
 // CHECK-NOT:     destroy_value [[SELF]]
 // CHECK:         return

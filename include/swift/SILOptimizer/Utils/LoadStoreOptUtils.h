@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -169,10 +169,12 @@ public:
   }
 
   /// Print the LSBase.
-  virtual void print(SILModule *Mod) { 
-    llvm::outs() << Base;
-    Path.getValue().print(llvm::outs(), *Mod);
+  virtual void print(llvm::raw_ostream &os, SILModule *Mod) { 
+    os << Base;
+    Path.getValue().print(os, *Mod);
   }
+
+  virtual void dump(SILModule *Mod) { print(llvm::dbgs(), Mod); }
 };
 
 static inline llvm::hash_code hash_value(const LSBase &S) {
@@ -255,12 +257,12 @@ public:
     return Path.getValue().createExtract(Base, Inst, true);
   }
 
-  void print(SILModule *Mod) {
+  void print(llvm::raw_ostream &os, SILModule *Mod) {
     if (CoveringValue) {
-      llvm::outs() << "Covering Value";
+      os << "Covering Value";
       return;
     }
-    LSBase::print(Mod);
+    LSBase::print(os, Mod);
   }
 
   /// Expand this SILValue to all individual fields it contains.

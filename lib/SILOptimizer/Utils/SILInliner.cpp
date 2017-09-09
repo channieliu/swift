@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -71,10 +71,10 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
     // Performance inlining. Construct a proper inline scope pointing
     // back to the call site.
     CallSiteScope = new (F.getModule())
-      SILDebugScope(AI.getLoc(), &F, AIScope);
-    assert(CallSiteScope->getParentFunction() == &F);
+        SILDebugScope(AI.getLoc(), nullptr, AIScope, AIScope->InlinedCallSite);
   }
   assert(CallSiteScope && "call site has no scope");
+  assert(CallSiteScope->getParentFunction() == &F);
 
   // Increment the ref count for the inlined function, so it doesn't
   // get deleted before we can emit abstract debug info for it.
@@ -89,9 +89,9 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
   // Clear argument map and map ApplyInst arguments to the arguments of the
   // callee's entry block.
   ValueMap.clear();
-  assert(CalleeEntryBB->bbarg_size() == Args.size() &&
+  assert(CalleeEntryBB->args_size() == Args.size() &&
          "Unexpected number of arguments to entry block of function?");
-  auto BAI = CalleeEntryBB->bbarg_begin();
+  auto BAI = CalleeEntryBB->args_begin();
   for (auto AI = Args.begin(), AE = Args.end(); AI != AE; ++AI, ++BAI)
     ValueMap.insert(std::make_pair(*BAI, *AI));
 
@@ -109,7 +109,7 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
   // If we're inlining into a normal apply and the callee's entry
   // block ends in a return, then we can avoid a split.
   if (auto nonTryAI = dyn_cast<ApplyInst>(AI)) {
-    if (ReturnInst *RI = dyn_cast<ReturnInst>(CalleeEntryBB->getTerminator())) {
+    if (auto *RI = dyn_cast<ReturnInst>(CalleeEntryBB->getTerminator())) {
       // Replace all uses of the apply instruction with the operands of the
       // return instruction, appropriately mapped.
       nonTryAI->replaceAllUsesWith(remapValue(RI->getOperand()));
@@ -127,7 +127,7 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
     SILBasicBlock *CallerBB = AI.getParent();
     // Split the BB and do NOT create a branch between the old and new
     // BBs; we will create the appropriate terminator manually later.
-    ReturnToBB = CallerBB->splitBasicBlock(InsertPoint);
+    ReturnToBB = CallerBB->split(InsertPoint);
     // Place the return-to BB after all the other mapped BBs.
     if (InsertBeforeBB)
       F.getBlocks().splice(SILFunction::iterator(InsertBeforeBB), F.getBlocks(),
@@ -137,8 +137,8 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
                            SILFunction::iterator(ReturnToBB));
 
     // Create an argument on the return-to BB representing the returned value.
-    auto *RetArg = new (F.getModule()) SILArgument(ReturnToBB,
-                                            AI.getInstruction()->getType());
+    auto *RetArg = ReturnToBB->createPHIArgument(AI.getInstruction()->getType(),
+                                                 ValueOwnershipKind::Owned);
     // Replace all uses of the ApplyInst with the new argument.
     AI.getInstruction()->replaceAllUsesWith(RetArg);
   }
@@ -149,7 +149,7 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
 
     // Modify return terminators to branch to the return-to BB, rather than
     // trying to clone the ReturnInst.
-    if (ReturnInst *RI = dyn_cast<ReturnInst>(BI->first->getTerminator())) {
+    if (auto *RI = dyn_cast<ReturnInst>(BI->first->getTerminator())) {
       auto thrownValue = remapValue(RI->getOperand());
       getBuilder().createBranch(Loc.getValue(), ReturnToBB,
                                 thrownValue);
@@ -158,7 +158,7 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
 
     // Modify throw terminators to branch to the error-return BB, rather than
     // trying to clone the ThrowInst.
-    if (ThrowInst *TI = dyn_cast<ThrowInst>(BI->first->getTerminator())) {
+    if (auto *TI = dyn_cast<ThrowInst>(BI->first->getTerminator())) {
       if (auto *A = dyn_cast<ApplyInst>(AI)) {
         (void)A;
         assert(A->isNonThrowing() &&
@@ -198,23 +198,38 @@ void SILInliner::visitDebugValueAddrInst(DebugValueAddrInst *Inst) {
 
 const SILDebugScope *
 SILInliner::getOrCreateInlineScope(const SILDebugScope *CalleeScope) {
-  assert(CalleeScope);
+  if (!CalleeScope)
+    return CallSiteScope;
   auto it = InlinedScopeCache.find(CalleeScope);
   if (it != InlinedScopeCache.end())
     return it->second;
 
-  auto InlineScope = new (getBuilder().getFunction().getModule())
-      SILDebugScope(CallSiteScope, CalleeScope);
-  assert(CallSiteScope->Parent == InlineScope->InlinedCallSite->Parent);
-
-  InlinedScopeCache.insert({CalleeScope, InlineScope});
-  return InlineScope;
+  auto &M = getBuilder().getFunction().getModule();
+  auto InlinedAt =
+      getOrCreateInlineScope(CalleeScope->InlinedCallSite);
+  auto *InlinedScope = new (M) SILDebugScope(
+      CalleeScope->Loc, CalleeScope->Parent.dyn_cast<SILFunction *>(),
+      CalleeScope->Parent.dyn_cast<const SILDebugScope *>(), InlinedAt);
+  InlinedScopeCache.insert({CalleeScope, InlinedScope});
+  return InlinedScope;
 }
-
 
 //===----------------------------------------------------------------------===//
 //                                 Cost Model
 //===----------------------------------------------------------------------===//
+
+static InlineCost getEnforcementCost(SILAccessEnforcement enforcement) {
+  switch (enforcement) {
+  case SILAccessEnforcement::Unknown:
+    llvm_unreachable("evaluating cost of access with unknown enforcement?");
+  case SILAccessEnforcement::Dynamic:
+    return InlineCost::Expensive;
+  case SILAccessEnforcement::Static:
+  case SILAccessEnforcement::Unsafe:
+    return InlineCost::Free;
+  }
+  llvm_unreachable("bad enforcement");
+}
 
 /// For now just assume that every SIL instruction is one to one with an LLVM
 /// instruction. This is of course very much so not true.
@@ -225,12 +240,17 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::DebugValueInst:
     case ValueKind::DebugValueAddrInst:
     case ValueKind::StringLiteralInst:
+    case ValueKind::ConstStringLiteralInst:
     case ValueKind::FixLifetimeInst:
     case ValueKind::EndBorrowInst:
+    case ValueKind::EndBorrowArgumentInst:
+    case ValueKind::BeginBorrowInst:
     case ValueKind::MarkDependenceInst:
     case ValueKind::FunctionRefInst:
     case ValueKind::AllocGlobalInst:
     case ValueKind::GlobalAddrInst:
+    case ValueKind::EndLifetimeInst:
+    case ValueKind::UncheckedOwnershipConversionInst:
       return InlineCost::Free;
 
     // Typed GEPs are free.
@@ -268,6 +288,19 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
 
     case ValueKind::BridgeObjectToWordInst:
       return InlineCost::Free;
+
+    // Access instructions are free unless we're dynamically enforcing them.
+    case ValueKind::BeginAccessInst:
+      return getEnforcementCost(cast<BeginAccessInst>(I).getEnforcement());
+    case ValueKind::EndAccessInst:
+      return getEnforcementCost(cast<EndAccessInst>(I).getBeginAccess()
+                                                     ->getEnforcement());
+    case ValueKind::BeginUnpairedAccessInst:
+      return getEnforcementCost(cast<BeginUnpairedAccessInst>(I)
+                                  .getEnforcement());
+    case ValueKind::EndUnpairedAccessInst:
+      return getEnforcementCost(cast<EndUnpairedAccessInst>(I)
+                                  .getEnforcement());
 
     // TODO: These are free if the metatype is for a Swift class.
     case ValueKind::ThickToObjCMetatypeInst:
@@ -318,6 +351,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::AssignInst:
     case ValueKind::BranchInst:
     case ValueKind::CheckedCastBranchInst:
+    case ValueKind::CheckedCastValueBranchInst:
     case ValueKind::CheckedCastAddrBranchInst:
     case ValueKind::ClassMethodInst:
     case ValueKind::CondBranchInst:
@@ -325,7 +359,10 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::CopyBlockInst:
     case ValueKind::CopyAddrInst:
     case ValueKind::RetainValueInst:
+    case ValueKind::RetainValueAddrInst:
+    case ValueKind::UnmanagedRetainValueInst:
     case ValueKind::CopyValueInst:
+    case ValueKind::CopyUnownedValueInst:
     case ValueKind::DeallocBoxInst:
     case ValueKind::DeallocExistentialBoxInst:
     case ValueKind::DeallocRefInst:
@@ -333,13 +370,17 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::DeallocStackInst:
     case ValueKind::DeallocValueBufferInst:
     case ValueKind::DeinitExistentialAddrInst:
+    case ValueKind::DeinitExistentialValueInst:
     case ValueKind::DestroyAddrInst:
     case ValueKind::ProjectValueBufferInst:
     case ValueKind::ProjectBoxInst:
     case ValueKind::ProjectExistentialBoxInst:
     case ValueKind::ReleaseValueInst:
+    case ValueKind::ReleaseValueAddrInst:
+    case ValueKind::UnmanagedReleaseValueInst:
     case ValueKind::DestroyValueInst:
     case ValueKind::AutoreleaseValueInst:
+    case ValueKind::UnmanagedAutoreleaseValueInst:
     case ValueKind::DynamicMethodBranchInst:
     case ValueKind::DynamicMethodInst:
     case ValueKind::EnumInst:
@@ -348,6 +389,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::IndexRawPointerInst:
     case ValueKind::InitEnumDataAddrInst:
     case ValueKind::InitExistentialAddrInst:
+    case ValueKind::InitExistentialValueInst:
     case ValueKind::InitExistentialMetatypeInst:
     case ValueKind::InitExistentialRefInst:
     case ValueKind::InjectEnumAddrInst:
@@ -358,8 +400,10 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::LoadWeakInst:
     case ValueKind::OpenExistentialAddrInst:
     case ValueKind::OpenExistentialBoxInst:
+    case ValueKind::OpenExistentialBoxValueInst:
     case ValueKind::OpenExistentialMetatypeInst:
     case ValueKind::OpenExistentialRefInst:
+    case ValueKind::OpenExistentialValueInst:
     case ValueKind::PartialApplyInst:
     case ValueKind::ExistentialMetatypeInst:
     case ValueKind::RefElementAddrInst:
@@ -367,6 +411,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::RefToUnmanagedInst:
     case ValueKind::RefToUnownedInst:
     case ValueKind::StoreInst:
+    case ValueKind::StoreBorrowInst:
     case ValueKind::StoreUnownedInst:
     case ValueKind::StoreWeakInst:
     case ValueKind::StrongPinInst:
@@ -383,6 +428,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::UncheckedTakeEnumDataAddrInst:
     case ValueKind::UnconditionalCheckedCastInst:
     case ValueKind::UnconditionalCheckedCastAddrInst:
+    case ValueKind::UnconditionalCheckedCastValueInst:
     case ValueKind::UnmanagedToRefInst:
     case ValueKind::UnownedReleaseInst:
     case ValueKind::UnownedRetainInst:
@@ -393,6 +439,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::SelectEnumAddrInst:
     case ValueKind::SelectEnumInst:
     case ValueKind::SelectValueInst:
+    case ValueKind::KeyPathInst:
       return InlineCost::Expensive;
 
     case ValueKind::BuiltinInst: {
@@ -405,7 +452,8 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
 
       return InlineCost::Expensive;
     }
-    case ValueKind::SILArgument:
+    case ValueKind::SILPHIArgument:
+    case ValueKind::SILFunctionArgument:
     case ValueKind::SILUndef:
       llvm_unreachable("Only instructions should be passed into this "
                        "function.");
@@ -414,4 +462,6 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
     case ValueKind::MarkUninitializedBehaviorInst:
       llvm_unreachable("not valid in canonical sil");
   }
+
+  llvm_unreachable("Unhandled ValueKind in switch.");
 }

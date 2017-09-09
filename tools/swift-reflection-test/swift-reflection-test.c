@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 // This file supports performing target-specific remote reflection tests
@@ -17,6 +17,7 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
 #include "swift/SwiftRemoteMirror/SwiftRemoteMirror.h"
+#include "swift/Demangling/ManglingMacros.h"
 #include "messages.h"
 #include "overrides.h"
 
@@ -51,6 +52,11 @@ typedef struct RemoteReflectionInfo {
 } RemoteReflectionInfo;
 
 static void errorAndExit(const char *message) {
+  fprintf(stderr, "%s\n", message);
+  abort();
+}
+
+static void errnoAndExit(const char *message) {
   fprintf(stderr, "%s: %s\n", message, strerror(errno));
   abort();
 }
@@ -165,10 +171,13 @@ void PipeMemoryReader_collectBytesFromPipe(const PipeMemoryReader *Reader,
   int ReadFD = PipeMemoryReader_getParentReadFD(Reader);
   while (Size) {
     int bytesRead = read(ReadFD, Dest, Size);
-    if (bytesRead == -EINTR)
-      continue;
-    if (bytesRead <= 0)
-      errorAndExit("collectBytesFromPipe");
+    if (bytesRead < 0)
+      if (errno == EINTR)
+        continue;
+      else
+        errnoAndExit("collectBytesFromPipe");
+    else if (bytesRead == 0)
+      errorAndExit("collectBytesFromPipe: Unexpected end of file");
     Size -= bytesRead;
     Dest += bytesRead;
   }
@@ -232,9 +241,9 @@ static
 PipeMemoryReader createPipeMemoryReader() {
   PipeMemoryReader Reader;
   if (pipe(Reader.to_child))
-    errorAndExit("Couldn't create pipes to child process");
+    errnoAndExit("Couldn't create pipes to child process");
   if (pipe(Reader.from_child))
-    errorAndExit("Couldn't create pipes from child process");
+    errnoAndExit("Couldn't create pipes from child process");
   return Reader;
 }
 
@@ -265,7 +274,7 @@ PipeMemoryReader_receiveReflectionInfo(SwiftReflectionContextRef RC,
   RemoteReflectionInfo *RemoteInfos = calloc(NumReflectionInfos,
                                              sizeof(RemoteReflectionInfo));
   if (RemoteInfos == NULL)
-    errorAndExit("malloc failed");
+    errnoAndExit("malloc failed");
 
   for (size_t i = 0; i < NumReflectionInfos; ++i) {
     RemoteInfos[i] = makeRemoteReflectionInfo(
@@ -385,8 +394,7 @@ int doDumpHeapInstance(const char *BinaryFilename) {
   pid_t pid = _fork();
   switch (pid) {
     case -1:
-      errorAndExit("Couldn't fork child process");
-      exit(EXIT_FAILURE);
+      errnoAndExit("Couldn't fork child process");
     case 0: { // Child:
       close(PipeMemoryReader_getParentWriteFD(&Pipe));
       close(PipeMemoryReader_getParentReadFD(&Pipe));
@@ -421,7 +429,7 @@ int doDumpHeapInstance(const char *BinaryFilename) {
             return EXIT_SUCCESS;
           break;
         case Existential: {
-          static const char Name[] = "_TtP_";
+          static const char Name[] = MANGLING_PREFIX_STR "ypD";
           swift_typeref_t AnyTR
             = swift_reflection_typeRefForMangledTypeName(RC,
               Name, sizeof(Name)-1);
@@ -432,7 +440,7 @@ int doDumpHeapInstance(const char *BinaryFilename) {
           break;
         }
         case ErrorExistential: {
-          static const char ErrorName[] = "_TtPs5Error_";
+          static const char ErrorName[] = MANGLING_PREFIX_STR "s5Error_pD";
           swift_typeref_t ErrorTR
             = swift_reflection_typeRefForMangledTypeName(RC,
               ErrorName, sizeof(ErrorName)-1);

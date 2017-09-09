@@ -2,22 +2,24 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #include <random>
 #include <type_traits>
 #include <cmath>
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 #include <io.h>
 #else
 #include <unistd.h>
 #endif
+#include <pthread.h>
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +39,7 @@ void swift::_swift_stdlib_free(void *ptr) {
 
 SWIFT_RUNTIME_STDLIB_INTERFACE
 int swift::_swift_stdlib_putchar_unlocked(int c) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   return _putc_nolock(c, stdout);
 #else
   return putchar_unlocked(c);
@@ -57,6 +59,11 @@ __swift_size_t swift::_swift_stdlib_strlen(const char *s) {
 }
 
 SWIFT_RUNTIME_STDLIB_INTERFACE
+__swift_size_t swift::_swift_stdlib_strlen_unsigned(const unsigned char *s) {
+  return strlen((char *)s);
+}
+
+SWIFT_RUNTIME_STDLIB_INTERFACE
 int swift::_swift_stdlib_memcmp(const void *s1, const void *s2,
                                 __swift_size_t n) {
   return memcmp(s1, s2, n);
@@ -65,7 +72,7 @@ int swift::_swift_stdlib_memcmp(const void *s1, const void *s2,
 SWIFT_RUNTIME_STDLIB_INTERFACE
 __swift_ssize_t
 swift::_swift_stdlib_read(int fd, void *buf, __swift_size_t nbyte) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   return _read(fd, buf, nbyte);
 #else
   return read(fd, buf, nbyte);
@@ -75,7 +82,7 @@ swift::_swift_stdlib_read(int fd, void *buf, __swift_size_t nbyte) {
 SWIFT_RUNTIME_STDLIB_INTERFACE
 __swift_ssize_t
 swift::_swift_stdlib_write(int fd, const void *buf, __swift_size_t nbyte) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   return _write(fd, buf, nbyte);
 #else
   return write(fd, buf, nbyte);
@@ -84,11 +91,40 @@ swift::_swift_stdlib_write(int fd, const void *buf, __swift_size_t nbyte) {
 
 SWIFT_RUNTIME_STDLIB_INTERFACE
 int swift::_swift_stdlib_close(int fd) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   return _close(fd);
 #else
   return close(fd);
 #endif
+}
+
+// Guard compilation on the typedef for __swift_pthread_key_t in LibcShims.h
+// being identical to the platform's pthread_key_t
+static_assert(std::is_same<__swift_pthread_key_t, pthread_key_t>::value,
+              "This platform's pthread_key_t differs. If you hit this assert, "
+              "fix __swift_pthread_key_t's typedef in LibcShims.h by adding an "
+              "#if guard and definition for your platform");
+
+SWIFT_RUNTIME_STDLIB_INTERFACE
+int swift::_swift_stdlib_pthread_key_create(
+  __swift_pthread_key_t * _Nonnull key,
+  void (* _Nullable destructor)(void *)
+) {
+  return pthread_key_create(key, destructor);
+}
+
+SWIFT_RUNTIME_STDLIB_INTERFACE
+void * _Nullable swift::_swift_stdlib_pthread_getspecific(
+  __swift_pthread_key_t key
+) {
+  return pthread_getspecific(key);
+}
+
+SWIFT_RUNTIME_STDLIB_INTERFACE
+int swift::_swift_stdlib_pthread_setspecific(
+  __swift_pthread_key_t key, const void * _Nullable value
+) {
+  return pthread_setspecific(key, value);
 }
 
 #if defined(__APPLE__)
@@ -103,7 +139,7 @@ SWIFT_RUNTIME_STDLIB_INTERFACE
 size_t swift::_swift_stdlib_malloc_size(const void *ptr) {
   return malloc_usable_size(const_cast<void *>(ptr));
 }
-#elif defined(_MSC_VER)
+#elif defined(_WIN32)
 #include <malloc.h>
 SWIFT_RUNTIME_STDLIB_INTERFACE
 size_t swift::_swift_stdlib_malloc_size(const void *ptr) {
@@ -138,32 +174,3 @@ swift::_swift_stdlib_cxx11_mt19937_uniform(__swift_uint32_t upper_bound) {
   std::uniform_int_distribution<__swift_uint32_t> RandomUniform(0, upper_bound);
   return RandomUniform(getGlobalMT19937());
 }
-
-SWIFT_RUNTIME_STDLIB_INTERFACE
-float swift::_swift_stdlib_remainderf(float dividend, float divisor) {
-  return std::remainder(dividend, divisor);
-}
-
-SWIFT_RUNTIME_STDLIB_INTERFACE
-float swift::_swift_stdlib_squareRootf(float x) { return std::sqrt(x); }
-
-SWIFT_RUNTIME_STDLIB_INTERFACE
-double swift::_swift_stdlib_remainder(double dividend, double divisor) {
-  return std::remainder(dividend, divisor);
-}
-
-SWIFT_RUNTIME_STDLIB_INTERFACE
-double swift::_swift_stdlib_squareRoot(double x) { return std::sqrt(x); }
-
-#if (defined __i386__ || defined __x86_64__) && !defined _MSC_VER
-SWIFT_RUNTIME_STDLIB_INTERFACE
-void swift::_swift_stdlib_remainderl(void *_self, const void *_other) {
-  *(long double *)_self = std::remainder(*(long double *)_self,
-                                         *(const long double *)_other);
-}
-
-SWIFT_RUNTIME_STDLIB_INTERFACE
-void swift::_swift_stdlib_squareRootl(void *_self) {
-  *(long double *)_self = std::sqrt(*(long double *)_self);
-}
-#endif // Have Float80

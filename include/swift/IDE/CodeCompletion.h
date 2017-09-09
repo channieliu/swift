@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,7 +18,6 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/Support/TimeValue.h"
 #include "llvm/Support/TrailingObjects.h"
 #include <functional>
 #include <memory>
@@ -63,7 +62,7 @@ class CodeCompletionStringChunk {
 
 public:
   enum class ChunkKind {
-    /// "public", "internal", "fileprivate", or "private".
+    /// "open", "public", "internal", "fileprivate", or "private".
     AccessControlKeyword,
 
     /// such as @"availability".
@@ -474,7 +473,7 @@ enum class CodeCompletionKeywordKind {
   None,
 #define KEYWORD(X) kw_##X,
 #define POUND_KEYWORD(X) pound_##X,
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
 };
 
 enum class CompletionKind {
@@ -502,8 +501,10 @@ enum class CompletionKind {
   AssignmentRHS,
   CallArg,
   ReturnStmtExpr,
+  ForEachSequence,
   AfterPound,
   GenericParams,
+  SwiftKeyPath,
 };
 
 /// \brief A single code completion result.
@@ -799,6 +800,10 @@ public:
   CodeCompletionCache &Cache;
   CompletionKind CodeCompletionKind = CompletionKind::None;
   bool HasExpectedTypeRelation = false;
+
+  /// Whether there may be members that can use implicit member syntax,
+  /// e.g. `x = .foo`.
+  bool MayUseImplicitMemberExpr = false;
 
   CodeCompletionContext(CodeCompletionCache &Cache)
       : Cache(Cache) {}

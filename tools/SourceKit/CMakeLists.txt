@@ -22,7 +22,7 @@ set(SOURCEKIT_DEPLOYMENT_TARGET "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_DEPLOYMEN
 
 swift_is_installing_component(sourcekit-inproc SOURCEKIT_INSTALLING_INPROC)
 
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin" AND NOT CMAKE_CROSSCOMPILING)
   set(CMAKE_OSX_SYSROOT "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_PATH}")
   set(CMAKE_OSX_ARCHITECTURES "${SWIFT_HOST_VARIANT_ARCH}")
   set(CMAKE_OSX_DEPLOYMENT_TARGET "")
@@ -115,7 +115,8 @@ endfunction()
 #
 # Usage:
 #   add_sourcekit_library(name       # Name of the library
-#     [DEPENDS dep1 ...]             # Libraries this library depends on
+#     [DEPENDS dep1 ...]             # Libraries this library will be linked with
+#     [TARGET_DEPENDS dep1 ...]      # Targets this library depends on
 #     [LLVM_COMPONENT_DEPENDS comp1 ...]  # LLVM components this library depends on
 #     [INSTALL_IN_COMPONENT comp]    # The Swift installation component that this library belongs to.
 #     [SHARED]
@@ -124,7 +125,7 @@ macro(add_sourcekit_library name)
   cmake_parse_arguments(SOURCEKITLIB
       "SHARED"
       "INSTALL_IN_COMPONENT"
-      "DEPENDS;LLVM_COMPONENT_DEPENDS"
+      "DEPENDS;TARGET_DEPENDS;LLVM_COMPONENT_DEPENDS"
       ${ARGN})
   set(srcs ${SOURCEKITLIB_UNPARSED_ARGUMENTS})
 
@@ -169,13 +170,14 @@ macro(add_sourcekit_library name)
     add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
   endif(LLVM_COMMON_DEPENDS)
 
+  if(SOURCEKITLIB_TARGET_DEPENDS)
+    add_dependencies(${name} ${SOURCEKITLIB_TARGET_DEPENDS})
+  endif(SOURCEKITLIB_TARGET_DEPENDS)
+
   set(prefixed_link_libraries)
   foreach(dep ${SOURCEKITLIB_DEPENDS})
     if("${dep}" MATCHES "^clang")
       set(dep "${LLVM_LIBRARY_OUTPUT_INTDIR}/lib${dep}.a")
-    endif()
-    if("${dep}" STREQUAL "cmark")
-      set(dep "${CMARK_LIBRARY_DIR}/lib${dep}.a")
     endif()
     list(APPEND prefixed_link_libraries "${dep}")
   endforeach()
@@ -197,6 +199,13 @@ macro(add_sourcekit_library name)
     if(SOURCEKITLIB_SHARED)
       set_target_properties(${name} PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
       set_target_properties(${name} PROPERTIES INSTALL_NAME_DIR "@rpath")
+    endif()
+  endif()
+
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+    if(SOURCEKITLIB_SHARED)
+      set_target_properties(${name} PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+      set_target_properties(${name} PROPERTIES INSTALL_RPATH "$ORIGIN/../lib/swift/linux:/usr/lib/swift/linux")
     endif()
   endif()
 
@@ -508,6 +517,24 @@ include_directories(BEFORE
 )
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+  if(SWIFT_BUILD_SOURCEKIT)
+    add_custom_command(
+      OUTPUT "${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/.libs/libdispatch.so"
+      COMMAND autoreconf -fvi
+      COMMAND /usr/bin/env "CC=${PATH_TO_CLANG_BUILD}/bin/clang" "CXX=${PATH_TO_CLANG_BUILD}/bin/clang++" "OBJC=${PATH_TO_CLANG_BUILD}/bin/clang" ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE}/configure --prefix="${CMAKE_INSTALL_PREFIX}"
+      COMMAND /usr/bin/make
+      COMMAND /bin/mkdir -p ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/.libs/
+      COMMAND /bin/cp ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE}/src/.libs/libdispatch.so ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/.libs/libdispatch.so
+      COMMAND /usr/bin/make distclean
+      WORKING_DIRECTORY ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE}
+      COMMENT "Generating libdispatch.so"
+      USES_TERMINAL
+    )
+    add_custom_target(needs-libdispatch
+      DEPENDS "${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/.libs/libdispatch.so"
+    )
+  endif()
+
   include_directories(AFTER ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE})
 
   add_library(dispatch SHARED IMPORTED)

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse -verify %s
+// RUN: %target-swift-frontend -typecheck -verify %s
 
 // REQUIRES: objc_interop
 
@@ -194,7 +194,8 @@ let d: Double = 3.14159
 inferDouble = d
 
 // rdar://problem/17962491
-var inferDouble2 = 1 % 3 / 3.0 // expected-error{{'%' is unavailable: Use truncatingRemainder instead}}
+_ = 1 % 3 / 3.0 // expected-error{{'%' is unavailable: Use truncatingRemainder instead}}
+var inferDouble2 = 1 / 3 / 3.0
 let d2: Double = 3.14159
 inferDouble2 = d2
 
@@ -214,8 +215,8 @@ func rdar19551164b(_ s: NSString, _ a: NSArray) {
 }
 
 // rdar://problem/19695671
-func takesSet<T: Hashable>(_ p: Set<T>) {}  // expected-note {{in call to function 'takesSet'}}
-func takesDictionary<K: Hashable, V>(_ p: Dictionary<K, V>) {} // expected-note {{in call to function 'takesDictionary'}}
+func takesSet<T>(_ p: Set<T>) {}  // expected-note {{in call to function 'takesSet'}}
+func takesDictionary<K, V>(_ p: Dictionary<K, V>) {} // expected-note {{in call to function 'takesDictionary'}}
 func takesArray<T>(_ t: Array<T>) {} // expected-note {{in call to function 'takesArray'}}
 func rdar19695671() {
   takesSet(NSSet() as! Set) // expected-error{{generic parameter 'T' could not be inferred}}
@@ -299,9 +300,14 @@ func rdar20029786(_ ns: NSString?) {
 // <rdar://problem/19813772> QoI: Using as! instead of as in this case produces really bad diagnostic
 func rdar19813772(_ nsma: NSMutableArray) {
   var a1 = nsma as! Array // expected-error{{generic parameter 'Element' could not be inferred in cast to 'Array<_>'}} expected-note {{explicitly specify the generic arguments to fix this issue}} {{26-26=<Any>}}
-  // FIXME: The following diagnostic is misleading and should not happen: expected-warning@-1{{cast from 'NSMutableArray' to unrelated type 'Array<_>' always fails}}
   var a2 = nsma as! Array<AnyObject> // expected-warning{{forced cast from 'NSMutableArray' to 'Array<AnyObject>' always succeeds; did you mean to use 'as'?}} {{17-20=as}}
   var a3 = nsma as Array<AnyObject>
+}
+
+func rdar28856049(_ nsma: NSMutableArray) {
+  _ = nsma as? [BridgedClass]
+  _ = nsma as? [BridgedStruct]
+  _ = nsma as? [BridgedClassSub]
 }
 
 

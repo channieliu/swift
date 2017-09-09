@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 #if swift(>=1.0)
   let w = 1
@@ -44,7 +44,14 @@
 #endif
 
 #if swift(>=2.2.1)
+  _ = 2.2.1 // expected-error {{expected named member of numeric literal}}
 #endif
+
+class C {
+#if swift(>=2.2.1)
+  let val = 2.2.1 // expected-error {{expected named member of numeric literal}}
+#endif
+}
 
 #if swift(>=2.0, *) // expected-error {{expected only one argument to platform condition}}
 #endif

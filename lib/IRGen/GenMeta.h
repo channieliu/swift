@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -42,6 +42,7 @@ namespace irgen {
   class ConstantReference;
   class Explosion;
   class FieldTypeInfo;
+  class FunctionPointer;
   class GenericTypeRequirements;
   class IRGenFunction;
   class IRGenModule;
@@ -61,9 +62,6 @@ namespace irgen {
   /// Is the given class-like type known to have Swift-compatible
   /// metadata?
   bool hasKnownSwiftMetadata(IRGenModule &IGM, CanType theType);
-
-  /// Is the given method known to be callable by vtable dispatch?
-  bool hasKnownVTableEntry(IRGenModule &IGM, AbstractFunctionDecl *theMethod);
 
   /// Emit the body of a lazy cache access function.
   void emitLazyCacheAccessFunction(IRGenModule &IGM,
@@ -207,6 +205,10 @@ namespace irgen {
                                            SILType objectType,
                                            bool suppressCast = false);
 
+  /// Given a non-tagged object pointer, load a pointer to its class object.
+  llvm::Value *emitLoadOfObjCHeapMetadataRef(IRGenFunction &IGF,
+                                             llvm::Value *object);
+
   /// Given a heap-object instance, with some heap-object type, produce a
   /// reference to its heap metadata by dynamically asking the runtime for it.
   llvm::Value *emitHeapMetadataRefForUnknownHeapObject(IRGenFunction &IGF,
@@ -228,13 +230,16 @@ namespace irgen {
 
   /// Given an instance pointer (or, for a static method, a class
   /// pointer), emit the callee for the given method.
-  llvm::Value *emitVirtualMethodValue(IRGenFunction &IGF,
-                                      llvm::Value *base,
-                                      SILType baseType,
-                                      SILDeclRef method,
-                                      CanSILFunctionType methodType,
-                                      bool useSuperVTable);
+  FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF,
+                                         llvm::Value *base,
+                                         SILType baseType,
+                                         SILDeclRef method,
+                                         CanSILFunctionType methodType,
+                                         bool useSuperVTable);
 
+  /// Get the offset of the given class method within the class's vtables.
+  unsigned getVirtualMethodIndex(IRGenModule &IGM, SILDeclRef method);
+  
   /// \brief Load a reference to the protocol descriptor for the given protocol.
   ///
   /// For Swift protocols, this is a constant reference to the protocol
@@ -293,9 +298,8 @@ namespace irgen {
   bool isTypeMetadataAccessTrivial(IRGenModule &IGM, CanType type);
 
   /// Determine how the given type metadata should be accessed.
-  MetadataAccessStrategy getTypeMetadataAccessStrategy(IRGenModule &IGM,
-                                                       CanType type);
-  
+  MetadataAccessStrategy getTypeMetadataAccessStrategy(CanType type);
+
   /// Return the address of a function that will return type metadata 
   /// for the given non-dependent type.
   llvm::Function *getOrCreateTypeMetadataAccessFunction(IRGenModule &IGM,

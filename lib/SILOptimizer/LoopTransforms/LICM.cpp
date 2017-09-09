@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -127,9 +127,9 @@ static bool hasLoopInvariantOperands(SILInstruction *I, SILLoop *L) {
 /// Check if an address does not depend on other values in a basic block.
 static SILInstruction *addressIndependent(SILValue Addr) {
   Addr = stripCasts(Addr);
-  if (GlobalAddrInst *SGAI = dyn_cast<GlobalAddrInst>(Addr))
+  if (auto *SGAI = dyn_cast<GlobalAddrInst>(Addr))
     return SGAI;
-  if (StructElementAddrInst *SEAI = dyn_cast<StructElementAddrInst>(Addr))
+  if (auto *SEAI = dyn_cast<StructElementAddrInst>(Addr))
     return addressIndependent(SEAI->getOperand());
   return nullptr;
 }
@@ -269,9 +269,7 @@ static bool hoistInstructions(SILLoop *Loop, DominanceInfo *DT,
     // that dominate all exits.
     if (!std::all_of(ExitingBBs.begin(), ExitingBBs.end(),
                      [=](SILBasicBlock *ExitBB) {
-          if (DT->dominates(CurBB, ExitBB))
-            return true;
-          return false;
+          return DT->dominates(CurBB, ExitBB);
         })) {
       DEBUG(llvm::dbgs() << "  skipping conditional block " << *CurBB << "\n");
       It.skipChildren();
@@ -348,7 +346,7 @@ static bool sinkFixLifetime(SILLoop *Loop, DominanceInfo *DomTree,
   // Sink the fix_lifetime instruction.
   bool Changed = false;
   for (auto *FLI : FixLifetimeInsts)
-    if (DomTree->dominates(FLI->getOperand()->getParentBB(),
+    if (DomTree->dominates(FLI->getOperand()->getParentBlock(),
                            Preheader)) {
       auto Succs = ExitingBB->getSuccessors();
       for (unsigned EdgeIdx = 0; EdgeIdx <  Succs.size(); ++EdgeIdx) {
@@ -436,7 +434,7 @@ protected:
   /// \brief Optimize the current loop nest.
   void optimizeLoop(SILLoop *CurrentLoop, ReadSet &SafeReads);
 };
-}
+} // end anonymous namespace
 
 bool LoopTreeOptimization::optimize() {
   // Process loops bottom up in the loop tree.
@@ -450,7 +448,7 @@ bool LoopTreeOptimization::optimize() {
     auto CurrLoopSummary = llvm::make_unique<LoopNestSummary>(CurrentLoop);
     propagateSummaries(CurrLoopSummary);
 
-    // Analyse the current loop for reads that can be hoisted.
+    // Analyze the current loop for reads that can be hoisted.
     ReadSet SafeReads;
     analyzeCurrentLoop(CurrLoopSummary, SafeReads);
 
@@ -475,7 +473,7 @@ void LoopTreeOptimization::analyzeCurrentLoop(
     std::unique_ptr<LoopNestSummary> &CurrSummary, ReadSet &SafeReads) {
   WriteSet &MayWrites = CurrSummary->MayWrites;
   SILLoop *Loop = CurrSummary->Loop;
-  DEBUG(llvm::dbgs() << " Analysing accesses.\n");
+  DEBUG(llvm::dbgs() << " Analyzing accesses.\n");
 
   // Contains function calls in the loop, which only read from memory.
   SmallVector<ApplyInst *, 8> ReadOnlyApplies;
@@ -526,6 +524,10 @@ void LoopTreeOptimization::optimizeLoop(SILLoop *CurrentLoop,
 
 namespace {
 /// Hoist loop invariant code out of innermost loops.
+///
+/// Transforms are identified by type, not instance. Split this
+/// Into two types: "High-level Loop Invariant Code Motion"
+/// and "Loop Invariant Code Motion".
 class LICM : public SILFunctionTransform {
 
 public:
@@ -536,11 +538,6 @@ public:
   /// We only hoist semantic calls on high-level SIL because we can be sure that
   /// e.g. an Array as SILValue is really immutable (including its content).
   bool RunsOnHighLevelSil;
-  
-  StringRef getName() override {
-    return RunsOnHighLevelSil ? "High-level Loop Invariant Code Motion" :
-                                "Loop Invariant Code Motion";
-  }
 
   void run() override {
     SILFunction *F = getFunction();
@@ -576,7 +573,7 @@ public:
     }
   }
 };
-}
+} // end anonymous namespace
 
 SILTransform *swift::createLICM() {
   return new LICM(false);

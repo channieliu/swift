@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -52,12 +52,15 @@ namespace version {
 /// a: [0 - 999]
 /// b: [0 - 999]
 class Version {
-  SmallVector<uint64_t, 5> Components;
+  SmallVector<unsigned, 5> Components;
 public:
   /// Create the empty compiler version - this always compares greater
   /// or equal to any other CompilerVersion, as in the case of building Swift
   /// from latest sources outside of a build/integration/release context.
   Version() = default;
+
+  /// Create a literal version from a list of components.
+  Version(std::initializer_list<unsigned> Values) : Components(Values) {}
 
   /// Create a version from a string in source code.
   ///
@@ -94,11 +97,15 @@ public:
   /// away any 5th component that might be in this version.
   operator clang::VersionTuple() const;
 
-  /// Return whether this version is a valid Swift language version number
-  /// to set the compiler to using -swift-version; this is not the same as
-  /// the set of Swift versions that have ever existed, just those that we
-  /// are attempting to maintain backward-compatibility support for.
-  bool isValidEffectiveLanguageVersion() const;
+  /// Returns the concrete version to use when \e this version is provided as
+  /// an argument to -swift-version.
+  ///
+  /// This is not the same as the set of Swift versions that have ever existed,
+  /// just those that we are attempting to maintain backward-compatibility
+  /// support for. It's also common for valid versions to produce a different
+  /// result; for example "-swift-version 3" at one point instructed the
+  /// compiler to act as if it is version 3.1.
+  Optional<Version> getEffectiveLanguageVersion() const;
 
   /// Whether this version is in the Swift 3 family
   bool isVersion3() const { return !empty() && Components[0] == 3; }
@@ -107,9 +114,9 @@ public:
   Version asMajorVersion() const;
 
   /// Parse a version in the form used by the _compiler_version \#if condition.
-  static Version parseCompilerVersionString(StringRef VersionString,
-                                            SourceLoc Loc,
-                                            DiagnosticEngine *Diags);
+  static Optional<Version> parseCompilerVersionString(StringRef VersionString,
+                                                      SourceLoc Loc,
+                                                      DiagnosticEngine *Diags);
 
   /// Parse a generic version string of the format [0-9]+(.[0-9]+)*
   ///
@@ -137,10 +144,17 @@ public:
 
 bool operator>=(const Version &lhs, const Version &rhs);
 bool operator==(const Version &lhs, const Version &rhs);
+inline bool operator!=(const Version &lhs, const Version &rhs) {
+  return !(lhs == rhs);
+}
 
 raw_ostream &operator<<(raw_ostream &os, const Version &version);
 
 /// Retrieves the numeric {major, minor} Swift version.
+///
+/// Note that this is the underlying version of the language, ignoring any
+/// -swift-version flags that may have been used in a particular invocation of
+/// the compiler.
 std::pair<unsigned, unsigned> getSwiftNumericVersion();
 
 /// Retrieves a string representing the complete Swift version, which includes
@@ -148,6 +162,10 @@ std::pair<unsigned, unsigned> getSwiftNumericVersion();
 /// and the vendor tag.
 std::string getSwiftFullVersion(Version effectiveLanguageVersion =
                                 Version::getCurrentLanguageVersion());
+
+/// Retrieves the repository revision number (or identifier) from which
+/// this Swift was built.
+std::string getSwiftRevision();
 
 } // end namespace version
 } // end namespace swift

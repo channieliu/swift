@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -241,10 +241,23 @@ MemBehavior MemoryBehaviorVisitor::visitApplyInst(ApplyInst *AI) {
   MemBehavior Behavior = MemBehavior::None;
 
   // We can ignore mayTrap().
-  if (ApplyEffects.mayReadRC() ||
-      (InspectionMode == RetainObserveKind::ObserveRetains &&
-       ApplyEffects.mayAllocObjects())) {
-    Behavior = MemBehavior::MayHaveSideEffects;
+  bool any_in_guaranteed_params = false;
+  for (auto op : enumerate(AI->getArgumentOperands())) {
+    if (op.Value.get() == V &&
+        AI->getSubstCalleeConv().getSILArgumentConvention(op.Index) == swift::SILArgumentConvention::Indirect_In_Guaranteed) {
+      any_in_guaranteed_params = true;
+      break;
+    }
+  }
+
+  if (any_in_guaranteed_params) {
+    // one the parameters in the function call is @in_guaranteed of V, ie. the
+    // callee isn't allowed to modify it.
+    Behavior = MemBehavior::MayRead;
+  } else if (ApplyEffects.mayReadRC() ||
+        (InspectionMode == RetainObserveKind::ObserveRetains &&
+         ApplyEffects.mayAllocObjects())) {
+      Behavior = MemBehavior::MayHaveSideEffects;
   } else {
     auto &GlobalEffects = ApplyEffects.getGlobalEffects();
     Behavior = GlobalEffects.getMemBehavior(InspectionMode);
@@ -265,6 +278,7 @@ MemBehavior MemoryBehaviorVisitor::visitApplyInst(ApplyInst *AI) {
       }
     }
   }
+
   if (Behavior > MemBehavior::None) {
     if (Behavior > MemBehavior::MayRead && isLetPointer(V))
       Behavior = MemBehavior::MayRead;

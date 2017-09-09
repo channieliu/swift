@@ -2,23 +2,21 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #include "SILGenFunction.h"
 #include "ManagedValue.h"
 #include "Scope.h"
-#include "swift/AST/AST.h"
-#include "swift/AST/Mangle.h"
+#include "swift/AST/ASTMangler.h"
 #include "swift/SIL/FormalLinkage.h"
 
 using namespace swift;
-using namespace Mangle;
 using namespace Lowering;
 
 /// Get or create SILGlobalVariable for a given global VarDecl.
@@ -30,9 +28,8 @@ SILGlobalVariable *SILGenModule::getSILGlobalVariable(VarDecl *gDecl,
   if (auto SILGenName = gDecl->getAttrs().getAttribute<SILGenNameAttr>()) {
     mangledName = SILGenName->Name;
   } else {
-    Mangler mangler;
-    mangler.mangleGlobalVariableFull(gDecl);
-    mangledName = mangler.finalize();
+    Mangle::ASTMangler NewMangler;
+    mangledName = NewMangler.mangleGlobalVariableFull(gDecl);
   }
 
   // Check if it is already created, and update linkage if necessary.
@@ -50,7 +47,9 @@ SILGlobalVariable *SILGenModule::getSILGlobalVariable(VarDecl *gDecl,
   SILType silTy = M.Types.getLoweredTypeOfGlobal(gDecl);
 
   auto *silGlobal = SILGlobalVariable::create(M, link,
-                                              makeModuleFragile ? IsFragile : IsNotFragile,
+                                              isMakeModuleFragile()
+                                                ? IsSerialized
+                                                : IsNotSerialized,
                                               mangledName, silTy,
                                               None, gDecl);
   silGlobal->setDeclaration(!forDef);
@@ -95,15 +94,14 @@ SILGenFunction::emitGlobalVariableRef(SILLocation loc, VarDecl *var) {
     (void)accessorTy;
     assert(!accessorTy->isPolymorphic()
            && "generic global variable accessors not yet implemented");
-    SILValue addr = B.createApply(loc, accessor, accessor->getType(),
-                              accessor->getType().castTo<SILFunctionType>()
-                                      ->getSingleResult().getSILType(),
-                              {}, {});
+    SILValue addr = B.createApply(
+        loc, accessor, accessor->getType(),
+        accessorFn->getConventions().getSingleSILResultType(), {}, {});
     // FIXME: It'd be nice if the result of the accessor was natively an
     // address.
     addr = B.createPointerToAddress(
-      loc, addr, getLoweredType(var->getType()).getAddressType(),
-      /*isStrict*/ true);
+      loc, addr, getLoweredType(var->getInterfaceType()).getAddressType(),
+      /*isStrict*/ true, /*isInvariant*/ false);
     return ManagedValue::forLValue(addr);
   }
 
@@ -197,10 +195,9 @@ void SILGenModule::emitGlobalInitialization(PatternBindingDecl *pd,
   // Generic and dynamic static properties require lazy initialization, which
   // isn't implemented yet.
   if (pd->isStatic()) {
-    auto theType = pd->getDeclContext()->getDeclaredTypeInContext();
-    assert(!theType->is<BoundGenericType>()
-           && "generic static properties not implemented");
-    (void)theType;
+    assert(!pd->getDeclContext()->isGenericContext()
+           || pd->getDeclContext()->getGenericSignatureOfContext()
+                ->areAllParamsConcrete());
   }
 
   // Emit the lazy initialization token for the initialization expression.
@@ -215,13 +212,10 @@ void SILGenModule::emitGlobalInitialization(PatternBindingDecl *pd,
   });
   assert(varDecl);
 
-  std::string onceTokenBuffer;
-  {
-    Mangler tokenMangler;
-    tokenMangler.mangleGlobalInit(varDecl, counter, false);
-    onceTokenBuffer = tokenMangler.finalize();
-  }
-
+  Mangle::ASTMangler TokenMangler;
+  std::string onceTokenBuffer = TokenMangler.mangleGlobalInit(varDecl, counter,
+                                                              false);
+  
   auto onceTy = BuiltinIntegerType::getWordType(M.getASTContext());
   auto onceSILTy
     = SILType::getPrimitiveObjectType(onceTy->getCanonicalType());
@@ -229,18 +223,17 @@ void SILGenModule::emitGlobalInitialization(PatternBindingDecl *pd,
   // TODO: include the module in the onceToken's name mangling.
   // Then we can make it fragile.
   auto onceToken = SILGlobalVariable::create(M, SILLinkage::Private,
-                                             makeModuleFragile,
+                                             isMakeModuleFragile()
+                                               ? IsSerialized
+                                               : IsNotSerialized,
                                              onceTokenBuffer, onceSILTy);
   onceToken->setDeclaration(false);
 
   // Emit the initialization code into a function.
-  std::string onceFuncBuffer;
-  {
-    Mangler funcMangler;
-    funcMangler.mangleGlobalInit(varDecl, counter, true);
-    onceFuncBuffer = funcMangler.finalize();
-  }
-
+  Mangle::ASTMangler FuncMangler;
+  std::string onceFuncBuffer = FuncMangler.mangleGlobalInit(varDecl, counter,
+                                                            true);
+  
   SILFunction *onceFunc = emitLazyGlobalInitializer(onceFuncBuffer, pd,
                                                     pbdEntry);
 
@@ -310,7 +303,7 @@ void SILGenFunction::emitGlobalGetter(VarDecl *global,
   auto *silG = SGM.getSILGlobalVariable(global, NotForDefinition);
   SILValue addr = B.createGlobalAddr(global, silG);
 
-  auto refType = global->getType()->getCanonicalType();
+  auto refType = global->getInterfaceType()->getCanonicalType();
   ManagedValue value = emitLoad(global, addr, getTypeLowering(refType),
                                 SGFContext(), IsNotTake);
   SILValue result = value.forward(*this);

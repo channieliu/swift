@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -75,6 +75,7 @@ STATISTIC(NumCopyNRVO, "Number of copies removed via named return value opt.");
 STATISTIC(NumCopyForward, "Number of copies removed via forward propagation");
 STATISTIC(NumCopyBackward,
           "Number of copies removed via backward propagation");
+STATISTIC(NumDeadTemp, "Number of copies removed from unused temporaries");
 
 using namespace swift;
 
@@ -92,9 +93,7 @@ static llvm::cl::opt<bool> EnableDestroyHoisting("enable-destroyhoisting",
 ///
 /// (2) A local alloc_stack variable.
 static bool isIdentifiedSourceValue(SILValue Def) {
-  if (SILArgument *Arg = dyn_cast<SILArgument>(Def)) {
-    if (!Arg->isFunctionArg())
-      return false;
+  if (auto *Arg = dyn_cast<SILFunctionArgument>(Def)) {
     // Check that the argument is passed as an in type. This means there are
     // no aliases accessible within this function scope.
     SILArgumentConvention Conv =  Arg->getArgumentConvention();
@@ -107,7 +106,8 @@ static bool isIdentifiedSourceValue(SILValue Def) {
       return false;
     }
   }
-  else if (isa<AllocStackInst>(Def))
+
+  if (isa<AllocStackInst>(Def))
     return true;
 
   return false;
@@ -120,9 +120,7 @@ static bool isIdentifiedSourceValue(SILValue Def) {
 ///
 /// (2) A local alloc_stack variable.
 static bool isIdentifiedDestValue(SILValue Def) {
-  if (SILArgument *Arg = dyn_cast<SILArgument>(Def)) {
-    if (!Arg->isFunctionArg())
-      return false;
+  if (auto *Arg = dyn_cast<SILFunctionArgument>(Def)) {
     // Check that the argument is passed as an out type. This means there are
     // no aliases accessible within this function scope.
     SILArgumentConvention Conv =  Arg->getArgumentConvention();
@@ -135,7 +133,8 @@ static bool isIdentifiedDestValue(SILValue Def) {
       return false;
     }
   }
-  else if (isa<AllocStackInst>(Def))
+
+  if (isa<AllocStackInst>(Def))
     return true;
 
   return false;
@@ -149,13 +148,13 @@ static SILArgumentConvention getAddressArgConvention(ApplyInst *Apply,
                                                      SILValue Address,
                                                      Operand *&Oper) {
   Oper = nullptr;
-  SILArgumentConvention Conv;
   auto Args = Apply->getArgumentOperands();
+  llvm::Optional<unsigned> FoundArgIdx;
   for (auto ArgIdx : indices(Args)) {
     if (Args[ArgIdx].get() != Address)
       continue;
 
-    Conv = Apply->getArgumentConvention(ArgIdx);
+    FoundArgIdx = ArgIdx;
     assert(!Oper && "Address can only be passed once as an indirection.");
     Oper = &Args[ArgIdx];
 #ifndef NDEBUG
@@ -163,7 +162,7 @@ static SILArgumentConvention getAddressArgConvention(ApplyInst *Apply,
 #endif
   }
   assert(Oper && "Address value not passed as an argument to this call.");
-  return Conv;
+  return Apply->getArgumentConvention(FoundArgIdx.getValue());
 }
 
 //===----------------------------------------------------------------------===//
@@ -428,7 +427,9 @@ public:
 
 protected:
   bool collectUsers();
-  bool propagateCopy(CopyAddrInst *CopyInst);
+  bool propagateCopy(CopyAddrInst *CopyInst, bool hoistingDestroy);
+  CopyAddrInst *findCopyIntoDeadTemp(CopyAddrInst *destCopy);
+  bool forwardDeadTempCopy(CopyAddrInst *srcCopy, CopyAddrInst *destCopy);
   bool forwardPropagateCopy(CopyAddrInst *CopyInst,
                             SmallPtrSetImpl<SILInstruction*> &DestUserInsts);
   bool backwardPropagateCopy(CopyAddrInst *CopyInst,
@@ -439,7 +440,7 @@ protected:
   bool areCopyDestUsersDominatedBy(CopyAddrInst *,
                                    SmallVectorImpl<Operand *> &);
 };
-} // namespace
+} // end anonymous namespace
 
 /// Gather all instructions that use CurrentDef:
 /// - DestroyPoints records 'destroy'
@@ -459,9 +460,10 @@ bool CopyForwarding::collectUsers() {
       /// object. However, we can rely on a subsequent mark_dependent
       /// instruction to take that object as an operand, causing it to escape
       /// for the purpose of this analysis.
-      assert(isIndirectConvention(
-                Apply->getSubstCalleeType()->getSILArgumentConvention(
-                    UI->getOperandNumber() - Apply->getArgumentOperandNumber()))
+      assert(Apply->getSubstCalleeConv()
+                 .getSILArgumentConvention(UI->getOperandNumber()
+                                           - Apply->getArgumentOperandNumber())
+                 .isIndirectConvention()
              && "copy_addr location should be passed indirect");
       SrcUserInsts.insert(Apply);
       continue;
@@ -518,12 +520,27 @@ bool CopyForwarding::collectUsers() {
 ///
 /// The caller has already proven that lifetime of the value being copied ends
 /// at the copy. (Either it is a [take] or is immediately destroyed).
+/// 
 ///
 /// If the forwarded copy is not an [init], then insert a destroy of the copy's
 /// dest.
-bool CopyForwarding::propagateCopy(CopyAddrInst *CopyInst) {
+bool CopyForwarding::
+propagateCopy(CopyAddrInst *CopyInst, bool hoistingDestroy) {
   if (!EnableCopyForwarding)
     return false;
+
+  // Handle copy-of-copy without analyzing uses.
+  // Assumes that CopyInst->getSrc() is dead after CopyInst.
+  assert(CopyInst->isTakeOfSrc() || hoistingDestroy);
+  if (auto *srcCopy = findCopyIntoDeadTemp(CopyInst)) {
+    if (forwardDeadTempCopy(srcCopy, CopyInst)) {
+      DEBUG(llvm::dbgs() << "  Temp Copy:" << *srcCopy
+            << "         to " << *CopyInst);
+      HasChanged = true;
+      ++NumDeadTemp;
+      return true;
+    }
+  }
 
   SILValue CopyDest = CopyInst->getDest();
   SILBasicBlock *BB = CopyInst->getParent();
@@ -560,6 +577,104 @@ bool CopyForwarding::propagateCopy(CopyAddrInst *CopyInst) {
     return true;
   }
   return false;
+}
+
+/// Find a copy into an otherwise dead temporary:
+///
+/// The given copy is copying out of the temporary
+/// copy_addr %temp, %dest
+///
+/// Precondition: The lifetime of %temp ends at `destCopy`
+/// (%temp is CurrentDef).
+///
+/// Find a previous copy:
+/// copy_addr %src, %temp
+///
+/// Such that it is safe to forward its source into the source of
+/// `destCopy`. i.e. `destCopy` can be safely rewritten as:
+/// copy_addr %src, %dest
+///
+/// Otherwise return nullptr. No instructions are harmed in this analysis.
+///
+/// This can be checked with a simple instruction walk that ends at:
+/// - an intervening instruction that may write to memory
+/// - a use of the temporary, %temp
+///
+/// Unlike the forward and backward propagation that finds all use points, this
+/// handles copies of address projections. By conservatively checking all
+/// intervening instructions, it avoids the need to analyze projection paths.
+CopyAddrInst *CopyForwarding::findCopyIntoDeadTemp(CopyAddrInst *destCopy) {
+  auto tmpVal = destCopy->getSrc();
+  assert(tmpVal == CurrentDef);
+  assert(isIdentifiedSourceValue(tmpVal));
+
+  for (auto II = destCopy->getIterator(), IB = destCopy->getParent()->begin();
+       II != IB;) {
+    --II;
+    SILInstruction *UserInst = &*II;
+    if (auto *srcCopy = dyn_cast<CopyAddrInst>(UserInst)) {
+      if (srcCopy->getDest() == tmpVal)
+        return srcCopy;
+    }
+    if (SrcUserInsts.count(UserInst))
+      return nullptr;
+    if (UserInst->mayWriteToMemory())
+      return nullptr;
+  }
+  return nullptr;
+}
+
+/// Forward a copy into a dead temporary as identified by
+/// `findCopyIntoDeadTemp`.
+///
+/// Returns true if the copy was successfully forwarded.
+///
+/// Old SIL: 
+/// copy_addr %src, %temp
+/// copy_addr %temp, %dest
+///
+/// New SIL: 
+/// copy_addr %src, %dest
+///
+/// Precondition: `srcCopy->getDest()` == `destCopy->getSrc()`
+/// Precondition: %src is unused between srcCopy and destCopy.
+/// Precondition: The lifetime of %temp ends immediate after `destCopy`.
+/// 
+/// Postcondition:
+/// - `srcCopy` is erased.
+/// - Any initial value in %temp is destroyed at `srcCopy` position.
+/// - %temp is uninitialized following `srcCopy` and subsequent instruction
+///   attempts to destroy this uninitialized value.
+bool CopyForwarding::
+forwardDeadTempCopy(CopyAddrInst *srcCopy, CopyAddrInst *destCopy) {
+  assert(srcCopy->getDest() == destCopy->getSrc());
+  
+  // This pattern can be trivially folded without affecting %temp destroys:
+  // copy_addr [...] %src, [init] %temp
+  // copy_addr [take] %temp, [...] %dest
+
+  // If copy into temp is not initializing, add a destroy:
+  // - copy_addr %src, %temp
+  // + destroy %temp
+  if (!srcCopy->isInitializationOfDest()) {
+    SILBuilderWithScope(srcCopy)
+      .createDestroyAddr(srcCopy->getLoc(), srcCopy->getDest());
+  }
+
+  // Either `destCopy` is a take, or the caller is hoisting a destroy:
+  // copy_addr %temp, %dest
+  // ...
+  // destroy %temp
+  //
+  // If the caller is hoisting a destroy, and we return `true` then it will
+  // erase the destroy for us. Either way, it's safe to simply rewrite destCopy.
+  // For now, don't bother finding the subsequent destroy, because this isn't
+  // the common case.
+
+  destCopy->setSrc(srcCopy->getSrc());
+  destCopy->setIsTakeOfSrc(srcCopy->isTakeOfSrc());
+  srcCopy->eraseFromParent();
+  return true;
 }
 
 /// Check that the lifetime of %src ends at the copy and is not reinitialized
@@ -938,7 +1053,7 @@ bool CopyForwarding::hoistDestroy(SILInstruction *DestroyPoint,
       if (!CopyInst->isTakeOfSrc() && CopyInst->getSrc() == CurrentDef) {
         // This use is a copy of CurrentDef. Attempt to forward CurrentDef to
         // all uses of the copy's value.
-        if (propagateCopy(CopyInst))
+        if (propagateCopy(CopyInst, /*hoistingDestroy=*/true))
           return true;
       }
     }
@@ -970,7 +1085,7 @@ void CopyForwarding::forwardCopiesOf(SILValue Def, SILFunction *F) {
   // First forward any copies that implicitly destroy CurrentDef. There is no
   // need to hoist Destroy for these.
   for (auto *CopyInst : TakePoints)
-    propagateCopy(CopyInst);
+    propagateCopy(CopyInst, /*hoistingDestroy=*/false);
 
   // If the copied address is also loaded from, then destroy hoisting is unsafe.
   //
@@ -1100,11 +1215,11 @@ static bool canNRVO(CopyAddrInst *CopyInst) {
   // dominate all uses of the source. Worse, it may be aliased. This
   // optimization will early-initialize the copy dest, so we can't allow aliases
   // to be accessed between the initialization and the return.
-  auto OutArg = dyn_cast<SILArgument>(CopyInst->getDest());
+  auto OutArg = dyn_cast<SILFunctionArgument>(CopyInst->getDest());
   if (!OutArg)
     return false;
 
-  if (!OutArg->isFunctionArg() || !OutArg->isIndirectResult())
+  if (!OutArg->isIndirectResult())
     return false;
 
   SILBasicBlock *BB = CopyInst->getParent();
@@ -1210,9 +1325,8 @@ class CopyForwardingPass : public SILFunctionTransform
       }
   }
 
-  StringRef getName() override { return "Copy Forwarding"; }
 };
-} // anonymous
+} // end anonymous namespace
 
 SILTransform *swift::createCopyForwarding() {
   return new CopyForwardingPass();

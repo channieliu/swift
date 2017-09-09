@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,19 +16,38 @@
 
 #include "NameLookupImpl.h"
 #include "swift/AST/NameLookup.h"
-#include "swift/AST/AST.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTScope.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/DebuggerClient.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/LazyResolver.h"
+#include "swift/AST/Initializer.h"
 #include "swift/AST/ReferencedNameTracker.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/STLExtras.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TinyPtrVector.h"
 
 using namespace swift;
+
+ValueDecl *LookupResultEntry::getBaseDecl() const {
+  if (BaseDC == nullptr)
+    return nullptr;
+
+  if (auto *AFD = dyn_cast<AbstractFunctionDecl>(BaseDC))
+    return AFD->getImplicitSelfDecl();
+
+  if (auto *PBI = dyn_cast<PatternBindingInitializer>(BaseDC)) {
+    auto *selfDecl = PBI->getImplicitSelfDecl();
+    assert(selfDecl);
+    return selfDecl;
+  }
+
+  auto *nominalDecl = BaseDC->getAsNominalTypeOrNominalTypeExtensionContext();
+  assert(nominalDecl);
+  return nominalDecl;
+}
 
 void DebuggerClient::anchor() {}
 
@@ -52,7 +71,7 @@ static void forAllVisibleModules(const DeclContext *DC, const Fn &fn) {
   if (auto file = dyn_cast<FileUnit>(moduleScope))
     file->forAllVisibleModules(fn);
   else
-    cast<Module>(moduleScope)->forAllVisibleModules(Module::AccessPathTy(), fn);
+    cast<ModuleDecl>(moduleScope)->forAllVisibleModules(ModuleDecl::AccessPathTy(), fn);
 }
 
 bool swift::removeOverriddenDecls(SmallVectorImpl<ValueDecl*> &decls) {
@@ -135,10 +154,10 @@ static ConstructorComparison compareConstructors(ConstructorDecl *ctor1,
 }
 
 bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
-                                const Module *curModule,
+                                const ModuleDecl *curModule,
                                 LazyResolver *typeResolver) {
   // Category declarations by their signatures.
-  llvm::SmallDenseMap<std::pair<CanType, Identifier>,
+  llvm::SmallDenseMap<std::pair<CanType, DeclBaseName>,
                       llvm::TinyPtrVector<ValueDecl *>>
     CollidingDeclGroups;
 
@@ -149,31 +168,20 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
     ObjCCollidingConstructors;
   bool anyCollisions = false;
   for (auto decl : decls) {
-    // Determine the signature of this declaration.
-    // FIXME: the canonical type makes a poor signature, because we don't
-    // canonicalize away default arguments and don't canonicalize polymorphic
-    // types well.
-    CanType signature;
-
     // FIXME: Egregious hack to avoid failing when there are no declared types.
-    if (!decl->hasType() || isa<TypeAliasDecl>(decl) || isa<AbstractTypeParamDecl>(decl)) {
-      // FIXME: Pass this down instead of getting it from the ASTContext.
-      if (typeResolver && !decl->isBeingTypeChecked())
-        typeResolver->resolveDeclSignature(decl);
-      if (!decl->hasType())
-        continue;
-      if (auto assocType = dyn_cast<AssociatedTypeDecl>(decl))
-        if (!assocType->getProtocol()->isValidGenericContext())
-          continue;
-    }
+    // FIXME: Pass this down instead of getting it from the ASTContext.
+    if (typeResolver)
+      typeResolver->resolveDeclSignature(decl);
     
     // If the decl is currently being validated, this is likely a recursive
     // reference and we'll want to skip ahead so as to avoid having its type
     // attempt to desugar itself.
-    if (decl->isBeingTypeChecked())
+    if (!decl->hasValidSignature())
       continue;
 
-    signature = decl->getType()->getCanonicalType();
+    // FIXME: the canonical type makes a poor signature, because we don't
+    // canonicalize away default arguments.
+    auto signature = decl->getInterfaceType()->getCanonicalType();
 
     // FIXME: The type of a variable or subscript doesn't include
     // enough context to distinguish entities from different
@@ -184,7 +192,7 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
 
     // If we've seen a declaration with this signature before, note it.
     auto &knownDecls =
-        CollidingDeclGroups[std::make_pair(signature, decl->getName())];
+        CollidingDeclGroups[std::make_pair(signature, decl->getBaseName())];
     if (!knownDecls.empty())
       anyCollisions = true;
 
@@ -195,7 +203,8 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
     if (decl->hasClangNode()) {
       if (auto ctor = dyn_cast<ConstructorDecl>(decl)) {
         auto ctorSignature
-          = std::make_pair(ctor->getExtensionType()->getCanonicalType(),
+          = std::make_pair(ctor->getDeclContext()->getDeclaredInterfaceType()
+                               ->getCanonicalType(),
                            decl->getFullName());
         auto &knownCtors = ObjCCollidingConstructors[ctorSignature];
         if (!knownCtors.empty())
@@ -334,7 +343,7 @@ enum class DiscriminatorMatch {
   Matches,
   Different
 };
-}
+} // end anonymous namespace
 
 static DiscriminatorMatch matchDiscriminator(Identifier discriminator,
                                              const ValueDecl *value) {
@@ -354,7 +363,7 @@ static DiscriminatorMatch matchDiscriminator(Identifier discriminator,
 
 static DiscriminatorMatch
 matchDiscriminator(Identifier discriminator,
-                   UnqualifiedLookupResult lookupResult) {
+                   LookupResultEntry lookupResult) {
   return matchDiscriminator(discriminator, lookupResult.getValueDecl());
 }
 
@@ -437,6 +446,8 @@ static DeclVisibilityKind getLocalDeclVisibilityKind(const ASTScope *scope) {
   case ASTScopeKind::ForStmtInitializer:
     return DeclVisibilityKind::LocalVariable;
   }
+
+  llvm_unreachable("Unhandled ASTScopeKind in switch.");
 }
 
 UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
@@ -445,7 +456,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
                                      SourceLoc Loc, bool IsTypeLookup,
                                      bool AllowProtocolMembers,
                                      bool IgnoreAccessControl) {
-  Module &M = *DC->getParentModule();
+  ModuleDecl &M = *DC->getParentModule();
   ASTContext &Ctx = M.getASTContext();
   const SourceManager &SM = Ctx.SourceMgr;
   DebuggerClient *DebugClient = M.getDebugClient();
@@ -456,7 +467,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
   if (IsKnownNonCascading)
     isCascadingUse = false;
 
-  SmallVector<UnqualifiedLookupResult, 4> UnavailableInnerResults;
+  SmallVector<LookupResultEntry, 4> UnavailableInnerResults;
 
   if (Loc.isValid() &&
       DC->getParentSourceFile()->Kind != SourceFileKind::REPL &&
@@ -472,18 +483,17 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
     if (Name.isOperator()) {
       if (!isCascadingUse.hasValue()) {
         DeclContext *innermostDC =
-            lookupScope->getInnermostEnclosingDeclContext();
+          lookupScope->getInnermostEnclosingDeclContext();
         isCascadingUse =
-          innermostDC->isCascadingContextForLookup(/*excludeFunctions=*/true);
+          innermostDC->isCascadingContextForLookup(
+            /*functionsAreNonCascading=*/true);
       }
 
       lookupScope = &sourceFile.getScope();
     }
   
     // Walk scopes outward from the innermost scope until we find something.
-    bool lookupInNominalIsStatic = true;
-    ParamDecl *selfDecl = nullptr;
-    bool withinDefaultArgument = false;
+    DeclContext *selfDC = nullptr;
     for (auto currentScope = lookupScope; currentScope;
          currentScope = currentScope->getParent()) {
       // Perform local lookup within this scope.
@@ -501,8 +511,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
       if (currentScope->getKind() == ASTScopeKind::AbstractFunctionBody &&
           currentScope->getAbstractFunctionDecl()->getDeclContext()
             ->isTypeContext()) {
-        selfDecl =
-          currentScope->getAbstractFunctionDecl()->getImplicitSelfDecl();
+        selfDC = currentScope->getAbstractFunctionDecl();
         continue;
       }
 
@@ -512,74 +521,33 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
         // If we haven't determined whether we have a cascading use, do so now.
         if (!isCascadingUse.hasValue()) {
           isCascadingUse =
-            dc->isCascadingContextForLookup(/*excludeFunctions=*/false);
+            dc->isCascadingContextForLookup(/*functionsAreNonCascading=*/false);
         }
 
         // Pattern binding initializers are only interesting insofar as they
         // affect lookup in an enclosing nominal type or extension thereof.
         if (auto *bindingInit = dyn_cast<PatternBindingInitializer>(dc)) {
-          if (auto binding = bindingInit->getBinding()) {
-            lookupInNominalIsStatic = binding->isStatic();
-          
-            // Look for 'self' for a lazy variable initializer.
-            if (auto singleVar = binding->getSingleVar())
-              // We only care about lazy variables.
-              if (singleVar->getAttrs().hasAttribute<LazyAttr>()) {
+          // Lazy variable initializer contexts have a 'self' parameter for
+          // instance member lookup.
+          if (bindingInit->getImplicitSelfDecl())
+            selfDC = bindingInit;
 
-              // 'self' will be listed in the local bindings.
-              for (auto local : localBindings) {
-                auto param = dyn_cast<ParamDecl>(local);
-                if (!param) continue;
-
-
-                // If we have a variable that's the implicit self of its enclosing
-                // context, mark it as 'self'.
-                if (auto func = dyn_cast<FuncDecl>(param->getDeclContext())) {
-                  if (param == func->getImplicitSelfDecl()) {
-                    selfDecl = param;
-                    break;
-                  }
-                }
-              }
-            }
-          }
           continue;
         }
 
         // Default arguments only have 'static' access to the members of the
         // enclosing type, if there is one.
-        if (isa<DefaultArgumentInitializer>(dc)) {
-          lookupInNominalIsStatic = true;
-          withinDefaultArgument = true;
-          continue;
-        }
+        if (isa<DefaultArgumentInitializer>(dc)) continue;
 
         // Functions/initializers/deinitializers are only interesting insofar as
         // they affect lookup in an enclosing nominal type or extension thereof.
-        if (auto func = dyn_cast<AbstractFunctionDecl>(dc)) {
-          // We don't update the 'static lookup' bit if we came from within a
-          // default argument.
-          if (!withinDefaultArgument)
-            lookupInNominalIsStatic = func->isStatic();
-          withinDefaultArgument = false;
-          continue;
-        }
+        if (isa<AbstractFunctionDecl>(dc)) continue;
 
         // Subscripts have no lookup of their own.
-        if (auto subscript = dyn_cast<SubscriptDecl>(dc)) {
-          // We don't update the 'static lookup' bit if we came from within a
-          // default argument.
-          if (!withinDefaultArgument)
-            lookupInNominalIsStatic = subscript->isStatic();
-          withinDefaultArgument = false;
-          continue;
-        }
+        if (isa<SubscriptDecl>(dc)) continue;
 
         // Closures have no lookup of their own.
-        if (isa<AbstractClosureExpr>(dc)) {
-          withinDefaultArgument = false;
-          continue;
-        }
+        if (isa<AbstractClosureExpr>(dc)) continue;
 
         // Top-level declarations have no lookup of their own.
         if (isa<TopLevelCodeDecl>(dc)) continue;
@@ -603,22 +571,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
         // FIXME: We shouldn't need to compute a type to perform this lookup.
         Type lookupType = dc->getSelfTypeInContext();
 
-        // FIXME: Hack to deal with missing 'Self' archetypes.
-        if (!lookupType) {
-          if (auto proto = dc->getAsProtocolOrProtocolExtensionContext())
-            lookupType = proto->getDeclaredType();
-        }
-
-        if (!lookupType || lookupType->hasError()) continue;
-
-        // If we're performing a static lookup, use the metatype.
-        // FIXME: This is awful. The client should filter, not us.
-        if (lookupInNominalIsStatic)
-          lookupType = MetatypeType::get(lookupType, Ctx);
-
-        // FIXME: This is overkill for name lookup.
-        if (TypeResolver)
-          TypeResolver->resolveDeclSignature(nominal);
+        if (lookupType->hasError()) continue;
 
         // Perform lookup into the type.
         NLOptions options = NL_UnqualifiedDefault;
@@ -636,19 +589,20 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
 
         SmallVector<ValueDecl *, 4> lookup;
         dc->lookupQualified(lookupType, Name, options, TypeResolver, lookup);
-        ValueDecl *baseDecl = nominal;
-        if (selfDecl) baseDecl = selfDecl;
         for (auto result : lookup) {
-          Results.push_back(UnqualifiedLookupResult(baseDecl, result));
+          auto *baseDC = dc;
+          if (!isa<TypeDecl>(result) && selfDC) baseDC = selfDC;
+          Results.push_back(LookupResultEntry(baseDC, result));
         }
 
         if (!Results.empty()) {
           // Predicate that determines whether a lookup result should
           // be unavailable except as a last-ditch effort.
           auto unavailableLookupResult =
-            [&](const UnqualifiedLookupResult &result) {
+              [&](const LookupResultEntry &result) {
+            auto &effectiveVersion = Ctx.LangOpts.EffectiveLanguageVersion;
             return result.getValueDecl()->getAttrs()
-                     .isUnavailableInSwiftVersion();
+                .isUnavailableInSwiftVersion(effectiveVersion);
           };
 
           // If all of the results we found are unavailable, keep looking.
@@ -664,7 +618,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
         }
 
         // Forget the 'self' declaration.
-        selfDecl = nullptr;
+        selfDC = nullptr;
       }
     }
   } else {
@@ -672,7 +626,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
     if (Name.isOperator()) {
       if (!isCascadingUse.hasValue()) {
         isCascadingUse =
-          DC->isCascadingContextForLookup(/*excludeFunctions=*/true);
+          DC->isCascadingContextForLookup(/*functionsAreNonCascading=*/true);
       }
       DC = DC->getModuleScopeContext();
 
@@ -681,23 +635,55 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
       // scope, and if so, whether this is a reference to one of them.
       // FIXME: We should persist this information between lookups.
       while (!DC->isModuleScopeContext()) {
-        ValueDecl *BaseDecl = 0;
-        ValueDecl *MetaBaseDecl = 0;
+        DeclContext *BaseDC = nullptr;
+        DeclContext *MetaBaseDC = nullptr;
         GenericParamList *GenericParams = nullptr;
         Type ExtendedType;
         bool isTypeLookup = false;
-        
-        // If this declcontext is an initializer for a static property, then we're
-        // implicitly doing a static lookup into the parent declcontext.
-        if (auto *PBI = dyn_cast<PatternBindingInitializer>(DC))
-          if (!DC->getParent()->isModuleScopeContext()) {
-            if (auto PBD = PBI->getBinding()) {
-              isTypeLookup = PBD->isStatic();
-              DC = DC->getParent();
-            }
+
+        if (auto *PBI = dyn_cast<PatternBindingInitializer>(DC)) {
+          auto *PBD = PBI->getBinding();
+          assert(PBD);
+
+          // Lazy variable initializer contexts have a 'self' parameter for
+          // instance member lookup.
+          if (auto *selfParam = PBI->getImplicitSelfDecl()) {
+            Consumer.foundDecl(selfParam,
+                               DeclVisibilityKind::FunctionParameter);
+            if (!Results.empty())
+              return;
+
+            DC = DC->getParent();
+
+            ExtendedType = DC->getSelfTypeInContext();
+            MetaBaseDC = DC;
+            if (Ctx.isSwiftVersion3())
+              BaseDC = MetaBaseDC;
+            else
+              BaseDC = PBI;
+
+            isTypeLookup = PBD->isStatic();
           }
-        
-        if (auto *AFD = dyn_cast<AbstractFunctionDecl>(DC)) {
+          // Initializers for stored properties of types perform static
+          // lookup into the surrounding context.
+          else if (PBD->getDeclContext()->isTypeContext()) {
+            DC = DC->getParent();
+
+            ExtendedType = DC->getSelfTypeInContext();
+            MetaBaseDC = DC;
+            BaseDC = MetaBaseDC;
+
+            isTypeLookup = PBD->isStatic(); // FIXME
+
+            isCascadingUse = DC->isCascadingContextForLookup(false);
+          }
+          // Otherwise, we have an initializer for a global or local property.
+          // There's not much to find here, we'll keep going up to a parent
+          // context.
+
+          if (!isCascadingUse.hasValue())
+            isCascadingUse = DC->isCascadingContextForLookup(false);
+        } else if (auto *AFD = dyn_cast<AbstractFunctionDecl>(DC)) {
           // Look for local variables; normally, the parser resolves these
           // for us, but it can't do the right thing inside local types.
           // FIXME: when we can parse and typecheck the function body partially
@@ -720,35 +706,32 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
           if (!isCascadingUse.hasValue() || isCascadingUse.getValue())
             isCascadingUse = AFD->isCascadingContextForLookup(false);
 
-          if (AFD->getExtensionType()) {
-            if (AFD->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
-              ExtendedType = AFD->getDeclContext()->getSelfTypeInContext();
-
-              // Fallback path.
-              if (!ExtendedType)
-                ExtendedType = AFD->getExtensionType();
-            } else {
-              ExtendedType = AFD->getExtensionType();
-            }
-            BaseDecl = AFD->getImplicitSelfDecl();
-            MetaBaseDecl = AFD->getExtensionType()->getAnyNominal();
+          if (AFD->getDeclContext()->isTypeContext()) {
+            ExtendedType = AFD->getDeclContext()->getSelfTypeInContext();
+            BaseDC = AFD;
+            MetaBaseDC = AFD->getDeclContext();
             DC = DC->getParent();
 
             if (auto *FD = dyn_cast<FuncDecl>(AFD))
               if (FD->isStatic())
-                ExtendedType = MetatypeType::get(ExtendedType);
+                isTypeLookup = true;
 
-            // If we're not in the body of the function, the base declaration
+            // If we're not in the body of the function (for example, we
+            // might be type checking a default argument expression and
+            // performing name lookup from there), the base declaration
             // is the nominal type, not 'self'.
-            if (Loc.isValid() &&
+            if ((Ctx.isSwiftVersion3() || !AFD->isImplicit()) &&
+                Loc.isValid() &&
                 AFD->getBodySourceRange().isValid() &&
                 !SM.rangeContainsTokenLoc(AFD->getBodySourceRange(), Loc)) {
-              BaseDecl = MetaBaseDecl;
+              BaseDC = MetaBaseDC;
             }
           }
 
           // Look in the generic parameters after checking our local declaration.
           GenericParams = AFD->getGenericParams();
+        } else if (auto *SD = dyn_cast<SubscriptDecl>(DC)) {
+          GenericParams = SD->getGenericParams();
         } else if (auto *ACE = dyn_cast<AbstractClosureExpr>(DC)) {
           // Look for local variables; normally, the parser resolves these
           // for us, but it can't do the right thing inside local types.
@@ -765,17 +748,17 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
           }
           if (!isCascadingUse.hasValue())
             isCascadingUse = ACE->isCascadingContextForLookup(false);
-        } else if (ExtensionDecl *ED = dyn_cast<ExtensionDecl>(DC)) {
+        } else if (auto *ED = dyn_cast<ExtensionDecl>(DC)) {
           ExtendedType = ED->getSelfTypeInContext();
 
-          BaseDecl = ED->getAsNominalTypeOrNominalTypeExtensionContext();
-          MetaBaseDecl = BaseDecl;
+          BaseDC = ED;
+          MetaBaseDC = ED;
           if (!isCascadingUse.hasValue())
             isCascadingUse = ED->isCascadingContextForLookup(false);
-        } else if (NominalTypeDecl *ND = dyn_cast<NominalTypeDecl>(DC)) {
+        } else if (auto *ND = dyn_cast<NominalTypeDecl>(DC)) {
           ExtendedType = ND->getDeclaredType();
-          BaseDecl = ND;
-          MetaBaseDecl = BaseDecl;
+          BaseDC = DC;
+          MetaBaseDC = DC;
           if (!isCascadingUse.hasValue())
             isCascadingUse = ND->isCascadingContextForLookup(false);
         } else if (auto I = dyn_cast<DefaultArgumentInitializer>(DC)) {
@@ -785,16 +768,12 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
           DC = I->getParent()->getParent();
           continue;
         } else {
-          assert(isa<TopLevelCodeDecl>(DC) || isa<Initializer>(DC));
+          assert(isa<TopLevelCodeDecl>(DC) || isa<Initializer>(DC) ||
+                 isa<TypeAliasDecl>(DC));
           if (!isCascadingUse.hasValue())
             isCascadingUse = DC->isCascadingContextForLookup(false);
         }
 
-        // If this is implicitly a lookup into the static members, add a metatype
-        // wrapper.
-        if (isTypeLookup && ExtendedType)
-          ExtendedType = MetatypeType::get(ExtendedType, Ctx);
-        
         // Check the generic parameters for something with the given name.
         if (GenericParams) {
           namelookup::FindLocalVal localVal(SM, Loc, Consumer);
@@ -804,10 +783,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
             return;
         }
 
-        if (BaseDecl) {
-          if (TypeResolver)
-            TypeResolver->resolveDeclSignature(BaseDecl);
-
+        if (BaseDC && !ExtendedType->hasError()) {
           NLOptions options = NL_UnqualifiedDefault;
           if (isCascadingUse.getValue())
             options |= NL_KnownCascadingDependency;
@@ -821,35 +797,50 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
           if (IgnoreAccessControl)
             options |= NL_IgnoreAccessibility;
 
-          if (!ExtendedType)
-            ExtendedType = ErrorType::get(Ctx);
-
           SmallVector<ValueDecl *, 4> Lookup;
           DC->lookupQualified(ExtendedType, Name, options, TypeResolver, Lookup);
           bool FoundAny = false;
           for (auto Result : Lookup) {
+            // In Swift 3 mode, unqualified lookup skips static methods when
+            // performing lookup from instance context.
+            //
+            // We don't want to carry this forward to Swift 4, since it makes
+            // for poor diagnostics.
+            //
+            // Also, it was quite a special case and not as general as it
+            // should be -- it didn't apply to properties or subscripts, and
+            // the opposite case where we're in static context and an instance
+            // member shadows the module member wasn't handled either.
+            if (Ctx.isSwiftVersion3() &&
+                !isTypeLookup &&
+                isa<FuncDecl>(Result) &&
+                cast<FuncDecl>(Result)->isStatic()) {
+              continue;
+            }
+
             // Classify this declaration.
             FoundAny = true;
 
             // Types are local or metatype members.
             if (auto TD = dyn_cast<TypeDecl>(Result)) {
               if (isa<GenericTypeParamDecl>(TD))
-                Results.push_back(UnqualifiedLookupResult(Result));
+                Results.push_back(LookupResultEntry(Result));
               else
-                Results.push_back(UnqualifiedLookupResult(MetaBaseDecl, Result));
+                Results.push_back(LookupResultEntry(MetaBaseDC, Result));
               continue;
             }
 
-            Results.push_back(UnqualifiedLookupResult(BaseDecl, Result));
+            Results.push_back(LookupResultEntry(BaseDC, Result));
           }
 
           if (FoundAny) {
             // Predicate that determines whether a lookup result should
             // be unavailable except as a last-ditch effort.
             auto unavailableLookupResult =
-              [&](const UnqualifiedLookupResult &result) {
+              [&](const LookupResultEntry &result) {
+              auto &effectiveVersion = Ctx.LangOpts.EffectiveLanguageVersion;
               return result.getValueDecl()->getAttrs()
-                       .isUnavailableInSwiftVersion();
+                  .isUnavailableInSwiftVersion(effectiveVersion);
             };
 
             // If all of the results we found are unavailable, keep looking.
@@ -872,17 +863,24 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
             dcGenericParams = nominal->getGenericParams();
           else if (auto ext = dyn_cast<ExtensionDecl>(DC))
             dcGenericParams = ext->getGenericParams();
+          else if (auto subscript = dyn_cast<SubscriptDecl>(DC))
+            dcGenericParams = subscript->getGenericParams();
 
-          if (dcGenericParams) {
+          while (dcGenericParams) {
             namelookup::FindLocalVal localVal(SM, Loc, Consumer);
             localVal.checkGenericParams(dcGenericParams);
 
             if (!Results.empty())
               return;
+
+            if (!isa<ExtensionDecl>(DC))
+              break;
+
+            dcGenericParams = dcGenericParams->getOuterParameters();
           }
         }
 
-        DC = DC->getParent();
+        DC = DC->getParentForLookup();
       }
 
       if (!isCascadingUse.hasValue())
@@ -911,9 +909,9 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
   recordLookupOfTopLevelName(DC, Name, isCascadingUse.getValue());
 
   // Add private imports to the extra search list.
-  SmallVector<Module::ImportedModule, 8> extraImports;
+  SmallVector<ModuleDecl::ImportedModule, 8> extraImports;
   if (auto FU = dyn_cast<FileUnit>(DC))
-    FU->getImportedModules(extraImports, Module::ImportFilter::Private);
+    FU->getImportedModules(extraImports, ModuleDecl::ImportFilter::Private);
 
   using namespace namelookup;
   SmallVector<ValueDecl *, 8> CurModuleResults;
@@ -923,7 +921,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
                  resolutionKind, TypeResolver, DC, extraImports);
 
   for (auto VD : CurModuleResults)
-    Results.push_back(UnqualifiedLookupResult(VD));
+    Results.push_back(LookupResultEntry(VD));
 
   if (DebugClient)
     filterForDiscriminator(Results, DebugClient);
@@ -950,17 +948,17 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
 
   // Look for a module with the given name.
   if (Name.isSimpleName(M.getName())) {
-    Results.push_back(UnqualifiedLookupResult(&M));
+    Results.push_back(LookupResultEntry(&M));
     return;
   }
 
-  Module *desiredModule = Ctx.getLoadedModule(Name.getBaseName());
+  ModuleDecl *desiredModule = Ctx.getLoadedModule(Name.getBaseIdentifier());
   if (!desiredModule && Name == Ctx.TheBuiltinModule->getName())
     desiredModule = Ctx.TheBuiltinModule;
   if (desiredModule) {
-    forAllVisibleModules(DC, [&](const Module::ImportedModule &import) -> bool {
+    forAllVisibleModules(DC, [&](const ModuleDecl::ImportedModule &import) -> bool {
       if (import.second == desiredModule) {
-        Results.push_back(UnqualifiedLookupResult(import.second));
+        Results.push_back(LookupResultEntry(import.second));
         return false;
       }
       return true;
@@ -995,9 +993,6 @@ class swift::MemberLookupTable {
 public:
   /// Create a new member lookup table.
   explicit MemberLookupTable(ASTContext &ctx);
-
-  /// Destroy the lookup table.
-  void destroy();
 
   /// Update a lookup table with members from newly-added extensions.
   void updateLookupTable(NominalTypeDecl *nominal);
@@ -1046,7 +1041,7 @@ namespace {
     /// The set of methods with the given selector.
     llvm::TinyPtrVector<AbstractFunctionDecl *> Methods;
   };
-}
+} // end anonymous namespace
 
 /// Class member lookup table, which is a member lookup table with a second
 /// table for lookup based on Objective-C selector.
@@ -1055,10 +1050,6 @@ class ClassDecl::ObjCMethodLookupTable
                                 StoredObjCMethods>
 {
 public:
-  void destroy() {
-    this->~ObjCMethodLookupTable();
-  }
-
   // Only allow allocation of member lookup tables using the allocator in
   // ASTContext or by doing a placement new.
   void *operator new(size_t Bytes, ASTContext &C,
@@ -1075,7 +1066,7 @@ MemberLookupTable::MemberLookupTable(ASTContext &ctx) {
   // Register a cleanup with the ASTContext to call the lookup table
   // destructor.
   ctx.addCleanup([this]() {
-    this->destroy();
+    this->~MemberLookupTable();
   });
 }
 
@@ -1143,10 +1134,6 @@ void MemberLookupTable::updateLookupTable(NominalTypeDecl *nominal) {
   }
 }
 
-void MemberLookupTable::destroy() {
-  this->~MemberLookupTable();
-}
-
 void NominalTypeDecl::addedMember(Decl *member) {
   // If we have a lookup table, add the new member to it.
   if (LookupTable.getPointer()) {
@@ -1203,16 +1190,17 @@ void NominalTypeDecl::makeMemberVisible(ValueDecl *member) {
   LookupTable.getPointer()->addMember(member);
 }
 
-ArrayRef<ValueDecl *> NominalTypeDecl::lookupDirect(DeclName name,
-                                                    bool ignoreNewExtensions) {
+TinyPtrVector<ValueDecl *> NominalTypeDecl::lookupDirect(
+                                                  DeclName name,
+                                                  bool ignoreNewExtensions) {
+  (void)getMembers();
+
   // Make sure we have the complete list of members (in this nominal and in all
   // extensions).
   if (!ignoreNewExtensions) {
     for (auto E : getExtensions())
       (void)E->getMembers();
   }
-
-  (void)getMembers();
 
   prepareLookupTable(ignoreNewExtensions);
 
@@ -1222,7 +1210,7 @@ ArrayRef<ValueDecl *> NominalTypeDecl::lookupDirect(DeclName name,
     return { };
 
   // We found something; return it.
-  return { known->second.begin(), known->second.size() };
+  return known->second;
 }
 
 void ClassDecl::createObjCMethodLookup() {
@@ -1233,7 +1221,7 @@ void ClassDecl::createObjCMethodLookup() {
   // Register a cleanup with the ASTContext to call the lookup table
   // destructor.
   ctx.addCleanup([this]() {
-    this->ObjCMethodLookup->destroy();
+    this->ObjCMethodLookup->~ObjCMethodLookupTable();
   });
 }
 
@@ -1297,11 +1285,12 @@ static bool checkAccessibility(const DeclContext *useDC,
   assert(sourceDC && "ValueDecl being accessed must have a valid DeclContext");
   switch (access) {
   case Accessibility::Private:
-    return useDC == sourceDC || useDC->isChildContextOf(sourceDC);
+    return (useDC == sourceDC ||
+      AccessScope::allowsPrivateAccess(useDC, sourceDC));
   case Accessibility::FilePrivate:
     return useDC->getModuleScopeContext() == sourceDC->getModuleScopeContext();
   case Accessibility::Internal: {
-    const Module *sourceModule = sourceDC->getParentModule();
+    const ModuleDecl *sourceModule = sourceDC->getParentModule();
     const DeclContext *useFile = useDC->getModuleScopeContext();
     if (useFile->getParentModule() == sourceModule)
       return true;
@@ -1341,13 +1330,10 @@ bool DeclContext::lookupQualified(Type type,
   using namespace namelookup;
   assert(decls.empty() && "additive lookup not supported");
 
-  if (type->hasError())
-    return false;
-
   auto checkLookupCascading = [this, options]() -> Optional<bool> {
     switch (static_cast<unsigned>(options & NL_KnownDependencyMask)) {
     case 0:
-      return isCascadingContextForLookup(/*excludeFunctions=*/false);
+      return isCascadingContextForLookup(/*functionsAreNonCascading=*/false);
     case NL_KnownNonCascadingDependency:
       return false;
     case NL_KnownCascadingDependency:
@@ -1356,26 +1342,17 @@ bool DeclContext::lookupQualified(Type type,
       return None;
     default:
       // FIXME: Use llvm::CountPopulation_64 when that's declared constexpr.
+#if defined(__clang__) || defined(__GNUC__)
       static_assert(__builtin_popcountll(NL_KnownDependencyMask) == 2,
                     "mask should only include four values");
+#endif
       llvm_unreachable("mask only includes four values");
     }
   };
 
-  // Look through lvalue and inout types.
-  type = type->getLValueOrInOutObjectType();
-
-  // Look through metatypes.
-  if (auto metaTy = type->getAs<AnyMetatypeType>())
-    type = metaTy->getInstanceType();
-
-  // Look through DynamicSelf.
-  if (auto dynamicSelf = type->getAs<DynamicSelfType>())
-    type = dynamicSelf->getSelfType();
-
   // Look for module references.
   if (auto moduleTy = type->getAs<ModuleType>()) {
-    Module *module = moduleTy->getModule();
+    ModuleDecl *module = moduleTy->getModule();
     auto topLevelScope = getModuleScopeContext();
     if (module == topLevelScope->getParentModule()) {
       if (auto maybeLookupCascade = checkLookupCascading()) {
@@ -1393,7 +1370,7 @@ bool DeclContext::lookupQualified(Type type,
 
       // Perform the lookup in all imports of this module.
       forAllVisibleModules(this,
-                           [&](const Module::ImportedModule &import) -> bool {
+                           [&](const ModuleDecl::ImportedModule &import) -> bool {
         if (import.second != module)
           return true;
         lookupInModule(import.second, import.first, member, decls,
@@ -1431,23 +1408,11 @@ bool DeclContext::lookupQualified(Type type,
   llvm::SmallPtrSet<NominalTypeDecl *, 4> visited;
 
   // Handle nominal types.
-  bool wantProtocolMembers = false;
+  bool wantProtocolMembers = (options & NL_ProtocolMembers);
   bool wantLookupInAllClasses = false;
   if (auto nominal = type->getAnyNominal()) {
     visited.insert(nominal);
     stack.push_back(nominal);
-    
-    wantProtocolMembers = (options & NL_ProtocolMembers) &&
-                          !isa<ProtocolDecl>(nominal);
-
-    // If we want dynamic lookup and we're searching in the
-    // AnyObject protocol, note this for later.
-    if (options & NL_DynamicLookup) {
-      if (auto proto = dyn_cast<ProtocolDecl>(nominal)) {
-        if (proto->isSpecificProtocol(KnownProtocolKind::AnyObject))
-          wantLookupInAllClasses = true;
-      }
-    }
   }
   // Handle archetypes
   else if (auto archetypeTy = type->getAs<ArchetypeType>()) {
@@ -1457,44 +1422,43 @@ bool DeclContext::lookupQualified(Type type,
         stack.push_back(proto);
 
     // Look into the superclasses of this archetype.
-    if (auto superclassTy = archetypeTy->getSuperclass()) {
-      if (auto superclassDecl = superclassTy->getAnyNominal()) {
-        if (visited.insert(superclassDecl).second) {
+    if (auto superclassTy = archetypeTy->getSuperclass())
+      if (auto superclassDecl = superclassTy->getAnyNominal())
+        if (visited.insert(superclassDecl).second)
           stack.push_back(superclassDecl);
-
-          wantProtocolMembers = (options & NL_ProtocolMembers) &&
-                                !isa<ProtocolDecl>(superclassDecl);
-        }
-      }
-    }
   }
   // Handle protocol compositions.
   else if (auto compositionTy = type->getAs<ProtocolCompositionType>()) {
-    SmallVector<ProtocolDecl *, 4> protocols;
-    if (compositionTy->isExistentialType(protocols)) {
-      for (auto proto : protocols) {
-        if (visited.insert(proto).second) {
-          stack.push_back(proto);
+    auto layout = compositionTy->getExistentialLayout();
 
-          // If we want dynamic lookup and this is the AnyObject
-          // protocol, note this for later.
-          if ((options & NL_DynamicLookup) &&
-              proto->isSpecificProtocol(KnownProtocolKind::AnyObject))
-            wantLookupInAllClasses = true;
-        }
-      }
+    if (layout.isAnyObject() &&
+        (options & NL_DynamicLookup))
+      wantLookupInAllClasses = true;
+
+    for (auto proto : layout.getProtocols()) {
+      auto *protoDecl = proto->getDecl();
+      if (visited.insert(protoDecl).second)
+        stack.push_back(protoDecl);
     }
+
+    if (layout.superclass) {
+      auto *nominalDecl = layout.superclass->getAnyNominal();
+      if (visited.insert(nominalDecl).second)
+        stack.push_back(nominalDecl);
+    }
+  } else {
+    llvm_unreachable("Bad type for qualified lookup");
   }
 
   // Allow filtering of the visible declarations based on various
   // criteria.
   bool onlyCompleteObjectInits = false;
-  auto isAcceptableDecl = [&](NominalTypeDecl *current, Decl *decl) -> bool {
+  auto isAcceptableDecl = [&](NominalTypeDecl *current, ValueDecl *decl) -> bool {
     // If the decl is currently being type checked, then we have something
     // cyclic going on.  Instead of poking at parts that are potentially not
     // set up, just assume it is acceptable.  This will make sure we produce an
     // error later.
-    if (decl->isBeingTypeChecked())
+    if (!decl->hasValidSignature())
       return true;
     
     // Filter out designated initializers, if requested.
@@ -1515,8 +1479,7 @@ bool DeclContext::lookupQualified(Type type,
 
     // Check access.
     if (!(options & NL_IgnoreAccessibility))
-      if (auto VD = dyn_cast<ValueDecl>(decl))
-        return VD->isAccessibleFrom(this);
+      return decl->isAccessibleFrom(this);
 
     return true;
   };
@@ -1542,9 +1505,13 @@ bool DeclContext::lookupQualified(Type type,
     if (tracker)
       tracker->addUsedMember({current, member.getBaseName()},isLookupCascading);
 
-    // Make sure we've resolved implicit constructors, if we need them.
-    if (member.getBaseName() == ctx.Id_init && typeResolver)
-      typeResolver->resolveImplicitConstructors(current);
+    // Make sure we've resolved implicit members, if we need them.
+    if (typeResolver) {
+      if (member.getBaseName() == ctx.Id_init)
+        typeResolver->resolveImplicitConstructors(current);
+
+      typeResolver->resolveImplicitMember(current, member);
+    }
 
     // Look for results within the current nominal type and its extensions.
     bool currentIsProtocol = isa<ProtocolDecl>(current);
@@ -1556,12 +1523,8 @@ bool DeclContext::lookupQualified(Type type,
 
       // Resolve the declaration signature when we find the
       // declaration.
-      if (typeResolver && !decl->isBeingTypeChecked()) {
+      if (typeResolver)
         typeResolver->resolveDeclSignature(decl);
-
-        if (!decl->hasType())
-          continue;
-      }
 
       if (isAcceptableDecl(current, decl))
         decls.push_back(decl);
@@ -1614,7 +1577,7 @@ bool DeclContext::lookupQualified(Type type,
 
     // Collect all of the visible declarations.
     SmallVector<ValueDecl *, 4> allDecls;
-    forAllVisibleModules(this, [&](Module::ImportedModule import) {
+    forAllVisibleModules(this, [&](ModuleDecl::ImportedModule import) {
       import.second->lookupClassMember(import.first, member, allDecls);
     });
 
@@ -1627,11 +1590,8 @@ bool DeclContext::lookupQualified(Type type,
       if ((options & NL_OnlyTypes) && !isa<TypeDecl>(decl))
         continue;
 
-      if (typeResolver && !decl->isBeingTypeChecked()) {
+      if (typeResolver)
         typeResolver->resolveDeclSignature(decl);
-        if (!decl->hasType())
-          continue;
-      }
 
       // If the declaration has an override, name lookup will also have
       // found the overridden method. Skip this declaration, because we
@@ -1660,7 +1620,7 @@ bool DeclContext::lookupQualified(Type type,
     removeOverriddenDecls(decls);
 
   // If we're supposed to remove shadowed/hidden declarations, do so now.
-  Module *M = getParentModule();
+  ModuleDecl *M = getParentModule();
   if (options & NL_RemoveNonVisible)
     removeShadowedDecls(decls, M, typeResolver);
 
@@ -1675,7 +1635,7 @@ void DeclContext::lookupAllObjCMethods(
        ObjCSelector selector,
        SmallVectorImpl<AbstractFunctionDecl *> &results) const {
   // Collect all of the methods with this selector.
-  forAllVisibleModules(this, [&](Module::ImportedModule import) {
+  forAllVisibleModules(this, [&](ModuleDecl::ImportedModule import) {
     import.second->lookupObjCMethods(selector, results);
   });
 

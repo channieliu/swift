@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -44,8 +44,10 @@ WARNING(warning_parallel_execution_not_supported,none,
 
 ERROR(error_unable_to_execute_command,none,
       "unable to execute command: %0", (StringRef))
-ERROR(error_command_signalled,none,
+ERROR(error_command_signalled_without_signal_number,none,
       "%0 command failed due to signal (use -v to see invocation)", (StringRef))
+ERROR(error_command_signalled,none,
+      "%0 command failed due to signal %1 (use -v to see invocation)", (StringRef, int))
 ERROR(error_command_failed,none,
       "%0 command failed with exit code %1 (use -v to see invocation)",
       (StringRef, int))
@@ -99,6 +101,8 @@ ERROR(error_os_minimum_deployment,none,
       "Swift requires a minimum deployment target of %0", (StringRef))
 ERROR(error_sdk_too_old,none,
       "Swift does not support the SDK '%0'", (StringRef))
+ERROR(error_ios_maximum_deployment_32,none,
+      "iOS %0 does not support 32-bit programs", (unsigned))
 
 ERROR(error_two_files_same_name,none,
       "filename \"%0\" used twice: '%1' and '%2'",
@@ -111,6 +115,10 @@ WARNING(warn_cannot_stat_input,none,
         "unable to determine when '%0' was last modified: %1",
         (StringRef, StringRef))
 
+WARNING(warn_unable_to_load_dependencies, none,
+        "unable to load dependencies file \"%0\", disabling incremental mode",
+        (StringRef))
+
 ERROR(error_input_changed_during_build,none,
       "input file '%0' was modified during the build",
       (StringRef))
@@ -118,6 +126,12 @@ ERROR(error_input_changed_during_build,none,
 ERROR(error_conflicting_options, none,
       "conflicting options '%0' and '%1'",
       (StringRef, StringRef))
+
+WARNING(warn_ignore_embed_bitcode, none,
+        "ignoring -embed-bitcode since no object file is being generated", ())
+
+WARNING(verify_debug_info_requires_debug_option,none,
+        "ignoring '-verify-debug-info'; no debug info is being generated", ())
 
 #ifndef DIAG_NO_UNDEF
 # if defined(DIAG)

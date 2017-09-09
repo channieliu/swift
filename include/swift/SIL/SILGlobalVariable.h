@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -58,10 +58,10 @@ private:
   /// The linkage of the global variable.
   unsigned Linkage : NumSILLinkageBits;
 
-  /// The global variable's fragile attribute.
-  /// Fragile means that the variable can be "inlined" into another module.
+  /// The global variable's serialized attribute.
+  /// Serialized means that the variable can be "inlined" into another module.
   /// Currently this flag is set for all global variables in the stdlib.
-  unsigned Fragile : 1;
+  unsigned Serialized : 1;
   
   /// Whether this is a 'let' property, which can only be initialized
   /// once (either in its declaration, or once later), making it immutable.
@@ -76,13 +76,14 @@ private:
   /// The static initializer.
   SILFunction *InitializerF;
 
-  SILGlobalVariable(SILModule &M, SILLinkage linkage, bool IsFragile,
+  SILGlobalVariable(SILModule &M, SILLinkage linkage,
+                    IsSerialized_t IsSerialized,
                     StringRef mangledName, SILType loweredType,
                     Optional<SILLocation> loc, VarDecl *decl);
   
 public:
   static SILGlobalVariable *create(SILModule &Module, SILLinkage Linkage,
-                                   bool IsFragile,
+                                   IsSerialized_t IsSerialized,
                                    StringRef MangledName, SILType LoweredType,
                                    Optional<SILLocation> Loc = None,
                                    VarDecl *Decl = nullptr);
@@ -107,9 +108,9 @@ public:
   SILLinkage getLinkage() const { return SILLinkage(Linkage); }
   void setLinkage(SILLinkage linkage) { Linkage = unsigned(linkage); }
 
-  /// Get this global variable's fragile attribute.
-  bool isFragile() const { return Fragile != 0; }
-  void setFragile(bool isFrag) { Fragile = isFrag ? 1 : 0; }
+  /// Get this global variable's serialized attribute.
+  IsSerialized_t isSerialized() const;
+  void setSerialized(IsSerialized_t isSerialized);
   
   /// Is this an immutable 'let' property?
   bool isLet() const { return IsLet; }
@@ -145,17 +146,12 @@ public:
   SILInstruction *getValueOfStaticInitializer();
 
   /// Return whether this variable corresponds to a Clang node.
-  bool hasClangNode() const {
-    return (VDecl ? VDecl->hasClangNode() : false);
-  }
+  bool hasClangNode() const;
 
   /// Return the Clang node associated with this variable if it has one.
-  ClangNode getClangNode() const {
-    return (VDecl ? VDecl->getClangNode() : ClangNode());
-  }
-  const clang::Decl *getClangDecl() const {
-    return (VDecl ? VDecl->getClangDecl() : nullptr);
-  }
+  ClangNode getClangNode() const;
+
+  const clang::Decl *getClangDecl() const;
 
   //===--------------------------------------------------------------------===//
   // Miscellaneous
@@ -167,7 +163,10 @@ public:
   
   /// Pretty-print the variable.
   void dump(bool Verbose) const;
-  void dump() const LLVM_ATTRIBUTE_USED { dump(false); }
+  /// Pretty-print the variable.
+  ///
+  /// This is a separate entry point for ease of debugging.
+  void dump() const LLVM_ATTRIBUTE_USED;
 
   /// Pretty-print the variable to the designated stream as a 'sil_global'
   /// definition.
@@ -201,20 +200,7 @@ struct ilist_traits<::swift::SILGlobalVariable> :
 public ilist_default_traits<::swift::SILGlobalVariable> {
   typedef ::swift::SILGlobalVariable SILGlobalVariable;
 
-private:
-  mutable ilist_half_node<SILGlobalVariable> Sentinel;
-
 public:
-  SILGlobalVariable *createSentinel() const {
-    return static_cast<SILGlobalVariable*>(&Sentinel);
-  }
-  void destroySentinel(SILGlobalVariable *) const {}
-
-  SILGlobalVariable *provideInitialHead() const { return createSentinel(); }
-  SILGlobalVariable *ensureHead(SILGlobalVariable*) const {
-    return createSentinel();
-  }
-  static void noteHead(SILGlobalVariable*, SILGlobalVariable*) {}
   static void deleteNode(SILGlobalVariable *V) {}
   
 private:

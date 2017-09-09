@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -158,10 +158,11 @@ struct CompactVariantFuncs {
     return SOURCEKITD_VARIANT_TYPE_DICTIONARY;
   }
 
-  static bool dictionary_apply(
-        sourcekitd_variant_t dict,
-        sourcekitd_variant_dictionary_applier_t applier) {
-    void *Buf = (void*)dict.data[1];
+  static bool
+  dictionary_apply(sourcekitd_variant_t dict,
+                   llvm::function_ref<bool(sourcekitd_uid_t,
+                                           sourcekitd_variant_t)> applier) {
+    void *Buf = (void *)dict.data[1];
     size_t Index = dict.data[2];
     return T::dictionary_apply(Buf, Index, applier);
   }

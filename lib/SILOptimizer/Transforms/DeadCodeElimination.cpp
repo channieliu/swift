@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,9 +46,7 @@ static bool seemsUseful(SILInstruction *I) {
   if (auto *BI = dyn_cast<BuiltinInst>(I)) {
     // Although the onFastPath builtin has no side-effects we don't want to
     // remove it.
-    if (BI->getBuiltinInfo().ID == BuiltinValueKind::OnFastPath)
-      return true;
-    return false;
+    return BI->getBuiltinInfo().ID == BuiltinValueKind::OnFastPath;
   }
 
   if (isa<ReturnInst>(I) || isa<UnreachableInst>(I) || isa<ThrowInst>(I))
@@ -109,7 +107,7 @@ class DCE : public SILFunctionTransform {
 
     SILFunction *F = getFunction();
 
-    auto* DA = PM->getAnalysis<PostDominanceAnalysis>();
+    auto *DA = PM->getAnalysis<PostDominanceAnalysis>();
     PDT = DA->get(F);
 
     // If we have a function that consists of nothing but a
@@ -176,7 +174,6 @@ class DCE : public SILFunctionTransform {
   SILBasicBlock *nearestUsefulPostDominator(SILBasicBlock *Block);
   void replaceBranchWithJump(SILInstruction *Inst, SILBasicBlock *Block);
 
-  StringRef getName() override { return "Dead Code Elimination"; }
 };
 
 // Keep track of the fact that V is live and add it to our worklist
@@ -302,6 +299,7 @@ void DCE::markTerminatorArgsLive(SILBasicBlock *Pred,
   case TermKind::DynamicMethodBranchInst:
   case TermKind::SwitchEnumInst:
   case TermKind::CheckedCastBranchInst:
+  case TermKind::CheckedCastValueBranchInst:
     assert(ArgIndex == 0 && "Expected a single argument!");
 
     // We do not need to do anything with these. If the resulting
@@ -345,13 +343,13 @@ void DCE::propagateLiveBlockArgument(SILArgument *Arg) {
   for (Operand *DU : getDebugUses(Arg))
     markValueLive(DU->getUser());
 
-  if (Arg->isFunctionArg())
+  if (isa<SILFunctionArgument>(Arg))
     return;
 
   auto *Block = Arg->getParent();
   auto ArgIndex = Arg->getIndex();
 
-  for (auto Pred : Block->getPreds())
+  for (auto Pred : Block->getPredecessorBlocks())
     markTerminatorArgsLive(Pred, Block, ArgIndex);
 }
 
@@ -388,6 +386,7 @@ void DCE::propagateLiveness(SILInstruction *I) {
   case TermKind::SwitchEnumAddrInst:
   case TermKind::DynamicMethodBranchInst:
   case TermKind::CheckedCastBranchInst:
+  case TermKind::CheckedCastValueBranchInst:
     markValueLive(I->getOperand(0));
     return;
 
@@ -430,10 +429,10 @@ void DCE::replaceBranchWithJump(SILInstruction *Inst, SILBasicBlock *Block) {
          "Unexpected dead terminator kind!");
 
   SILInstruction *Branch;
-  if (!Block->bbarg_empty()) {
+  if (!Block->args_empty()) {
     std::vector<SILValue> Args;
-    auto E = Block->bbarg_end();
-    for (auto A = Block->bbarg_begin(); A != E; ++A) {
+    auto E = Block->args_end();
+    for (auto A = Block->args_begin(); A != E; ++A) {
       assert(!LiveValues.count(*A) && "Unexpected live block argument!");
       Args.push_back(SILUndef::get((*A)->getType(), (*A)->getModule()));
     }
@@ -452,7 +451,7 @@ bool DCE::removeDead(SILFunction &F) {
   bool Changed = false;
 
   for (auto &BB : F) {
-    for (auto I = BB.bbarg_begin(), E = BB.bbarg_end(); I != E; ) {
+    for (auto I = BB.args_begin(), E = BB.args_end(); I != E;) {
       auto Inst = *I++;
       if (LiveValues.count(Inst))
         continue;
@@ -582,7 +581,7 @@ void DCE::computePredecessorDependence(SILFunction &F) {
     assert(ControllingInfoMap.find(&BB) != ControllingInfoMap.end()
            && "Expected to already have a map entry for block!");
 
-    for (auto Pred : BB.getPreds())
+    for (auto Pred : BB.getPredecessorBlocks())
       if (!PDT->properlyDominates(&BB, Pred)) {
         assert(ControllingInfoMap.find(Pred) != ControllingInfoMap.end() &&
                "Expected to already have a map entry for block!");

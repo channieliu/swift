@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -35,10 +35,6 @@ namespace irgen {
   using GetTypeParameterInContextFn =
     llvm::function_ref<CanType(CanType type)>;
 
-  void bindArchetypeAccessPaths(IRGenFunction &IGF,
-                                GenericSignature *generics,
-                                GetTypeParameterInContextFn getInContext);
-
   /// Emit a type metadata reference for an archetype.
   llvm::Value *emitArchetypeTypeMetadataRef(IRGenFunction &IGF,
                                             CanArchetypeType archetype);
@@ -52,14 +48,6 @@ namespace irgen {
   llvm::Value *emitAssociatedTypeMetadataRef(IRGenFunction &IGF,
                                              CanArchetypeType origin,
                                              AssociatedTypeDecl *associate);
-
-  /// Emit a witness table reference for a specific conformance of an
-  /// associated type of an archetype.
-  llvm::Value *emitAssociatedTypeWitnessTableRef(IRGenFunction &IGF,
-                                                 CanArchetypeType origin,
-                                                 AssociatedTypeDecl *associate,
-                                                 llvm::Value *associateMetadata,
-                                               ProtocolDecl *associateProtocol);
 
   /// Emit a dynamic metatype lookup for the given archetype.
   llvm::Value *emitDynamicTypeOfOpaqueArchetype(IRGenFunction &IGF,

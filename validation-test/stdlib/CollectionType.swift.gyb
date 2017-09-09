@@ -474,8 +474,8 @@ CollectionTypeTests.test("Collection.makeIterator()/DefaultImplementation") {
     }
 
     checkCollection(
-      collection,
-      expected: Array(1..<count+1).map(OpaqueValue.init) as [OpaqueValue<Int>]
+      Array(1..<count+1).map(OpaqueValue.init) as [OpaqueValue<Int>],
+      collection
     ) { $0.value == $1.value }
   }
 }
@@ -547,8 +547,8 @@ CollectionTypeTests.test("Collection.makeIterator()/CustomImplementation") {
     }
 
     checkCollection(
+      Array(1..<count+1).map(OpaqueValue.init) as [OpaqueValue<Int>],
       collection,
-      expected: Array(1..<count+1).map(OpaqueValue.init) as [OpaqueValue<Int>],
       resiliencyChecks: .none) { $0.value == $1.value }
   }
 }
@@ -641,8 +641,9 @@ CollectionTypeTests.test("index(of:)/WhereElementIsEquatable/dispatch") {
 // <rdar://problem/20582358> Commenting out one line determines whether a
 // completely different line type-checks
 func callGenericFind_<
-  C : Collection where C.Iterator.Element : Equatable
->(_ collection: C, _ element: C.Iterator.Element) -> C.Index? {
+  C : Collection
+>(_ collection: C, _ element: C.Iterator.Element) -> C.Index? 
+where C.Iterator.Element : Equatable {
   return collection.index(of: element)
 }
 
@@ -730,6 +731,19 @@ CollectionTypeTests.test("index(of:)/ContinueSearch") {
       [ 0, 2, 4 ],
       actual
       )
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Collection indices types
+//===----------------------------------------------------------------------===//
+
+// SR-2121
+extension Collection {
+  func testIndicesElementType() {
+    for index in self.indices {
+      _ = self[index]
+    }
   }
 }
 

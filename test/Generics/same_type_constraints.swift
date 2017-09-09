@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift -swift-version 4
 
 protocol Fooable {
   associatedtype Foo
@@ -123,7 +123,7 @@ struct Composed<Left: Bindable, Right: Observable> where Left.Input == Right.Out
 infix operator <- : AssignmentPrecedence
 
 func <- <
-    Right : Observable
+    Right
     >(lhs: @escaping (Right.Output) -> Void, rhs: Right) -> Composed<SideEffect<Right>, Right>?
 {
   return nil
@@ -154,7 +154,7 @@ extension Dictionary {
 
 // rdar://problem/19245317
 protocol P {
-	associatedtype T: P // expected-error{{type may not reference itself as a requirement}}
+	associatedtype T: P
 }
 
 struct S<A: P> {
@@ -318,3 +318,57 @@ struct EventHorizon : Timewarp {
 func activate<T>(_ t: T) {}
 
 activate(Teleporter<EventHorizon, Beam>())
+
+// rdar://problem/29288428
+class C {}
+
+protocol P9 {
+  associatedtype A
+}
+
+struct X7<T: P9> where T.A : C { }
+
+extension X7 where T.A == Int { } // expected-error {{'T.A' requires that 'Int' inherit from 'C'}}
+struct X8<T: C> { }
+
+extension X8 where T == Int { } // expected-error {{'T' requires that 'Int' inherit from 'C'}}
+
+protocol P10 {
+	associatedtype A
+	associatedtype B
+	associatedtype C
+	associatedtype D
+	associatedtype E
+}
+
+protocol P11: P10 where A == B { }
+
+func intracomponent<T: P11>(_: T) // expected-note{{previous same-type constraint 'T.A' == 'T.B' implied here}}
+  where T.A == T.B { } // expected-warning{{redundant same-type constraint 'T.A' == 'T.B'}}
+
+func intercomponentSameComponents<T: P10>(_: T)
+  where T.A == T.B, // expected-warning{{redundant same-type constraint 'T.A' == 'T.B'}}
+        T.B == T.A { } // expected-note{{previous same-type constraint 'T.A' == 'T.B' written here}}
+                       // FIXME: directionality of constraint above is weird
+
+func intercomponentMoreThanSpanningTree<T: P10>(_: T)
+  where T.A == T.B,
+        T.B == T.C,
+        T.D == T.E, // expected-note{{previous same-type constraint 'T.D' == 'T.E' written here}}
+        T.D == T.B,
+        T.E == T.B  // expected-warning{{redundant same-type constraint 'T.B' == 'T.E'}}
+        { }
+
+func trivialRedundancy<T: P10>(_: T) where T.A == T.A { } // expected-warning{{redundant same-type constraint 'T.A' == 'T.A'}}
+
+struct X11<T: P10> where T.A == T.B { }
+
+func intracomponentInferred<T>(_: X11<T>) // expected-note{{previous same-type constraint 'T.A' == 'T.B' inferred from type here}}
+  where T.A == T.B { } // expected-warning{{redundant same-type constraint 'T.A' == 'T.B'}}
+
+// Suppress redundant same-type constraint warnings from result types.
+struct StructTakingP1<T: P1> { }
+
+func resultTypeSuppress<T: P1>() -> StructTakingP1<T> {
+  return StructTakingP1()
+}

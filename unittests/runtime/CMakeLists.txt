@@ -1,6 +1,11 @@
 if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
    ("${SWIFT_HOST_VARIANT_ARCH}" STREQUAL "${SWIFT_PRIMARY_VARIANT_ARCH}"))
 
+  set(swift_runtime_test_extra_libraries)
+  if(SWIFT_BUILD_STATIC_STDLIB AND "${SWIFT_HOST_VARIANT_SDK}" STREQUAL "LINUX")
+    list(APPEND swift_runtime_test_extra_libraries swiftImageInspectionShared)
+  endif()
+
   add_subdirectory(LongTests)
 
   set(PLATFORM_SOURCES)
@@ -17,6 +22,8 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
       ${FOUNDATION_LIBRARY}
       swiftStdlibUnittest${SWIFT_PRIMARY_VARIANT_SUFFIX}
       )
+  elseif(SWIFT_HOST_VARIANT STREQUAL "linux")
+    list(APPEND PLATFORM_TARGET_LINK_LIBRARIES "atomic")
   elseif(SWIFT_HOST_VARIANT STREQUAL "freebsd")
     find_library(EXECINFO_LIBRARY execinfo)
     list(APPEND PLATFORM_TARGET_LINK_LIBRARIES
@@ -25,6 +32,7 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
   endif()
 
   add_swift_unittest(SwiftRuntimeTests
+    Exclusivity.cpp
     Metadata.cpp
     Mutex.cpp
     Enum.cpp
@@ -42,6 +50,7 @@ if(("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "${SWIFT_PRIMARY_VARIANT_SDK}") AND
   target_link_libraries(SwiftRuntimeTests
     swiftCore${SWIFT_PRIMARY_VARIANT_SUFFIX}
     ${PLATFORM_TARGET_LINK_LIBRARIES}
+    ${swift_runtime_test_extra_libraries}
     )
 endif()
 

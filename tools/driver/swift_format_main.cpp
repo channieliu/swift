@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -42,9 +42,13 @@ private:
   std::unique_ptr<ParserUnit> Parser;
   class FormatterDiagConsumer : public swift::DiagnosticConsumer {
     void handleDiagnostic(SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
-                          StringRef Text,
+                          StringRef FormatString,
+                          ArrayRef<DiagnosticArgument> FormatArgs,
                           const swift::DiagnosticInfo &Info) override {
-      llvm::errs() << "Parse error: " << Text << "\n";
+      llvm::errs() << "Parse error: ";
+      DiagnosticEngine::formatDiagnosticText(llvm::errs(), FormatString,
+                                             FormatArgs);
+      llvm::errs() << "\n";
     }
   } DiagConsumer;
 
@@ -79,10 +83,8 @@ private:
   std::string MainExecutablePath;
   std::string OutputFilename = "-";
   std::vector<std::string> InputFilenames;
-  bool UseTabs = false;
+  CodeFormatOptions FormatOptions;
   bool InPlace = false;
-  unsigned TabWidth = 4;
-  unsigned IndentWidth = 4;
   std::vector<std::string> LineRanges;
 
   bool parseLineRange(StringRef Input, unsigned &FromLine, unsigned &ToLine) {
@@ -117,18 +119,21 @@ public:
     }
 
     if (ParsedArgs.getLastArg(OPT_use_tabs))
-      UseTabs = true;
+      FormatOptions.UseTabs = true;
+
+    if (ParsedArgs.getLastArg(OPT_indent_switch_case))
+      FormatOptions.IndentSwitchCase = true;
 
     if (ParsedArgs.getLastArg(OPT_in_place))
       InPlace = true;
 
     if (const Arg *A = ParsedArgs.getLastArg(OPT_tab_width))
-      if (StringRef(A->getValue()).getAsInteger(10, TabWidth))
+      if (StringRef(A->getValue()).getAsInteger(10, FormatOptions.TabWidth))
         Diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
                        A->getAsString(ParsedArgs), A->getValue());
 
     if (const Arg *A = ParsedArgs.getLastArg(OPT_indent_width))
-      if (StringRef(A->getValue()).getAsInteger(10, IndentWidth))
+      if (StringRef(A->getValue()).getAsInteger(10, FormatOptions.IndentWidth))
         Diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
                        A->getAsString(ParsedArgs), A->getValue());
 
@@ -157,11 +162,6 @@ public:
       InputFilenames.push_back(A->getValue());
     }
 
-    if (InputFilenames.empty()) {
-      Diags.diagnose(SourceLoc(), diag::error_mode_requires_an_input_file);
-      return 1;
-    }
-
     if (const Arg *A = ParsedArgs.getLastArg(OPT_o)) {
       OutputFilename = A->getValue();
     }
@@ -186,11 +186,6 @@ public:
     if (LineRanges.empty()) {
       LineRanges.push_back("1:" + std::to_string(UINT_MAX));
     }
-
-    CodeFormatOptions FormatOptions;
-    FormatOptions.UseTabs = UseTabs;
-    FormatOptions.IndentWidth = IndentWidth;
-    FormatOptions.TabWidth = TabWidth;
 
     std::string Output = Doc.memBuffer().getBuffer();
     for (unsigned Range = 0; Range < LineRanges.size(); ++Range) {
@@ -254,7 +249,7 @@ int swift_format_main(ArrayRef<const char *> Args, const char *Argv0,
 
   DiagnosticEngine &Diags = Instance.getDiags();
   if (Invocation.parseArgs(Args, Diags) != 0)
-    return 1;
+    return EXIT_FAILURE;
 
   std::vector<std::string> InputFiles = Invocation.getInputFilenames();
   unsigned NumInputFiles = InputFiles.size();
@@ -268,10 +263,11 @@ int swift_format_main(ArrayRef<const char *> Args, const char *Argv0,
       // We don't support formatting file ranges for multiple files.
       Instance.getDiags().diagnose(SourceLoc(),
                                    diag::error_formatting_multiple_file_ranges);
-      return 1;
+      return EXIT_FAILURE;
     }
     for (unsigned i = 0; i < NumInputFiles; ++i)
       Invocation.format(InputFiles[i], Diags);
   }
-  return 0;
+
+  return EXIT_SUCCESS;
 }

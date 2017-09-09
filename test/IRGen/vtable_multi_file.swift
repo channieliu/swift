@@ -4,9 +4,9 @@
 
 func markUsed<T>(_ t: T) {}
 
-// CHECK-LABEL: define hidden void @_TF17vtable_multi_file36baseClassVtablesIncludeImplicitInitsFT_T_() {{.*}} {
+// CHECK-LABEL: define hidden swiftcc void @_T017vtable_multi_file36baseClassVtablesIncludeImplicitInitsyyF() {{.*}} {
 func baseClassVtablesIncludeImplicitInits() {
-  // CHECK: [[T0:%.*]] = call %swift.type* @_TMaC17vtable_multi_file8Subclass()
+  // CHECK: [[T0:%.*]] = call %swift.type* @_T017vtable_multi_file8SubclassCMa()
   // CHECK: [[T1:%.*]] = bitcast %swift.type* [[T0]] to { i64, i64, i64 } (%swift.type*)**
   // CHECK: [[T2:%.*]] = getelementptr inbounds { i64, i64, i64 } (%swift.type*)*, { i64, i64, i64 } (%swift.type*)** [[T1]], i64 11
   // CHECK: load { i64, i64, i64 } (%swift.type*)*, { i64, i64, i64 } (%swift.type*)** [[T2]]

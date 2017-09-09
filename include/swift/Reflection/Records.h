@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,7 +19,7 @@
 
 #include "swift/Basic/RelativePointer.h"
 
-const uint16_t SWIFT_REFLECTION_METADATA_VERSION = 1;
+const uint16_t SWIFT_REFLECTION_METADATA_VERSION = 3; // superclass field
 
 namespace swift {
 namespace reflection {
@@ -32,7 +32,7 @@ class FieldRecordFlags {
     // Is this an indirect enum case?
     IsIndirectCase = 0x1
   };
-  int_type Data;
+  int_type Data = 0;
 
 public:
   bool isIndirectCase() const {
@@ -145,6 +145,7 @@ class FieldDescriptor {
   }
 
   const RelativeDirectPointer<const char> MangledTypeName;
+  const RelativeDirectPointer<const char> Superclass;
 
 public:
   FieldDescriptor() = delete;
@@ -189,6 +190,14 @@ public:
 
   std::string getMangledTypeName() const {
     return MangledTypeName.get();
+  }
+
+  bool hasSuperclass() const {
+    return Superclass;
+  }
+
+  std::string getSuperclass() const {
+    return Superclass.get();
   }
 };
 

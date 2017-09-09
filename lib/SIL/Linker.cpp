@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,6 +17,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Debug.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/SIL/FormalLinkage.h"
 #include <functional>
 
@@ -79,30 +80,6 @@ bool SILLinkerVisitor::processFunction(SILFunction *F) {
 }
 
 /// Process Decl, recursively deserializing any thing Decl may reference.
-bool SILLinkerVisitor::processDeclRef(SILDeclRef Decl) {
-  if (Mode == LinkingMode::LinkNone)
-    return false;
-
-  // If F is a declaration, first deserialize it.
-  auto *NewFn = Loader->lookupSILFunction(Decl);
-  if (!NewFn || NewFn->isExternalDeclaration())
-    return false;
-
-  if (!shouldImportFunction(NewFn)) {
-    return false;
-  }
-
-  ++NumFuncLinked;
-
-  // Try to transitively deserialize everything referenced by NewFn.
-  Worklist.push_back(NewFn);
-  process();
-
-  // Since we successfully processed at least one function, return true.
-  return true;
-}
-
-/// Process Decl, recursively deserializing any thing Decl may reference.
 bool SILLinkerVisitor::processFunction(StringRef Name) {
   if (Mode == LinkingMode::LinkNone)
     return false;
@@ -140,7 +117,8 @@ SILFunction *SILLinkerVisitor::lookupFunction(StringRef Name,
 }
 
 /// Process Decl, recursively deserializing any thing Decl may reference.
-bool SILLinkerVisitor::hasFunction(StringRef Name, SILLinkage Linkage) {
+bool SILLinkerVisitor::hasFunction(StringRef Name,
+                                   Optional<SILLinkage> Linkage) {
   return Loader->hasSILFunction(Name, Linkage);
 }
 
@@ -163,7 +141,7 @@ SILVTable *SILLinkerVisitor::processClassDecl(const ClassDecl *C) {
   // Otherwise, add all the vtable functions in Vtbl to the function
   // processing list...
   for (auto &E : Vtbl->getEntries())
-    Worklist.push_back(E.second);
+    Worklist.push_back(E.Implementation);
 
   // And then transitively deserialize all SIL referenced by those functions.
   process();
@@ -186,9 +164,9 @@ bool SILLinkerVisitor::linkInVTable(ClassDecl *D) {
   // for processing.
   bool Result = false;
   for (auto P : Vtbl->getEntries()) {
-    if (P.second->isExternalDeclaration()) {
+    if (P.Implementation->isExternalDeclaration()) {
       Result = true;
-      addFunctionToWorklist(P.second);
+      addFunctionToWorklist(P.Implementation);
     }
   }
   return Result;
@@ -204,28 +182,27 @@ bool SILLinkerVisitor::visitApplyInst(ApplyInst *AI) {
   if (!Callee)
     return false;
 
-  // If the linking mode is not link all, AI is not transparent, and the
-  // callee is not shared, we don't want to perform any linking.
-  if (!isLinkAll() && !Callee->isTransparent() &&
-      !hasSharedVisibility(Callee->getLinkage()))
-    return false;
+  if (isLinkAll() ||
+      hasSharedVisibility(Callee->getLinkage())) {
+    addFunctionToWorklist(Callee);
+    return true;
+  }
 
-  // Otherwise we want to try and link in the callee... Add it to the callee
-  // list and return true.
-  addFunctionToWorklist(Callee);
-  return true;
+  return false;
 }
 
 bool SILLinkerVisitor::visitPartialApplyInst(PartialApplyInst *PAI) {
   SILFunction *Callee = PAI->getReferencedFunction();
   if (!Callee)
     return false;
-  if (!isLinkAll() && !Callee->isTransparent() &&
-      !hasSharedVisibility(Callee->getLinkage()))
-    return false;
 
-  addFunctionToWorklist(Callee);
-  return true;
+  if (isLinkAll() ||
+      hasSharedVisibility(Callee->getLinkage())) {
+    addFunctionToWorklist(Callee);
+    return true;
+  }
+
+  return false;
 }
 
 bool SILLinkerVisitor::visitFunctionRefInst(FunctionRefInst *FRI) {
@@ -233,12 +210,14 @@ bool SILLinkerVisitor::visitFunctionRefInst(FunctionRefInst *FRI) {
   // behind as dead code. This shouldn't happen, but if it does don't get into
   // an inconsistent state.
   SILFunction *Callee = FRI->getReferencedFunction();
-  if (!isLinkAll() && !Callee->isTransparent() &&
-      !hasSharedVisibility(Callee->getLinkage()))
-    return false;
 
-  addFunctionToWorklist(FRI->getReferencedFunction());
-  return true;
+  if (isLinkAll() ||
+      hasSharedVisibility(Callee->getLinkage())) {
+    addFunctionToWorklist(FRI->getReferencedFunction());
+    return true;
+  }
+
+  return false;
 }
 
 bool SILLinkerVisitor::visitProtocolConformance(

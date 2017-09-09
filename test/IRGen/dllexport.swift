@@ -24,26 +24,24 @@ open class d {
   }
 }
 
-// CHECK-DAG: @_Tv9dllexport2ciCS_1c = dllexport global %C9dllexport1c* null, align 4
-// CHECK-DAG: @_TMp9dllexport1p = dllexport constant %swift.protocol
-// CHECK-DAG: @_TMnC9dllexport1c = dllexport constant
-// CHECK-DAG: @_TMLC9dllexport1c = dllexport global %swift.type* null, align 4
-// CHECK-DAG: @_TMLC9dllexport1d = dllexport global %swift.type* null, align 4
-// CHECK-DAG: @_TMC9dllexport1c = dllexport alias %swift.type
-// CHECK-DAG: @_TMC9dllexport1d = dllexport alias %swift.type, bitcast ({{.*}})
-// CHECK-DAG-OPT: @_TFC9dllexport1dP33_C57BA610BA35E21738CC992438E660E91mfT_T_ = dllexport alias void (), void ()* @_swift_dead_method_stub
-// CHECK-DAG-OPT: @_TFC9dllexport1dcfT_S0_ = dllexport alias void (), void ()* @_swift_dead_method_stub
-// CHECK-DAG-OPT: @_TFC9dllexport1ccfT_S0_ = dllexport alias void (), void ()* @_swift_dead_method_stub
-// CHECK-DAG-OPT: @_TFC9dllexport1cCfT_S0_ = dllexport alias void (), void ()* @_swift_dead_method_stub
-// CHECK-DAG: define dllexport %swift.refcounted* @_TFC9dllexport1cd(%C9dllexport1c*{{.*}})
-// CHECK-DAG-NO-OPT: define dllexport %C9dllexport1c* @_TFC9dllexport1ccfT_S0_(%C9dllexport1c*)
-// CHECK-DAG-NO-OPT: define dllexport %C9dllexport1c* @_TFC9dllexport1cCfT_S0_(%swift.type*)
-// CHECK-DAG: define dllexport i8* @_TF9dllexportau2ciCS_1c()
-// CHECK-DAG-NO-OPT: define dllexport void @_TFC9dllexport1dP33_C57BA610BA35E21738CC992438E660E91mfT_T_(%C9dllexport1d*)
-// CHECK-DAG-NO-OPT: define dllexport void @_TFC9dllexport1dD(%C9dllexport1d*)
-// CHECK-DAG: define dllexport %swift.refcounted* @_TFC9dllexport1dd(%C9dllexport1d*{{.*}})
-// CHECK-DAG: define dllexport %swift.type* @_TMaC9dllexport1c()
-// CHECK-DAG: define dllexport %swift.type* @_TMaC9dllexport1d()
-// CHECK-DAG-NO-OPT: define dllexport %C9dllexport1d* @_TFC9dllexport1dcfT_S0_(%C9dllexport1d*)
-// CHECK-DAG-OPT: define dllexport void @_TFC9dllexport1dD(%C9dllexport1d*)
+// CHECK-DAG: @_T09dllexport2ciAA1cCv = dllexport global %T9dllexport1cC* null, align 4
+// CHECK-DAG: @_T09dllexport1pMp = dllexport constant %swift.protocol
+// CHECK-DAG: @_T09dllexport1cCMn = dllexport constant
+// CHECK-DAG: @_T09dllexport1cCN = dllexport alias %swift.type
+// CHECK-DAG: @_T09dllexport1dCN = dllexport alias %swift.type, bitcast ({{.*}})
+// CHECK-DAG-OPT: @_T09dllexport1dC1m33_C57BA610BA35E21738CC992438E660E9LLyyF = dllexport alias void (), void ()* @_swift_dead_method_stub
+// CHECK-DAG-OPT: @_T09dllexport1dCACycfc = dllexport alias void (), void ()* @_swift_dead_method_stub
+// CHECK-DAG-OPT: @_T09dllexport1cCACycfc = dllexport alias void (), void ()* @_swift_dead_method_stub
+// CHECK-DAG-OPT: @_T09dllexport1cCACycfC = dllexport alias void (), void ()* @_swift_dead_method_stub
+// CHECK-DAG: define dllexport swiftcc %swift.refcounted* @_T09dllexport1cCfd(%T9dllexport1cC*{{.*}})
+// CHECK-DAG-NO-OPT: define dllexport swiftcc %T9dllexport1cC* @_T09dllexport1cCACycfc(%T9dllexport1cC*)
+// CHECK-DAG-NO-OPT: define dllexport swiftcc %T9dllexport1cC* @_T09dllexport1cCACycfC(%swift.type*)
+// CHECK-DAG: define dllexport swiftcc i8* @_T09dllexport2ciAA1cCfau()
+// CHECK-DAG-NO-OPT: define dllexport swiftcc void @_T09dllexport1dC1m33_C57BA610BA35E21738CC992438E660E9LLyyF(%T9dllexport1dC*)
+// CHECK-DAG-NO-OPT: define dllexport swiftcc void @_T09dllexport1dCfD(%T9dllexport1dC*)
+// CHECK-DAG: define dllexport swiftcc %swift.refcounted* @_T09dllexport1dCfd(%T9dllexport1dC*{{.*}})
+// CHECK-DAG: define dllexport %swift.type* @_T09dllexport1cCMa()
+// CHECK-DAG: define dllexport %swift.type* @_T09dllexport1dCMa()
+// CHECK-DAG-NO-OPT: define dllexport swiftcc %T9dllexport1dC* @_T09dllexport1dCACycfc(%T9dllexport1dC*)
+// CHECK-DAG-OPT: define dllexport swiftcc void @_T09dllexport1dCfD(%T9dllexport1dC*)
 

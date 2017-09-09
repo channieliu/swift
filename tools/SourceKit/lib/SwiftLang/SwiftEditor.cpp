@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -20,7 +20,7 @@
 #include "SourceKit/Support/Tracing.h"
 #include "SourceKit/Support/UIdent.h"
 
-#include "swift/AST/AST.h"
+#include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/SourceEntityWalker.h"
@@ -35,6 +35,7 @@
 #include "swift/IDE/SyntaxModel.h"
 #include "swift/Subsystems.h"
 
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Mutex.h"
 
@@ -42,9 +43,11 @@ using namespace SourceKit;
 using namespace swift;
 using namespace ide;
 
-void EditorDiagConsumer::handleDiagnostic(SourceManager &SM, SourceLoc Loc,
-                                          DiagnosticKind Kind, StringRef Text,
-                                          const DiagnosticInfo &Info) {
+void EditorDiagConsumer::handleDiagnostic(
+    SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
+    StringRef FormatString, ArrayRef<DiagnosticArgument> FormatArgs,
+    const DiagnosticInfo &Info) {
+
   if (Kind == DiagnosticKind::Error) {
     HadAnyError = true;
   }
@@ -67,7 +70,13 @@ void EditorDiagConsumer::handleDiagnostic(SourceManager &SM, SourceLoc Loc,
 
   DiagnosticEntryInfo SKInfo;
 
-  SKInfo.Description = Text;
+  // Actually substitute the diagnostic arguments into the diagnostic text.
+  llvm::SmallString<256> Text;
+  {
+    llvm::raw_svector_ostream Out(Text);
+    DiagnosticEngine::formatDiagnosticText(Out, FormatString, FormatArgs);
+  }
+  SKInfo.Description = Text.str();
 
   unsigned BufferID = SM.findBufferContainingLoc(Loc);
 
@@ -371,8 +380,8 @@ struct SwiftSemanticToken {
   // The code-completion kinds are a good match for the semantic kinds we want.
   // FIXME: Maybe rename CodeCompletionDeclKind to a more general concept ?
   CodeCompletionDeclKind Kind : 6;
-  bool IsRef : 1;
-  bool IsSystem : 1;
+  unsigned IsRef : 1;
+  unsigned IsSystem : 1;
 
   SwiftSemanticToken(CodeCompletionDeclKind Kind,
                      unsigned ByteOffset, unsigned Length,
@@ -380,8 +389,12 @@ struct SwiftSemanticToken {
     : ByteOffset(ByteOffset), Length(Length), Kind(Kind),
       IsRef(IsRef), IsSystem(IsSystem) { }
 
+  bool getIsRef() const { return static_cast<bool>(IsRef); }
+
+  bool getIsSystem() const { return static_cast<bool>(IsSystem); }
+
   UIdent getUIdentForKind() const {
-    return SwiftLangSupport::getUIDForCodeCompletionDeclKind(Kind, IsRef);
+    return SwiftLangSupport::getUIDForCodeCompletionDeclKind(Kind, getIsRef());
   }
 };
 static_assert(sizeof(SwiftSemanticToken) == 8, "Too big");
@@ -422,7 +435,7 @@ public:
 
   void readSemanticInfo(ImmutableTextSnapshotRef NewSnapshot,
                         std::vector<SwiftSemanticToken> &Tokens,
-                        std::vector<DiagnosticEntryInfo> &Diags,
+                        Optional<std::vector<DiagnosticEntryInfo>> &Diags,
                         ArrayRef<DiagnosticEntryInfo> ParserDiags);
 
   void processLatestSnapshotAsync(EditableTextBufferRef EditableBuffer);
@@ -440,7 +453,7 @@ private:
   std::vector<SwiftSemanticToken> takeSemanticTokens(
       ImmutableTextSnapshotRef NewSnapshot);
 
-  std::vector<DiagnosticEntryInfo> getSemanticDiagnostics(
+  Optional<std::vector<DiagnosticEntryInfo>> getSemanticDiagnostics(
       ImmutableTextSnapshotRef NewSnapshot,
       ArrayRef<DiagnosticEntryInfo> ParserDiags);
 };
@@ -522,7 +535,7 @@ public:
   }
 };
 
-} // anonymous namespace.
+} // anonymous namespace
 
 uint64_t SwiftDocumentSemanticInfo::getASTGeneration() const {
   llvm::sys::ScopedLock L(Mtx);
@@ -532,7 +545,7 @@ uint64_t SwiftDocumentSemanticInfo::getASTGeneration() const {
 void SwiftDocumentSemanticInfo::readSemanticInfo(
     ImmutableTextSnapshotRef NewSnapshot,
     std::vector<SwiftSemanticToken> &Tokens,
-    std::vector<DiagnosticEntryInfo> &Diags,
+    Optional<std::vector<DiagnosticEntryInfo>> &Diags,
     ArrayRef<DiagnosticEntryInfo> ParserDiags) {
 
   llvm::sys::ScopedLock L(Mtx);
@@ -587,155 +600,73 @@ SwiftDocumentSemanticInfo::takeSemanticTokens(
   return std::move(SemaToks);
 }
 
-static bool
-adjustDiagnosticRanges(SmallVectorImpl<std::pair<unsigned, unsigned>> &Ranges,
-                       unsigned ByteOffset, unsigned RemoveLen, int Delta) {
-  for (auto &Range : Ranges) {
-    unsigned RangeBegin = Range.first;
-    unsigned RangeEnd = Range.first +  Range.second;
-    unsigned RemoveEnd = ByteOffset + RemoveLen;
-    // If it intersects with the remove range, ignore the whole diagnostic.
-    if (!(RangeEnd < ByteOffset || RangeBegin > RemoveEnd))
-      return true; // Ignore.
-    if (RangeBegin > RemoveEnd)
-      Range.first += Delta;
-  }
-  return false;
-}
-
-static bool
-adjustDiagnosticFixits(SmallVectorImpl<DiagnosticEntryInfo::Fixit> &Fixits,
-                       unsigned ByteOffset, unsigned RemoveLen, int Delta) {
-  for (auto &Fixit : Fixits) {
-    unsigned FixitBegin = Fixit.Offset;
-    unsigned FixitEnd = Fixit.Offset +  Fixit.Length;
-    unsigned RemoveEnd = ByteOffset + RemoveLen;
-    // If it intersects with the remove range, ignore the whole diagnostic.
-    if (!(FixitEnd < ByteOffset || FixitBegin > RemoveEnd))
-      return true; // Ignore.
-    if (FixitBegin > RemoveEnd)
-      Fixit.Offset += Delta;
-  }
-  return false;
-}
-
-static bool
-adjustDiagnosticBase(DiagnosticEntryInfoBase &Diag,
-                     unsigned ByteOffset, unsigned RemoveLen, int Delta) {
-  if (Diag.Offset >= ByteOffset && Diag.Offset < ByteOffset+RemoveLen)
-    return true; // Ignore.
-  bool Ignore = adjustDiagnosticRanges(Diag.Ranges, ByteOffset, RemoveLen, Delta);
-  if (Ignore)
-    return true;
-  Ignore = adjustDiagnosticFixits(Diag.Fixits, ByteOffset, RemoveLen, Delta);
-  if (Ignore)
-    return true;
-  if (Diag.Offset > ByteOffset)
-    Diag.Offset += Delta;
-  return false;
-}
-
-static bool
-adjustDiagnostic(DiagnosticEntryInfo &Diag, StringRef Filename,
-                 unsigned ByteOffset, unsigned RemoveLen, int Delta) {
-  for (auto &Note : Diag.Notes) {
-    if (Filename != Note.Filename)
-      continue;
-    bool Ignore = adjustDiagnosticBase(Note, ByteOffset, RemoveLen, Delta);
-    if (Ignore)
-      return true;
-  }
-  return adjustDiagnosticBase(Diag, ByteOffset, RemoveLen, Delta);
-}
-
-static std::vector<DiagnosticEntryInfo>
-adjustDiagnostics(std::vector<DiagnosticEntryInfo> Diags, StringRef Filename,
-                  unsigned ByteOffset, unsigned RemoveLen, int Delta) {
-  std::vector<DiagnosticEntryInfo> NewDiags;
-  NewDiags.reserve(Diags.size());
-
-  for (auto &Diag : Diags) {
-    bool Ignore = adjustDiagnostic(Diag, Filename, ByteOffset, RemoveLen, Delta);
-    if (!Ignore) {
-      NewDiags.push_back(std::move(Diag));
-    }
-  }
-
-  return NewDiags;
-}
-
-std::vector<DiagnosticEntryInfo>
+Optional<std::vector<DiagnosticEntryInfo>>
 SwiftDocumentSemanticInfo::getSemanticDiagnostics(
     ImmutableTextSnapshotRef NewSnapshot,
     ArrayRef<DiagnosticEntryInfo> ParserDiags) {
 
-  llvm::sys::ScopedLock L(Mtx);
+  std::vector<DiagnosticEntryInfo> curSemaDiags;
+  {
+    llvm::sys::ScopedLock L(Mtx);
 
-  if (SemaDiags.empty())
-    return SemaDiags;
-
-  assert(DiagSnapshot && "If we have diagnostics, we must have snapshot!");
-
-  if (!DiagSnapshot->precedesOrSame(NewSnapshot)) {
-    // It may happen that other thread has already updated the diagnostics to
-    // the version *after* NewSnapshot. This can happen in at least two cases:
-    //   (a) two or more editor.open or editor.replacetext queries are being
-    //       processed concurrently (not valid, but possible call pattern)
-    //   (b) while editor.replacetext processing is running, a concurrent
-    //       thread executes getBuffer()/getBufferForSnapshot() on the same
-    //       Snapshot/EditableBuffer (thus creating a new ImmutableTextBuffer)
-    //       and updates DiagSnapshot/SemaDiags
-    assert(NewSnapshot->precedesOrSame(DiagSnapshot));
-
-    // Since we cannot "adjust back" diagnostics, we just return an empty set.
-    // FIXME: add handling of the case#b above
-    return {};
-  }
-
-  SmallVector<unsigned, 16> ParserDiagLines;
-  for (auto Diag : ParserDiags)
-    ParserDiagLines.push_back(Diag.Line);
-  std::sort(ParserDiagLines.begin(), ParserDiagLines.end());
-
-  auto hasParserDiagAtLine = [&](unsigned Line) {
-    return std::binary_search(ParserDiagLines.begin(), ParserDiagLines.end(),
-                              Line);
-  };
-
-  // Adjust the position of the diagnostics.
-  DiagSnapshot->foreachReplaceUntil(NewSnapshot,
-    [&](ReplaceImmutableTextUpdateRef Upd) -> bool {
-      if (SemaDiags.empty())
-        return false;
-
-      unsigned ByteOffset = Upd->getByteOffset();
-      unsigned RemoveLen = Upd->getLength();
-      unsigned InsertLen = Upd->getText().size();
-      int Delta = InsertLen - RemoveLen;
-      SemaDiags = adjustDiagnostics(std::move(SemaDiags), Filename,
-                                    ByteOffset, RemoveLen, Delta);
-      return true;
-    });
-
-  if (!SemaDiags.empty()) {
-    auto ImmBuf = NewSnapshot->getBuffer();
-    for (auto &Diag : SemaDiags) {
-      std::tie(Diag.Line, Diag.Column) = ImmBuf->getLineAndColumn(Diag.Offset);
+    if (!DiagSnapshot || DiagSnapshot->getStamp() != NewSnapshot->getStamp()) {
+      // The semantic diagnostics are out-of-date, ignore them.
+      return llvm::None;
     }
 
-    // If there is a parser diagnostic in a line, ignore diagnostics in the same
-    // line that we got from the semantic pass.
-    // Note that the semantic pass also includes parser diagnostics so this
-    // avoids duplicates.
-    SemaDiags.erase(std::remove_if(SemaDiags.begin(), SemaDiags.end(),
-                                   [&](const DiagnosticEntryInfo &Diag) -> bool {
-                                     return hasParserDiagAtLine(Diag.Line);
-                                   }),
-                    SemaDiags.end());
+    curSemaDiags = SemaDiags;
   }
 
-  DiagSnapshot = NewSnapshot;
-  return SemaDiags;
+  // Diagnostics from the AST and diagnostics from the parser are based on the
+  // same source text snapshot. But diagnostics from the AST may have excluded
+  // the parser diagnostics due to a fatal error, e.g. if the source has a
+  // 'so such module' error, which will suppress other diagnostics.
+  // We don't want to turn off the suppression to avoid a flood of diagnostics
+  // when a module import fails, but we also don't want to lose the parser
+  // diagnostics in such a case, so merge the parser diagnostics with the sema
+  // ones.
+
+  auto orderDiagnosticEntryInfos = [](const DiagnosticEntryInfo &LHS,
+                                      const DiagnosticEntryInfo &RHS) -> bool {
+    if (LHS.Filename != RHS.Filename)
+      return LHS.Filename < RHS.Filename;
+    if (LHS.Offset != RHS.Offset)
+      return LHS.Offset < RHS.Offset;
+    return LHS.Description < RHS.Description;
+  };
+
+  std::vector<DiagnosticEntryInfo> sortedParserDiags;
+  sortedParserDiags.reserve(ParserDiags.size());
+  sortedParserDiags.insert(sortedParserDiags.end(), ParserDiags.begin(),
+                           ParserDiags.end());
+  std::stable_sort(sortedParserDiags.begin(), sortedParserDiags.end(),
+                   orderDiagnosticEntryInfos);
+
+  std::vector<DiagnosticEntryInfo> finalDiags;
+  finalDiags.reserve(sortedParserDiags.size()+curSemaDiags.size());
+
+  // Add sema diagnostics unless it is an existing parser diagnostic.
+  // Note that we want to merge and eliminate diagnostics from the 'sema' set
+  // that also show up in the 'parser' set, but we don't want to remove
+  // duplicate diagnostics from within the same set (e.g. duplicates existing in
+  // the 'sema' set). We want to report the diagnostics as the compiler reported
+  // them, even if there's some duplicate one. This is why we don't just do a
+  // simple append/sort/keep-uniques step.
+  for (const auto &curDE : curSemaDiags) {
+    bool existsAsParserDiag = std::binary_search(sortedParserDiags.begin(),
+                                                 sortedParserDiags.end(),
+                                             curDE, orderDiagnosticEntryInfos);
+    if (!existsAsParserDiag) {
+      finalDiags.push_back(curDE);
+    }
+  }
+
+  finalDiags.insert(finalDiags.end(),
+                    sortedParserDiags.begin(), sortedParserDiags.end());
+  std::stable_sort(finalDiags.begin(), finalDiags.end(),
+                   orderDiagnosticEntryInfos);
+
+  return finalDiags;
 }
 
 void SwiftDocumentSemanticInfo::updateSemanticInfo(
@@ -771,8 +702,10 @@ public:
     : SM(SM), BufferID(BufferID) {}
 
   bool visitDeclReference(ValueDecl *D, CharSourceRange Range,
-                          TypeDecl *CtorTyRef, Type T) override {
-    if (isa<VarDecl>(D) && D->hasName() && D->getName().str() == "self")
+                          TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef, Type T,
+                          ReferenceMetaData Data) override {
+      if (isa<VarDecl>(D) && D->hasName() &&
+          D->getFullName() == D->getASTContext().Id_self)
       return true;
 
     // Do not annotate references to unavailable decls.
@@ -788,7 +721,8 @@ public:
   bool visitSubscriptReference(ValueDecl *D, CharSourceRange Range,
                                bool IsOpenBracket) override {
     // We should treat both open and close brackets equally
-    return visitDeclReference(D, Range, nullptr, Type());
+    return visitDeclReference(D, Range, nullptr, nullptr, Type(),
+                      ReferenceMetaData(SemaReferenceKind::SubscriptRef, None));
   }
 
   void annotate(const Decl *D, bool IsRef, CharSourceRange Range) {
@@ -974,6 +908,8 @@ static UIdent getAccessibilityUID(Accessibility Access) {
   case Accessibility::Open:
     return AccessOpen;
   }
+
+  llvm_unreachable("Unhandled Accessibility in switch.");
 }
 
 static Accessibility inferDefaultAccessibility(const ExtensionDecl *ED) {
@@ -1021,6 +957,8 @@ static Accessibility inferAccessibility(const ValueDecl *D) {
   case DeclContextKind::ExtensionDecl:
     return inferDefaultAccessibility(cast<ExtensionDecl>(DC));
   }
+
+  llvm_unreachable("Unhandled DeclContextKind in switch.");
 }
 
 static Optional<Accessibility>
@@ -1408,18 +1346,17 @@ private:
       if (auto *FTR = dyn_cast<FunctionTypeRepr>(T)) {
         FoundFunctionTypeRepr = true;
         if (auto *TTR = dyn_cast_or_null<TupleTypeRepr>(FTR->getArgsTypeRepr())) {
-          for (auto *ArgTR : TTR->getElements()) {
+          for (auto &ArgElt : TTR->getElements()) {
             CharSourceRange NR;
             CharSourceRange TR;
-            auto *NTR = dyn_cast<NamedTypeRepr>(ArgTR);
-            if (NTR && NTR->hasName()) {
-              NR = CharSourceRange(NTR->getNameLoc(),
-                                   NTR->getName().getLength());
-              ArgTR = NTR->getTypeRepr();
+            auto name = ArgElt.Name;
+            if (!name.empty()) {
+              NR = CharSourceRange(ArgElt.NameLoc,
+                                   name.getLength());
             }
             SourceLoc SRE = Lexer::getLocForEndOfToken(SM,
-                                                       ArgTR->getEndLoc());
-            TR = CharSourceRange(SM, ArgTR->getStartLoc(), SRE);
+                                                    ArgElt.Type->getEndLoc());
+            TR = CharSourceRange(SM, ArgElt.Type->getStartLoc(), SRE);
             Info.Params.emplace_back(NR, TR);
           }
         } else if (FTR->getArgsTypeRepr()) {
@@ -1767,10 +1704,7 @@ void SwiftEditorDocument::readSemanticInfo(ImmutableTextSnapshotRef Snapshot,
   }
 
   std::vector<SwiftSemanticToken> SemaToks;
-  std::vector<DiagnosticEntryInfo> SemaDiags;
-
-  // FIXME: Parser diagnostics should be filtered out of the semantic ones,
-  // Then just merge the semantic ones with the current parse ones.
+  Optional<std::vector<DiagnosticEntryInfo>> SemaDiags;
   Impl.SemanticInfo->readSemanticInfo(Snapshot, SemaToks, SemaDiags,
                                       Impl.ParserDiagnostics);
 
@@ -1778,7 +1712,7 @@ void SwiftEditorDocument::readSemanticInfo(ImmutableTextSnapshotRef Snapshot,
     unsigned Offset = SemaTok.ByteOffset;
     unsigned Length = SemaTok.Length;
     UIdent Kind = SemaTok.getUIdentForKind();
-    bool IsSystem = SemaTok.IsSystem;
+    bool IsSystem = SemaTok.getIsSystem();
     if (Kind.isValid())
       if (!Consumer.handleSemanticAnnotation(Offset, Length, Kind, IsSystem))
         break;
@@ -1787,16 +1721,17 @@ void SwiftEditorDocument::readSemanticInfo(ImmutableTextSnapshotRef Snapshot,
   static UIdent SemaDiagStage("source.diagnostic.stage.swift.sema");
   static UIdent ParseDiagStage("source.diagnostic.stage.swift.parse");
 
-  if (!SemaDiags.empty() || !SemaToks.empty()) {
+  // If there's no value returned for diagnostics it means they are out-of-date
+  // (based on a different snapshot).
+  if (SemaDiags.hasValue()) {
     Consumer.setDiagnosticStage(SemaDiagStage);
+    for (auto &Diag : SemaDiags.getValue())
+      Consumer.handleDiagnostic(Diag, SemaDiagStage);
   } else {
     Consumer.setDiagnosticStage(ParseDiagStage);
+    for (auto &Diag : Impl.ParserDiagnostics)
+      Consumer.handleDiagnostic(Diag, ParseDiagStage);
   }
-
-  for (auto &Diag : Impl.ParserDiagnostics)
-    Consumer.handleDiagnostic(Diag, ParseDiagStage);
-  for (auto &Diag : SemaDiags)
-    Consumer.handleDiagnostic(Diag, SemaDiagStage);
 }
 
 void SwiftEditorDocument::removeCachedAST() {
@@ -1977,7 +1912,7 @@ void SwiftEditorDocument::expandPlaceholder(unsigned Offset, unsigned Length,
         }
         if (HasSignature)
           OS << "in";
-        OS << "\n<#code#>\n";
+        OS << "\n" << getCodePlaceholder() << "\n";
         OS << "}";
       }
       Consumer.handleSourceText(ExpansionStr);
@@ -2115,6 +2050,17 @@ void SwiftLangSupport::editorFormatText(StringRef Name, unsigned Line,
 void SwiftLangSupport::editorExtractTextFromComment(StringRef Source,
                                                     EditorConsumer &Consumer) {
   Consumer.handleSourceText(extractPlainTextFromComment(Source));
+}
+
+void SwiftLangSupport::editorConvertMarkupToXML(StringRef Source,
+                                                EditorConsumer &Consumer) {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  if (convertMarkupToXML(Source, OS)) {
+    Consumer.handleRequestError("Conversion failed.");
+    return;
+  }
+  Consumer.handleSourceText(Result);
 }
 
 //===----------------------------------------------------------------------===//

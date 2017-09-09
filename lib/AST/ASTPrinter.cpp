@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,7 +17,6 @@
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTVisitor.h"
-#include "swift/AST/ArchetypeBuilder.h"
 #include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
@@ -26,24 +25,24 @@
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/PrintOptions.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/Stmt.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/AST/TypeWalker.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/Defer.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/Basic/PrimitiveParsing.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Config.h"
 #include "swift/Parse/Lexer.h"
-#include "swift/Sema/IDETypeChecking.h"
 #include "swift/Strings.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/Basic/Module.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
@@ -51,427 +50,23 @@
 #include <queue>
 
 using namespace swift;
-namespace swift {
 
-struct SynthesizedExtensionAnalyzer::Implementation {
-  static bool isMemberFavored(const NominalTypeDecl* Target, const Decl* D) {
-    DeclContext* DC = Target->getDeclContext();
-    Type BaseTy = Target->getDeclaredTypeInContext();
-    const FuncDecl *FD = dyn_cast<FuncDecl>(D);
-    if (!FD)
-      return true;
-    ResolveMemberResult Result = resolveValueMember(*DC, BaseTy,
-                                                    FD->getEffectiveFullName());
-    return !(Result && Result.Favored != D);
-  }
-
-  static bool isExtensionFavored(const NominalTypeDecl* Target,
-                                 const ExtensionDecl *ED) {
-    return std::find_if(ED->getMembers().begin(), ED->getMembers().end(),
-      [&](DeclIterator It) { return isMemberFavored(Target, *It);}) !=
-        ED->getMembers().end();
-  }
-
-  struct SynthesizedExtensionInfo {
-    ExtensionDecl *Ext = nullptr;
-    bool IsSynthesized;
-    operator bool() const { return Ext; }
-    SynthesizedExtensionInfo(bool IsSynthesized = true) :
-      IsSynthesized(IsSynthesized) {}
-    bool operator< (const SynthesizedExtensionInfo& Rhs) const {
-
-      // Synthesized are always after actual ones.
-       if (IsSynthesized != Rhs.IsSynthesized)
-         return !IsSynthesized;
-
-      // If not from the same file, sort by file name.
-      if (auto LFile = Ext->getSourceFileName()) {
-        if (auto RFile = Rhs.Ext->getSourceFileName()) {
-          int Result = LFile.getValue().compare(RFile.getValue());
-          if (Result != 0)
-            return Result < 0;
-        }
-      }
-
-      // Otherwise, sort by source order.
-      if (auto LeftOrder = Ext->getSourceOrder()) {
-        if (auto RightOrder = Rhs.Ext->getSourceOrder()) {
-          return LeftOrder.getValue() < RightOrder.getValue();
-        }
-      }
-      return false;
-    }
-  };
-
-  struct ExtensionMergeInfo {
-    struct Requirement {
-      Type First;
-      Type Second;
-      RequirementKind Kind;
-      bool operator< (const Requirement& Rhs) const {
-        if (Kind != Rhs.Kind)
-          return Kind < Rhs.Kind;
-        else if (First.getPointer() != Rhs.First.getPointer())
-          return First.getPointer() < Rhs.First.getPointer();
-        else
-          return Second.getPointer() < Rhs.Second.getPointer();
-      }
-      bool operator== (const Requirement& Rhs) const {
-        return (!(*this < Rhs)) && (!(Rhs < *this));
-      }
-    };
-
-    bool HasDocComment;
-    unsigned InheritsCount;
-    std::set<Requirement> Requirements;
-    void addRequirement(Type First, Type Second, RequirementKind Kind) {
-      Requirements.insert({First, Second, Kind});
-    }
-    bool operator== (const ExtensionMergeInfo& Another) const {
-      // Trivially unmergeable.
-      if (HasDocComment || Another.HasDocComment)
-        return false;
-      if (InheritsCount != 0 || Another.InheritsCount != 0)
-        return false;
-      return Requirements == Another.Requirements;
-    }
-    bool isMergeableWithTypeDef() {
-      return !HasDocComment && InheritsCount == 0 && Requirements.empty();
-    }
-  };
-
-  typedef llvm::MapVector<ExtensionDecl*, SynthesizedExtensionInfo> ExtensionInfoMap;
-  typedef llvm::MapVector<ExtensionDecl*, ExtensionMergeInfo> ExtensionMergeInfoMap;
-
-  struct ExtensionMergeGroup {
-
-    unsigned RequirementsCount;
-    unsigned InheritanceCount;
-    MergeGroupKind Kind;
-    std::vector<SynthesizedExtensionInfo*> Members;
-
-    ExtensionMergeGroup(SynthesizedExtensionInfo *Info,
-                        unsigned RequirementsCount,
-                        unsigned InheritanceCount,
-                        bool MergeableWithType) :
-      RequirementsCount(RequirementsCount),
-      InheritanceCount(InheritanceCount),
-      Kind(MergeableWithType ? MergeGroupKind::MergeableWithTypeDef :
-                               MergeGroupKind::UnmergeableWithTypeDef) {
-      Members.push_back(Info);
-    }
-
-    void removeUnfavored(const NominalTypeDecl *Target) {
-      Members.erase(std::remove_if(Members.begin(), Members.end(),
-        [&](SynthesizedExtensionInfo *Info){
-          return !isExtensionFavored(Target, Info->Ext);}), Members.end());
-    }
-
-    void sortMembers() {
-      std::sort(Members.begin(), Members.end(),
-                [](SynthesizedExtensionInfo *LHS, SynthesizedExtensionInfo *RHS) {
-                  return (*LHS) < (*RHS);
-                });
-    }
-
-    bool operator< (const ExtensionMergeGroup& Rhs) const {
-      if (RequirementsCount == Rhs.RequirementsCount)
-        return InheritanceCount < Rhs.InheritanceCount;
-      return RequirementsCount < Rhs.RequirementsCount;
-    }
-  };
-
-  typedef std::vector<ExtensionMergeGroup> MergeGroupVector;
-
-  NominalTypeDecl *Target;
-  Type BaseType;
-  DeclContext *DC;
-  bool IncludeUnconditional;
-  PrintOptions Options;
-  MergeGroupVector AllGroups;
-  std::unique_ptr<ExtensionInfoMap> InfoMap;
-
-  Implementation(NominalTypeDecl *Target,
-                 bool IncludeUnconditional,
-                 PrintOptions Options):
-    Target(Target),
-    BaseType(Target->getDeclaredInterfaceType()),
-    DC(Target),
-    IncludeUnconditional(IncludeUnconditional),
-    Options(Options), AllGroups(MergeGroupVector()),
-    InfoMap(collectSynthesizedExtensionInfo(AllGroups)) {}
-
-  unsigned countInherits(ExtensionDecl *ED) {
-    unsigned Count = 0;
-    for (auto TL : ED->getInherited()) {
-      if (shouldPrint(TL.getType()->getAnyNominal(), Options))
-        Count ++;
-    }
-    return Count;
-  }
-
-  std::pair<SynthesizedExtensionInfo, ExtensionMergeInfo>
-  isApplicable(ExtensionDecl *Ext, bool IsSynthesized) {
-    SynthesizedExtensionInfo Result(IsSynthesized);
-    ExtensionMergeInfo MergeInfo;
-    MergeInfo.HasDocComment = !Ext->getRawComment().isEmpty();
-    MergeInfo.InheritsCount = countInherits(Ext);
-    if (!Ext->isConstrainedExtension()) {
-      if (IncludeUnconditional)
-        Result.Ext = Ext;
-      return {Result, MergeInfo};
-    }
-
-    // Get the substitutions from the generic signature of
-    // the extension to the interface types of the base type's
-    // declaration.
-    TypeSubstitutionMap subMap;
-    if (!BaseType->isAnyExistentialType())
-      subMap = BaseType->getMemberSubstitutions(Ext);
-    auto *M = DC->getParentModule();
-
-    assert(Ext->getGenericSignature() && "No generic signature.");
-    for (auto Req : Ext->getGenericSignature()->getRequirements()) {
-      auto Kind = Req.getKind();
-      if (Kind == RequirementKind::WitnessMarker)
-        continue;
-
-      Type First = Req.getFirstType().subst(
-          M, subMap, SubstOptions());
-      Type Second = Req.getSecondType().subst(
-          M, subMap, SubstOptions());
-      if (!First || !Second) {
-        // Substitution with interface type bases can only fail
-        // if a concrete type fails to conform to a protocol.
-        // In this case, just give up on the extension altogether.
-        return {Result, MergeInfo};
-      }
-
-      First = First->getCanonicalType();
-      Second = Second->getCanonicalType();
-
-      switch (Kind) {
-        case RequirementKind::WitnessMarker:
-          break;
-
-        case RequirementKind::Conformance:
-        case RequirementKind::Superclass:
-          if (!canPossiblyConvertTo(First, Second, *DC))
-            return {Result, MergeInfo};
-          else if (!isConvertibleTo(First, Second, *DC))
-            MergeInfo.addRequirement(First, Second, Kind);
-          break;
-
-        case RequirementKind::SameType:
-          if (!canPossiblyEqual(First, Second, *DC)) {
-            return {Result, MergeInfo};
-          } else if (!First->isEqual(Second)) {
-            MergeInfo.addRequirement(First, Second, Kind);
-          }
-          break;
-      }
-    }
-    Result.Ext = Ext;
-    return {Result, MergeInfo};
-  }
-
-  void populateMergeGroup(ExtensionInfoMap &InfoMap,
-                          ExtensionMergeInfoMap &MergeInfoMap,
-                          MergeGroupVector &Results,
-                          bool AllowMergeWithDefBody) {
-    for (auto &Pair : InfoMap) {
-      ExtensionDecl *ED = Pair.first;
-      ExtensionMergeInfo &MergeInfo = MergeInfoMap[ED];
-      SynthesizedExtensionInfo &ExtInfo = InfoMap[ED];
-      auto Found = std::find_if(Results.begin(), Results.end(),
-                                [&](ExtensionMergeGroup &Group) {
-        return MergeInfo == MergeInfoMap[Group.Members.front()->Ext];
-      });
-      if (Found == Results.end()) {
-        Results.push_back({&ExtInfo,
-                          (unsigned)MergeInfo.Requirements.size(),
-                          MergeInfo.InheritsCount,
-                  AllowMergeWithDefBody && MergeInfo.isMergeableWithTypeDef()});
-      } else {
-        Found->Members.push_back(&ExtInfo);
-      }
-    }
-  }
-
-  std::unique_ptr<ExtensionInfoMap>
-  collectSynthesizedExtensionInfoForProtocol(MergeGroupVector &AllGroups) {
-    std::unique_ptr<ExtensionInfoMap> InfoMap(new ExtensionInfoMap());
-    ExtensionMergeInfoMap MergeInfoMap;
-    for (auto *E : Target->getExtensions()) {
-      if (!shouldPrint(E, Options))
-        continue;
-      auto Pair = isApplicable(E, /*Synthesized*/false);
-      if (Pair.first) {
-        InfoMap->insert({E, Pair.first});
-        MergeInfoMap.insert({E, Pair.second});
-      }
-    }
-    populateMergeGroup(*InfoMap, MergeInfoMap, AllGroups,
-                       /*AllowMergeWithDefBody*/false);
-    std::sort(AllGroups.begin(), AllGroups.end());
-    for (auto &Group : AllGroups) {
-      Group.sortMembers();
-    }
-    return InfoMap;
-  }
-
-  static bool isEnumRawType(const Decl* D, TypeLoc TL) {
-    assert (TL.getType());
-    if (auto ED = dyn_cast<EnumDecl>(D)) {
-      return ED->hasRawType() && ED->getRawType()->isEqual(TL.getType());
-    }
-    return false;
-  }
-
-  std::unique_ptr<ExtensionInfoMap>
-  collectSynthesizedExtensionInfo(MergeGroupVector &AllGroups) {
-    if (Target->getKind() == DeclKind::Protocol) {
-      return collectSynthesizedExtensionInfoForProtocol(AllGroups);
-    }
-    std::unique_ptr<ExtensionInfoMap> InfoMap(new ExtensionInfoMap());
-    ExtensionMergeInfoMap MergeInfoMap;
-    std::vector<NominalTypeDecl*> Unhandled;
-    auto addTypeLocNominal = [&](TypeLoc TL) {
-      if (TL.getType()) {
-        if (auto D = TL.getType()->getAnyNominal()) {
-          Unhandled.push_back(D);
-        }
-      }
-    };
-    for (auto TL : Target->getInherited()) {
-      if (!isEnumRawType(Target, TL))
-        addTypeLocNominal(TL);
-    }
-    while (!Unhandled.empty()) {
-      NominalTypeDecl* Back = Unhandled.back();
-      Unhandled.pop_back();
-      for (ExtensionDecl *E : Back->getExtensions()) {
-        if (!shouldPrint(E, Options))
-          continue;
-        auto Pair = isApplicable(E, /*Synthesized*/true);
-        if (Pair.first) {
-          InfoMap->insert({E, Pair.first});
-          MergeInfoMap.insert({E, Pair.second});
-        }
-        for (auto TL : Back->getInherited()) {
-          if (!isEnumRawType(Target, TL))
-            addTypeLocNominal(TL);
-        }
-      }
-    }
-
-    // Merge with actual extensions.
-    for (auto *E : Target->getExtensions()) {
-      if (!shouldPrint(E, Options))
-        continue;
-      auto Pair = isApplicable(E, /*Synthesized*/false);
-      if (Pair.first) {
-        InfoMap->insert({E, Pair.first});
-        MergeInfoMap.insert({E, Pair.second});
-      }
-    }
-
-    populateMergeGroup(*InfoMap, MergeInfoMap, AllGroups,
-                      /*AllowMergeWithDefBody*/true);
-
-    std::sort(AllGroups.begin(), AllGroups.end());
-    for (auto &Group : AllGroups) {
-      Group.removeUnfavored(Target);
-      Group.sortMembers();
-    }
-    AllGroups.erase(std::remove_if(AllGroups.begin(), AllGroups.end(),
-      [](ExtensionMergeGroup &Group) { return Group.Members.empty(); }),
-      AllGroups.end());
-
-    return InfoMap;
-  }
-};
-
-SynthesizedExtensionAnalyzer::
-SynthesizedExtensionAnalyzer(NominalTypeDecl *Target,
-                             PrintOptions Options,
-                             bool IncludeUnconditional):
-  Impl(*(new Implementation(Target, IncludeUnconditional, Options))) {}
-
-SynthesizedExtensionAnalyzer::~SynthesizedExtensionAnalyzer() {delete &Impl;}
-
-bool SynthesizedExtensionAnalyzer::
-isInSynthesizedExtension(const ValueDecl *VD) {
-  if (auto Ext = dyn_cast_or_null<ExtensionDecl>(VD->getDeclContext()->
-                                                 getInnermostTypeContext())) {
-    return Impl.InfoMap->count(Ext) != 0 &&
-           Impl.InfoMap->find(Ext)->second.IsSynthesized;
-  }
-  return false;
-}
-
-void SynthesizedExtensionAnalyzer::
-forEachExtensionMergeGroup(MergeGroupKind Kind, ExtensionGroupOperation Fn) {
-  for (auto &Group : Impl.AllGroups) {
-    if (Kind != MergeGroupKind::All) {
-      if (Kind != Group.Kind)
-        continue;
-    }
-    std::vector<ExtensionAndIsSynthesized> GroupContent;
-    for (auto &Member : Group.Members) {
-      GroupContent.push_back({Member->Ext, Member->IsSynthesized});
-    }
-    Fn(llvm::makeArrayRef(GroupContent));
-  }
-}
-
-bool SynthesizedExtensionAnalyzer::
-hasMergeGroup(MergeGroupKind Kind) {
-  for (auto &Group : Impl.AllGroups) {
-    if (Kind == MergeGroupKind::All)
-      return true;
-    if (Kind == Group.Kind)
-      return true;
-  }
-  return false;
-}
-}
-
-PrintOptions PrintOptions::printTypeInterface(Type T) {
-  PrintOptions result = printInterface();
-  result.PrintExtensionFromConformingProtocols = true;
-  result.TransformContext = TypeTransformContext(T);
-  result.printExtensionContentAsMembers = [T](const ExtensionDecl *ED) {
-    return isExtensionApplied(*T->getNominalOrBoundGenericNominal()->
-                              getDeclContext(), T, ED);
-  };
-  return result;
-}
-
-void PrintOptions::setArchetypeSelfTransform(Type T) {
+void PrintOptions::setBaseType(Type T) {
   TransformContext = TypeTransformContext(T);
 }
 
-void PrintOptions::setArchetypeSelfTransformForQuickHelp(Type T) {
-  TransformContext = TypeTransformContext(T);
-}
-
-void PrintOptions::setArchetypeAndDynamicSelfTransform(Type T) {
-  TransformContext = TypeTransformContext(T);
-  StripDynamicSelf = true;
-}
-
-void PrintOptions::
-initArchetypeTransformerForSynthesizedExtensions(NominalTypeDecl *D) {
+void PrintOptions::initForSynthesizedExtension(NominalTypeDecl *D) {
   TransformContext = TypeTransformContext(D);
 }
 
-void PrintOptions::clearArchetypeTransformerForSynthesizedExtensions() {
+void PrintOptions::clearSynthesizedExtension() {
   TransformContext.reset();
 }
 
 TypeTransformContext::TypeTransformContext(Type T)
-    : BaseType(T.getPointer()) {}
+    : BaseType(T.getPointer()) {
+  assert(T->mayHaveMembers());
+}
 
 TypeTransformContext::TypeTransformContext(NominalTypeDecl *NTD)
     : BaseType(NTD->getDeclaredTypeInContext().getPointer()), Nominal(NTD) {}
@@ -480,7 +75,7 @@ NominalTypeDecl *TypeTransformContext::getNominal() const {
   return Nominal;
 }
 
-Type TypeTransformContext::getTypeBase() const {
+Type TypeTransformContext::getBaseType() const {
   return Type(BaseType);
 }
 
@@ -491,17 +86,17 @@ bool TypeTransformContext::isPrintingSynthesizedExtension() const {
 std::string ASTPrinter::sanitizeUtf8(StringRef Text) {
   llvm::SmallString<256> Builder;
   Builder.reserve(Text.size());
-  const UTF8* Data = reinterpret_cast<const UTF8*>(Text.begin());
-  const UTF8* End = reinterpret_cast<const UTF8*>(Text.end());
-  StringRef Replacement = "\ufffd";
+  const llvm::UTF8* Data = reinterpret_cast<const llvm::UTF8*>(Text.begin());
+  const llvm::UTF8* End = reinterpret_cast<const llvm::UTF8*>(Text.end());
+  StringRef Replacement = u8"\ufffd";
   while (Data < End) {
-    auto Step = getNumBytesForUTF8(*Data);
+    auto Step = llvm::getNumBytesForUTF8(*Data);
     if (Data + Step > End) {
       Builder.append(Replacement);
       break;
     }
 
-    if (isLegalUTF8Sequence(Data, Data + Step)) {
+    if (llvm::isLegalUTF8Sequence(Data, Data + Step)) {
       Builder.append(Data, Data + Step);
     } else {
 
@@ -548,9 +143,8 @@ void ASTPrinter::printTextImpl(StringRef Text) {
 
 void ASTPrinter::printTypeRef(Type T, const TypeDecl *RefTo, Identifier Name) {
   PrintNameContext Context = PrintNameContext::Normal;
-  if (auto GP = dyn_cast<GenericTypeParamDecl>(RefTo)) {
-    if (GP->isProtocolSelf())
-      Context = PrintNameContext::GenericParameter;
+  if (isa<GenericTypeParamDecl>(RefTo)) {
+    Context = PrintNameContext::GenericParameter;
   } else if (T && T->is<DynamicSelfType>()) {
     assert(T->castTo<DynamicSelfType>()->getSelfType()->getAnyNominal() &&
            "protocol Self handled as GenericTypeParamDecl");
@@ -558,31 +152,6 @@ void ASTPrinter::printTypeRef(Type T, const TypeDecl *RefTo, Identifier Name) {
   }
 
   printName(Name, Context);
-}
-
-void ASTPrinter::printTypeRef(DynamicSelfType *T, Identifier Name) {
-  // Try to print as a reference to the static type so that we will get a USR,
-  // in cursor info.
-  if (auto staticSelfT = T->getSelfType()) {
-    // Handle protocol 'Self', which is an archetype.
-    if (auto AT = staticSelfT->getAs<ArchetypeType>()) {
-      if (auto SelfP = AT->getSelfProtocol()) {
-        if (auto GTD = SelfP->getProtocolSelf()) {
-          assert(GTD->isProtocolSelf());
-          printTypeRef(T, GTD, Name);
-          return;
-        }
-      }
-
-    // Handle class 'Self', which is just a class type.
-    } else if (auto *NTD = staticSelfT->getAnyNominal()) {
-      printTypeRef(T, NTD, Name);
-      return;
-    }
-  }
-
-  // If that fails, just print the name.
-  printName(Name, PrintNameContext::ClassDynamicSelf);
 }
 
 void ASTPrinter::printModuleRef(ModuleEntity Mod, Identifier Name) {
@@ -593,7 +162,7 @@ void ASTPrinter::callPrintDeclPre(const Decl *D,
                                   Optional<BracketOptions> Bracket) {
   forceNewlines();
 
-  if (SynthesizeTarget && D->getKind() == DeclKind::Extension)
+  if (SynthesizeTarget && isa<ExtensionDecl>(D))
     printSynthesizedExtensionPre(cast<ExtensionDecl>(D), SynthesizeTarget, Bracket);
   else
     printDeclPre(D, Bracket);
@@ -622,17 +191,37 @@ ASTPrinter &ASTPrinter::operator<<(DeclName name) {
   return *this;
 }
 
-ASTPrinter &operator<<(ASTPrinter &printer, tok keyword) {
-  StringRef name;
+llvm::raw_ostream &swift::
+operator<<(llvm::raw_ostream &OS, tok keyword) {
   switch (keyword) {
-
-#define KEYWORD(KW) case tok::kw_##KW: name = #KW; break;
-#define POUND_KEYWORD(KW) case tok::pound_##KW: name = "#"#KW; break;
-#include "swift/Parse/Tokens.def"
+#define KEYWORD(KW) case tok::kw_##KW: OS << #KW; break;
+#define POUND_KEYWORD(KW) case tok::pound_##KW: OS << "#"#KW; break;
+#define PUNCTUATOR(PUN, TEXT) case tok::PUN: OS << TEXT; break;
+#include "swift/Syntax/TokenKinds.def"
   default:
-    llvm_unreachable("unexpected keyword kind");
+    llvm_unreachable("unexpected keyword or punctuator kind");
   }
-  printer.printKeyword(name);
+  return OS;
+}
+
+uint8_t swift::getKeywordLen(tok keyword) {
+  switch (keyword) {
+#define KEYWORD(KW) case tok::kw_##KW: return StringRef(#KW).size();
+#define POUND_KEYWORD(KW) case tok::pound_##KW: return StringRef("#"#KW).size();
+#define PUNCTUATOR(PUN, TEXT) case tok::PUN: return StringRef(TEXT).size();
+#include "swift/Syntax/TokenKinds.def"
+  default:
+    llvm_unreachable("unexpected keyword or punctuator kind");
+  }
+}
+
+StringRef swift::getCodePlaceholder() { return "<#code#>"; }
+
+ASTPrinter &operator<<(ASTPrinter &printer, tok keyword) {
+  SmallString<16> Buffer;
+  llvm::raw_svector_ostream OS(Buffer);
+  OS << keyword;
+  printer.printKeyword(Buffer.str());
   return printer;
 }
 
@@ -654,6 +243,8 @@ static bool escapeKeywordInContext(StringRef keyword, PrintNameContext context){
   case PrintNameContext::TupleElement:
     return !canBeArgumentLabel(keyword);
   }
+
+  llvm_unreachable("Unhandled PrintNameContext in switch.");
 }
 
 void ASTPrinter::printName(Identifier Name, PrintNameContext Context) {
@@ -667,7 +258,7 @@ void ASTPrinter::printName(Identifier Name, PrintNameContext Context) {
   bool IsKeyword = llvm::StringSwitch<bool>(Name.str())
 #define KEYWORD(KW) \
       .Case(#KW, true)
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
       .Default(false);
 
   if (IsKeyword)
@@ -688,11 +279,10 @@ void StreamPrinter::printText(StringRef Text) {
 
 /// Whether we will be printing a TypeLoc by using the TypeRepr printer
 static bool willUseTypeReprPrinting(TypeLoc tyLoc,
-                                    const PrintOptions &options) {
+                                    Type currentType,
+                                    PrintOptions options) {
   // Special case for when transforming archetypes
-  if (options.TransformContext &&
-      options.TransformContext->getTypeBase() &&
-      tyLoc.getType())
+  if (currentType && tyLoc.getType())
     return false;
 
   return ((options.PreferTypeRepr && tyLoc.hasLocation()) ||
@@ -706,6 +296,7 @@ class PrintAST : public ASTVisitor<PrintAST> {
   PrintOptions Options;
   unsigned IndentLevel = 0;
   Decl *Current = nullptr;
+  Type CurrentType;
 
   friend DeclVisitor<PrintAST>;
 
@@ -884,7 +475,6 @@ class PrintAST : public ASTVisitor<PrintAST> {
       PrintOptions FreshOptions;
       FreshOptions.ExcludeAttrList = Options.ExcludeAttrList;
       FreshOptions.ExclusiveAttrList = Options.ExclusiveAttrList;
-      FreshOptions.StripDynamicSelf = Options.StripDynamicSelf;
       T.print(Printer, FreshOptions);
       return;
     }
@@ -893,44 +483,41 @@ class PrintAST : public ASTVisitor<PrintAST> {
   }
 
   void printTransformedType(Type T) {
-    if (Options.TransformContext &&
-        Options.TransformContext->getTypeBase()) {
-      auto *DC = Current->getInnermostDeclContext();
-
-      // Get the interface type, since TypeLocs still have
-      // contextual types in them.
-      T = ArchetypeBuilder::mapTypeOutOfContext(DC, T);
-
-      // Get the innermost nominal type context.
-      DC = DC->getInnermostTypeContext();
-      if (isa<TypeAliasDecl>(DC))
-        DC = DC->getParent()->getInnermostTypeContext();
-      assert(DC);
-
-
-      if (Options.TransformContext->getTypeBase()->canTreatContextAsMember(DC)) {
-        // Get the substitutions from our base type.
-        auto subMap = Options.TransformContext->getTypeBase()
-          ->getMemberSubstitutions(DC);
-        auto *M = DC->getParentModule();
-        T = T.subst(M, subMap, SubstFlags::DesugarMemberTypes);
+    if (CurrentType) {
+      if (T->hasArchetype()) {
+        // Get the interface type, since TypeLocs still have
+        // contextual types in them.
+        T = Current->getInnermostDeclContext()->mapTypeOutOfContext(T);
       }
+
+      auto *M = Current->getDeclContext()->getParentModule();
+      SubstitutionMap subMap;
+
+      if (auto *NTD = dyn_cast<NominalTypeDecl>(Current))
+        subMap = CurrentType->getContextSubstitutionMap(M, NTD);
+      else if (auto *ED = dyn_cast<ExtensionDecl>(Current))
+        subMap = CurrentType->getContextSubstitutionMap(M, ED);
+      else {
+        subMap = CurrentType->getMemberSubstitutionMap(
+          M, cast<ValueDecl>(Current));
+      }
+
+      T = T.subst(subMap,
+                  SubstFlags::DesugarMemberTypes | SubstFlags::UseErrorType);
     }
 
     printType(T);
   }
 
   void printTypeLoc(const TypeLoc &TL) {
-    if (Options.TransformContext &&
-        Options.TransformContext->getTypeBase() &&
-        TL.getType()) {
+    if (CurrentType && TL.getType()) {
       printTransformedType(TL.getType());
       return;
     }
 
     // Print a TypeRepr if instructed to do so by options, or if the type
     // is null.
-    if (willUseTypeReprPrinting(TL, Options)) {
+    if (willUseTypeReprPrinting(TL, CurrentType, Options)) {
       if (auto repr = TL.getTypeRepr()) {
         llvm::SaveAndRestore<bool> SPTA(Options.SkipParameterTypeAttributes,
                                         true);
@@ -940,6 +527,28 @@ class PrintAST : public ASTVisitor<PrintAST> {
     }
 
     TL.getType().print(Printer, Options);
+  }
+
+  void printContextIfNeeded(const Decl *decl) {
+    if (IndentLevel > 0)
+      return;
+
+    switch (Options.ShouldQualifyNestedDeclarations) {
+    case PrintOptions::QualifyNestedDeclarations::Never:
+      return;
+    case PrintOptions::QualifyNestedDeclarations::TypesOnly:
+      if (!isa<TypeDecl>(decl))
+        return;
+      break;
+    case PrintOptions::QualifyNestedDeclarations::Always:
+      break;
+    }
+
+    auto *container = dyn_cast<NominalTypeDecl>(decl->getDeclContext());
+    if (!container)
+      return;
+    printType(container->getDeclaredInterfaceType());
+    Printer << ".";
   }
 
   void printAttributes(const Decl *D);
@@ -953,14 +562,22 @@ public:
     PrintRequirements = 2,
     InnermostOnly = 4,
     SkipSelfRequirement = 8,
+    SwapSelfAndDependentMemberType = 16,
   };
+
+  void printWhereClauseFromRequirementSignature(ProtocolDecl *proto,
+                                                Decl *attachingTo);
+  void printTrailingWhereClause(TrailingWhereClause *whereClause);
 
   void printGenericSignature(const GenericSignature *genericSig,
                              unsigned flags);
+  void
+  printGenericSignature(const GenericSignature *genericSig, unsigned flags,
+                        llvm::function_ref<bool(const Requirement &)> filter);
   void printSingleDepthOfGenericSignature(
-           ArrayRef<GenericTypeParamType *> genericParams,
-           ArrayRef<Requirement> requirements,
-           unsigned flags);
+      ArrayRef<GenericTypeParamType *> genericParams,
+      ArrayRef<Requirement> requirements, unsigned flags,
+      llvm::function_ref<bool(const Requirement &)> filter);
   void printRequirement(const Requirement &req);
 
 private:
@@ -978,8 +595,7 @@ private:
                       ArrayRef<TypeLoc> inherited,
                       ArrayRef<ProtocolDecl *> protos,
                       Type superclass = {},
-                      bool explicitClass = false,
-                      bool PrintAsProtocolComposition = false);
+                      bool explicitClass = false);
 
   void printInherited(const NominalTypeDecl *decl,
                       bool explicitClass = false);
@@ -1017,7 +633,10 @@ private:
 
 public:
   PrintAST(ASTPrinter &Printer, const PrintOptions &Options)
-      : Printer(Printer), Options(Options) {}
+      : Printer(Printer), Options(Options) {
+    if (Options.TransformContext)
+      CurrentType = Options.TransformContext->getBaseType();
+  }
 
   using ASTVisitor::visit;
 
@@ -1029,10 +648,21 @@ public:
     Current = D;
     SWIFT_DEFER { Current = Old; };
 
+    Type OldType = CurrentType;
+    if (CurrentType && (Old != nullptr || Options.PrintAsMember)) {
+      if (auto *NTD = dyn_cast<NominalTypeDecl>(D)) {
+        auto Subs = CurrentType->getContextSubstitutionMap(
+          Options.CurrentModule, NTD->getDeclContext());
+        CurrentType = NTD->getDeclaredInterfaceType().subst(Subs);
+      }
+    }
+
+    SWIFT_DEFER { CurrentType = OldType; };
+
     bool Synthesize =
         Options.TransformContext &&
         Options.TransformContext->isPrintingSynthesizedExtension() &&
-        D->getKind() == DeclKind::Extension;
+        isa<ExtensionDecl>(D);
     if (Synthesize)
       Printer.setSynthesizedTarget(Options.TransformContext->getNominal());
 
@@ -1095,7 +725,7 @@ void PrintAST::printAttributes(const Decl *D) {
     Options.ExcludeAttrList.push_back(DAK_Final);
   }
 
-  D->getAttrs().print(Printer, Options);
+  D->getAttrs().print(Printer, Options, D);
 
   Options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -1184,33 +814,193 @@ void PrintAST::printPattern(const Pattern *pattern) {
 }
 
 /// If we can't find the depth of a type, return ErrorDepth.
-const unsigned ErrorDepth = ~0U;
+static const unsigned ErrorDepth = ~0U;
 /// A helper function to return the depth of a type.
 static unsigned getDepthOfType(Type ty) {
-  if (auto paramTy = ty->getAs<GenericTypeParamType>())
-    return paramTy->getDepth();
+  unsigned depth = ErrorDepth;
 
-  if (auto depMemTy = dyn_cast<DependentMemberType>(ty->getCanonicalType())) {
-    CanType rootTy;
-    do {
-      rootTy = depMemTy.getBase();
-    } while ((depMemTy = dyn_cast<DependentMemberType>(rootTy)));
-    if (auto rootParamTy = dyn_cast<GenericTypeParamType>(rootTy))
-      return rootParamTy->getDepth();
-    return ErrorDepth;
+  auto combineDepth = [&depth](unsigned newDepth) -> bool {
+    // If there is no current depth (depth == ErrorDepth), then assign to
+    // newDepth; otherwise, choose the deeper of the current and new depth.
+
+    // Since ErrorDepth == ~0U, ErrorDepth + 1 == 0, which is smaller than any
+    // valid depth + 1.
+    depth = std::max(depth+1U, newDepth+1U) - 1U;
+    return false;
+  };
+
+  ty.findIf([combineDepth](Type t) -> bool {
+    if (auto paramTy = t->getAs<GenericTypeParamType>())
+      return combineDepth(paramTy->getDepth());
+
+    if (auto depMemTy = dyn_cast<DependentMemberType>(t->getCanonicalType())) {
+      CanType rootTy;
+      do {
+        rootTy = depMemTy.getBase();
+      } while ((depMemTy = dyn_cast<DependentMemberType>(rootTy)));
+      if (auto rootParamTy = dyn_cast<GenericTypeParamType>(rootTy))
+        return combineDepth(rootParamTy->getDepth());
+    }
+
+    return false;
+  });
+
+  return depth;
+}
+
+namespace {
+struct RequirementPrintLocation {
+  /// The Decl where the requirement should be attached (whether inherited or in
+  /// a where clause)
+  Decl *AttachedTo;
+  /// Whether the requirement needs to be in a where clause.
+  bool InWhereClause;
+};
+} // end anonymous namespace
+
+/// Heuristically work out a good place for \c req to be printed inside \c
+/// proto.
+///
+/// This depends only on the protocol so that we make the same decisions for all
+/// requirements in all associated types, guaranteeing that all of them will be
+/// printed somewhere. That is, taking an AssociatedTypeDecl as an argument and
+/// asking "should this requirement be printed on this ATD?" seems more likely
+/// to result in inconsistencies in what is printed where, versus what this
+/// function does: asking "where should this requirement be printed?" and then
+/// callers check if the location is the ATD.
+static RequirementPrintLocation
+bestRequirementPrintLocation(ProtocolDecl *proto, const Requirement &req) {
+  auto protoSelf = proto->getProtocolSelfType();
+  // Returns the most relevant decl within proto connected to outerType (or null
+  // if one doesn't exist), and whether the type is an "direct use",
+  // i.e. outerType itself is Self or Self.T, but not, say, Self.T.U, or
+  // Array<Self.T>. (The first's decl will be proto, while the other three will
+  // be Self.T.)
+  auto findRelevantDeclAndDirectUse = [&](Type outerType) {
+    TypeDecl *relevantDecl = nullptr;
+    Type foundType;
+    (void)outerType.findIf([&](Type t) {
+      if (t->isEqual(protoSelf)) {
+        relevantDecl = proto;
+        foundType = t;
+        return true;
+      } else if (auto DMT = t->getAs<DependentMemberType>()) {
+        auto assocType = DMT->getAssocType();
+        if (assocType && assocType->getProtocol() == proto) {
+          relevantDecl = assocType;
+          foundType = t;
+          return true;
+        }
+      }
+
+      // not here, so let's keep looking.
+      return false;
+    });
+
+    // If we didn't find anything, relevantDecl and foundType will be null, as
+    // desired.
+    auto directUse = foundType && outerType->isEqual(foundType);
+    return std::make_pair(relevantDecl, directUse);
+  };
+
+  Decl *bestDecl;
+  bool inWhereClause;
+
+  switch (req.getKind()) {
+  case RequirementKind::Conformance:
+  case RequirementKind::Superclass:
+  case RequirementKind::Layout: {
+    auto subject = req.getFirstType();
+    auto result = findRelevantDeclAndDirectUse(subject);
+
+    bestDecl = result.first;
+
+    // A requirement like Self : Protocol or Self.T : Class might be from an
+    // inheritance, or might be a where clause.
+    if (req.getKind() != RequirementKind::Layout && result.second) {
+      auto inherited = req.getSecondType();
+      inWhereClause =
+          none_of(result.first->getInherited(), [&](const TypeLoc &loc) {
+            return loc.getType()->isEqual(inherited);
+          });
+    } else {
+      inWhereClause = true;
+    }
+    break;
+  }
+  case RequirementKind::SameType: {
+    auto lhs = req.getFirstType();
+    auto rhs = req.getSecondType();
+
+    auto lhsResult = findRelevantDeclAndDirectUse(lhs);
+    auto rhsResult = findRelevantDeclAndDirectUse(rhs);
+
+    // Default to using the left type's decl.
+    bestDecl = lhsResult.first;
+
+    // But maybe the right type's one is "obviously" better!
+    // e.g. Int == Self.T
+    auto lhsDoesntExist = !lhsResult.first;
+    // e.g. Self.T.U == Self.V should go on V (first two conditions), but
+    // Self.T.U == Self should go on T (third condition).
+    auto rhsBetterDirect =
+        !lhsResult.second && rhsResult.second && rhsResult.first != proto;
+    auto rhsOfSelfToAssoc = lhsResult.first == proto && rhsResult.first;
+    // e.g. Self == Self.T.U
+    if (lhsDoesntExist || rhsBetterDirect || rhsOfSelfToAssoc)
+      bestDecl = rhsResult.first;
+
+    // Same-type requirements can only occur in where clauses
+    inWhereClause = true;
+    break;
+  }
+  }
+  // Didn't find anything that we think is relevant, so let's default to a where
+  // clause on the protocol.
+  if (!bestDecl) {
+    bestDecl = proto;
+    inWhereClause = true;
   }
 
-  return ErrorDepth;
+  return {/*AttachedTo=*/bestDecl, inWhereClause};
+}
+
+void PrintAST::printWhereClauseFromRequirementSignature(ProtocolDecl *proto,
+                                                        Decl *attachingTo) {
+  assert(proto->isRequirementSignatureComputed());
+  unsigned flags = PrintRequirements;
+  if (isa<AssociatedTypeDecl>(attachingTo))
+    flags |= SwapSelfAndDependentMemberType;
+  printGenericSignature(
+      GenericSignature::get({proto->getProtocolSelfType()} ,
+                            proto->getRequirementSignature()),
+      flags,
+      [&](const Requirement &req) {
+        auto location = bestRequirementPrintLocation(proto, req);
+        return location.AttachedTo == attachingTo && location.InWhereClause;
+      });
+}
+
+void PrintAST::printTrailingWhereClause(TrailingWhereClause *whereClause) {
+  Printer << " " << tok::kw_where << " ";
+  interleave(
+      whereClause->getRequirements(),
+      [&](const RequirementRepr &req) {
+        Printer.callPrintStructurePre(PrintStructureKind::GenericRequirement);
+        req.print(Printer);
+        Printer.printStructurePost(PrintStructureKind::GenericRequirement);
+      },
+      [&] { Printer << ", "; });
 }
 
 /// A helper function to return the depth of a requirement.
 static unsigned getDepthOfRequirement(const Requirement &req) {
   switch (req.getKind()) {
   case RequirementKind::Conformance:
-  case RequirementKind::Superclass:
-  case RequirementKind::WitnessMarker:
+  case RequirementKind::Layout:
     return getDepthOfType(req.getFirstType());
 
+  case RequirementKind::Superclass:
   case RequirementKind::SameType: {
     // Return the max valid depth of firstType and secondType.
     unsigned firstDepth = getDepthOfType(req.getFirstType());
@@ -1243,14 +1033,21 @@ static void getRequirementsAtDepth(const GenericSignature *genericSig,
 
 void PrintAST::printGenericSignature(const GenericSignature *genericSig,
                                      unsigned flags) {
+  printGenericSignature(genericSig, flags,
+                        // print everything
+                        [&](const Requirement &) { return true; });
+}
+void PrintAST::printGenericSignature(
+    const GenericSignature *genericSig, unsigned flags,
+    llvm::function_ref<bool(const Requirement &)> filter) {
   if (flags & InnermostOnly) {
     auto genericParams = genericSig->getInnermostGenericParams();
     unsigned depth = genericParams[0]->getDepth();
     SmallVector<Requirement, 2> requirementsAtDepth;
     getRequirementsAtDepth(genericSig, depth, requirementsAtDepth);
 
-    printSingleDepthOfGenericSignature(genericParams,
-                                       requirementsAtDepth, flags);
+    printSingleDepthOfGenericSignature(genericParams, requirementsAtDepth,
+                                       flags, filter);
     return;
   }
 
@@ -1258,7 +1055,8 @@ void PrintAST::printGenericSignature(const GenericSignature *genericSig,
   auto requirements = genericSig->getRequirements();
 
   if (!Options.PrintInSILBody) {
-    printSingleDepthOfGenericSignature(genericParams, requirements, flags);
+    printSingleDepthOfGenericSignature(genericParams, requirements, flags,
+                                       filter);
     return;
   }
 
@@ -1280,68 +1078,70 @@ void PrintAST::printGenericSignature(const GenericSignature *genericSig,
     getRequirementsAtDepth(genericSig, depth, requirementsAtDepth);
 
     printSingleDepthOfGenericSignature(
-      genericParams.slice(paramIdx, lastParamIdx - paramIdx),
-      requirementsAtDepth, flags);
+        genericParams.slice(paramIdx, lastParamIdx - paramIdx),
+        requirementsAtDepth, flags, filter);
 
     paramIdx = lastParamIdx;
   }
 }
 
 void PrintAST::printSingleDepthOfGenericSignature(
-         ArrayRef<GenericTypeParamType *> genericParams,
-         ArrayRef<Requirement> requirements,
-         unsigned flags) {
+    ArrayRef<GenericTypeParamType *> genericParams,
+    ArrayRef<Requirement> requirements, unsigned flags,
+    llvm::function_ref<bool(const Requirement &)> filter) {
   bool printParams = (flags & PrintParams);
   bool printRequirements = (flags & PrintRequirements);
+  bool swapSelfAndDependentMemberType =
+    (flags & SwapSelfAndDependentMemberType);
 
-  TypeSubstitutionMap subMap;
-  ModuleDecl *M = nullptr;
-
-  if (Options.TransformContext &&
-      Options.TransformContext->getTypeBase()) {
-    auto BaseType = Options.TransformContext->getTypeBase();
-    if (!BaseType->isAnyExistentialType()) {
+  SubstitutionMap subMap;
+  if (CurrentType) {
+    if (!CurrentType->isExistentialType()) {
       auto *DC = Current->getInnermostDeclContext()->getInnermostTypeContext();
-      subMap = Options.TransformContext->getTypeBase()
-          ->getMemberSubstitutions(DC);
-      M = DC->getParentModule();
+      auto *M = DC->getParentModule();
+      subMap = CurrentType->getContextSubstitutionMap(M, DC);
     }
   }
+
+  auto substParam = [&](Type param) -> Type {
+    return param.subst(subMap);
+  };
 
   if (printParams) {
     // Print the generic parameters.
     Printer << "<";
-    bool isFirstParam = true;
-    for (auto param : genericParams) {
-      if (isFirstParam)
-        isFirstParam = false;
-      else
-        Printer << ", ";
-
-      if (!subMap.empty()) {
-        if (auto argTy = Type(param).subst(M, subMap))
-          printType(argTy);
-        else
-          printType(param);
-      } else if (auto *GP = param->getDecl()) {
-        Printer.callPrintStructurePre(PrintStructureKind::GenericParameter, GP);
-        Printer.printName(GP->getName(), PrintNameContext::GenericParameter);
-        Printer.printStructurePost(PrintStructureKind::GenericParameter, GP);
-      } else {
-        printType(param);
-      }
-    }
+    interleave(genericParams,
+               [&](GenericTypeParamType *param) {
+                 if (!subMap.empty()) {
+                   if (auto argTy = substParam(param))
+                     printType(argTy);
+                   else
+                     printType(param);
+                 } else if (auto *GP = param->getDecl()) {
+                   Printer.callPrintStructurePre(
+                       PrintStructureKind::GenericParameter, GP);
+                   Printer.printName(GP->getName(),
+                                     PrintNameContext::GenericParameter);
+                   Printer.printStructurePost(
+                       PrintStructureKind::GenericParameter, GP);
+                 } else {
+                   printType(param);
+                 }
+               },
+               [&] { Printer << ", "; });
   }
 
   if (printRequirements) {
-    // Print the requirements.
     bool isFirstReq = true;
     for (const auto &req : requirements) {
-      if (req.getKind() == RequirementKind::WitnessMarker)
+      if (!filter(req))
         continue;
 
       auto first = req.getFirstType();
-      auto second = req.getSecondType();
+      Type second;
+
+      if (req.getKind() != RequirementKind::Layout)
+        second = req.getSecondType();
 
       if ((flags & SkipSelfRequirement) &&
           req.getKind() == RequirementKind::Conformance) {
@@ -1351,13 +1151,15 @@ void PrintAST::printSingleDepthOfGenericSignature(
       }
 
       if (!subMap.empty()) {
-        if (Type subFirst = first.subst(M, subMap))
+        if (Type subFirst = substParam(first))
           first = subFirst;
-        if (Type subSecond = second.subst(M, subMap))
-          second = subSecond;
-        if (!(first->is<ArchetypeType>() || first->isTypeParameter()) &&
-            !(second->is<ArchetypeType>() || second->isTypeParameter()))
-          continue;
+        if (second) {
+          if (Type subSecond = substParam(second))
+            second = subSecond;
+          if (!(first->is<ArchetypeType>() || first->isTypeParameter()) &&
+              !(second->is<ArchetypeType>() || second->isTypeParameter()))
+            continue;
+        }
       }
 
       if (isFirstReq) {
@@ -1367,8 +1169,22 @@ void PrintAST::printSingleDepthOfGenericSignature(
         Printer << ", ";
       }
 
-      Requirement substReq(req.getKind(), first, second);
-      printRequirement(substReq);
+      // Swap the order of Self == Self.A requirements if requested.
+      if (swapSelfAndDependentMemberType &&
+          req.getKind() == RequirementKind::SameType &&
+          first->is<GenericTypeParamType>() &&
+          second->is<DependentMemberType>())
+        std::swap(first, second);
+
+      Printer.callPrintStructurePre(PrintStructureKind::GenericRequirement);
+      if (second) {
+        Requirement substReq(req.getKind(), first, second);
+        printRequirement(substReq);
+      } else {
+        Requirement substReq(req.getKind(), first, req.getLayoutConstraint());
+        printRequirement(substReq);
+      }
+      Printer.printStructurePost(PrintStructureKind::GenericRequirement);
     }
   }
 
@@ -1379,31 +1195,23 @@ void PrintAST::printSingleDepthOfGenericSignature(
 void PrintAST::printRequirement(const Requirement &req) {
   printType(req.getFirstType());
   switch (req.getKind()) {
+  case RequirementKind::Layout:
+    Printer << " : ";
+    req.getLayoutConstraint()->print(Printer, Options);
+    return;
   case RequirementKind::Conformance:
   case RequirementKind::Superclass:
     Printer << " : ";
     break;
-
   case RequirementKind::SameType:
     Printer << " == ";
     break;
-
-  case RequirementKind::WitnessMarker:
-    llvm_unreachable("Handled above");
   }
   printType(req.getSecondType());
 }
 
-bool swift::shouldPrintPattern(const Pattern *P, PrintOptions &Options) {
-  bool ShouldPrint = false;
-  P->forEachVariable([&](VarDecl *VD) {
-    ShouldPrint |= shouldPrint(VD, Options);
-  });
-  return ShouldPrint;
-}
-
 bool PrintAST::shouldPrintPattern(const Pattern *P) {
-  return swift::shouldPrintPattern(P, Options);
+  return Options.shouldPrint(P);
 }
 
 void PrintAST::printPatternType(const Pattern *P) {
@@ -1413,27 +1221,22 @@ void PrintAST::printPatternType(const Pattern *P) {
   }
 }
 
-static bool shouldPrintAsFavorable(const Decl *D, PrintOptions &Options) {
-  if (!Options.TransformContext || !D->getDeclContext()->isExtensionContext() ||
-      !Options.TransformContext->isPrintingSynthesizedExtension())
-    return true;
-  NominalTypeDecl *Target = Options.TransformContext->getNominal();
-  Type BaseTy = Target->getDeclaredTypeInContext();
-  const FuncDecl *FD = dyn_cast<FuncDecl>(D);
-  if (!FD)
-    return true;
-  ResolveMemberResult Result = resolveValueMember(*Target->getDeclContext(),
-                                                  BaseTy, FD->getEffectiveFullName());
-  return !(Result && Result.Favored != D);
+bool ShouldPrintChecker::shouldPrint(const Pattern *P, PrintOptions &Options) {
+  bool ShouldPrint = false;
+  P->forEachVariable([&](const VarDecl *VD) {
+    ShouldPrint |= shouldPrint(VD, Options);
+  });
+  return ShouldPrint;
 }
 
-bool swift::shouldPrint(const Decl *D, PrintOptions &Options) {
-  if (!shouldPrintAsFavorable(D, Options))
-    return false;
+bool ShouldPrintChecker::shouldPrint(const Decl *D, PrintOptions &Options) {
   if (auto *ED= dyn_cast<ExtensionDecl>(D)) {
     if (Options.printExtensionContentAsMembers(ED))
       return false;
   }
+
+  if (Options.SkipMissingMemberPlaceholders && isa<MissingMemberDecl>(D))
+    return false;
 
   if (Options.SkipDeinit && isa<DestructorDecl>(D)) {
     return false;
@@ -1448,10 +1251,6 @@ bool swift::shouldPrint(const Decl *D, PrintOptions &Options) {
 
   if (Options.SkipUnavailable &&
       D->getAttrs().isUnavailable(D->getASTContext()))
-    return false;
-
-  // Skip stub declarations used for prior or later variants of Swift.
-  if (D->getAttrs().isUnavailableInSwiftVersion())
     return false;
 
   if (Options.ExplodeEnumCaseDecls) {
@@ -1530,7 +1329,7 @@ bool swift::shouldPrint(const Decl *D, PrintOptions &Options) {
   if (auto *PD = dyn_cast<PatternBindingDecl>(D)) {
     auto ShouldPrint = false;
     for (auto entry : PD->getPatternList()) {
-      ShouldPrint |= shouldPrintPattern(entry.getPattern(), Options);
+      ShouldPrint |= shouldPrint(entry.getPattern(), Options);
       if (ShouldPrint)
         return true;
     }
@@ -1540,7 +1339,7 @@ bool swift::shouldPrint(const Decl *D, PrintOptions &Options) {
 }
 
 bool PrintAST::shouldPrint(const Decl *D, bool Notify) {
-  auto Result = swift::shouldPrint(D, Options);
+  auto Result = Options.shouldPrint(D);
   if (!Result && Notify)
     Printer.callAvoidPrintDeclPost(D);
   return Result;
@@ -1839,16 +1638,10 @@ void PrintAST::printInherited(const Decl *decl,
                               ArrayRef<TypeLoc> inherited,
                               ArrayRef<ProtocolDecl *> protos,
                               Type superclass,
-                              bool explicitClass,
-                              bool PrintAsProtocolComposition) {
+                              bool explicitClass) {
   if (inherited.empty() && superclass.isNull() && !explicitClass) {
     if (protos.empty())
       return;
-    // If only conforms to AnyObject protocol, nothing to print.
-    if (protos.size() == 1) {
-      if (protos.front()->isSpecificProtocol(KnownProtocolKind::AnyObject))
-        return;
-    }
   }
 
   if (inherited.empty()) {
@@ -1870,16 +1663,8 @@ void PrintAST::printInherited(const Decl *decl,
       }
     }
 
-    bool UseProtocolCompositionSyntax =
-        PrintAsProtocolComposition && protos.size() > 1;
-    if (UseProtocolCompositionSyntax) {
-      Printer << " : " << tok::kw_protocol << "<";
-      PrintedColon = true;
-    }
     for (auto Proto : protos) {
       if (!shouldPrint(Proto))
-        continue;
-      if (Proto->isSpecificProtocol(KnownProtocolKind::AnyObject))
         continue;
       if (auto Enum = dyn_cast<EnumDecl>(decl)) {
         // Conformance to RawRepresentable is implied by having a raw type.
@@ -1887,8 +1672,9 @@ void PrintAST::printInherited(const Decl *decl,
             && Proto->isSpecificProtocol(KnownProtocolKind::RawRepresentable))
           continue;
         // Conformance to Equatable and Hashable is implied by being a "simple"
-        // no-payload enum.
-        if (Enum->hasOnlyCasesWithoutAssociatedValues()
+        // no-payload enum with cases.
+        if (Enum->hasCases()
+            && Enum->hasOnlyCasesWithoutAssociatedValues()
             && (Proto->isSpecificProtocol(KnownProtocolKind::Equatable)
                 || Proto->isSpecificProtocol(KnownProtocolKind::Hashable)))
           continue;
@@ -1902,8 +1688,6 @@ void PrintAST::printInherited(const Decl *decl,
       PrintedInherited = true;
       PrintedColon = true;
     }
-    if (UseProtocolCompositionSyntax)
-      Printer << ">";
   } else {
     SmallVector<TypeLoc, 6> TypesToPrint;
     for (auto TL : inherited) {
@@ -2038,7 +1822,7 @@ static void printExtendedTypeName(Type ExtendedType, ASTPrinter &Printer,
   }
 
   // Respect alias type.
-  if (ExtendedType->getKind() == TypeKind::NameAlias) {
+  if (isa<NameAliasType>(ExtendedType.getPointer())) {
     ExtendedType.print(Printer, Options);
     return;
   }
@@ -2124,8 +1908,6 @@ void PrintAST::visitPatternBindingDecl(PatternBindingDecl *decl) {
 
   if (anyVar)
     printDocumentationComment(anyVar);
-  if (decl->isStatic())
-    printStaticKeyword(decl->getCorrectStaticSpelling());
 
   // FIXME: PatternBindingDecls don't have attributes themselves, so just assume
   // the variables all have the same attributes. This isn't exactly true
@@ -2133,6 +1915,12 @@ void PrintAST::visitPatternBindingDecl(PatternBindingDecl *decl) {
   if (anyVar) {
     printAttributes(anyVar);
     printAccessibility(anyVar);
+  }
+
+  if (decl->isStatic())
+    printStaticKeyword(decl->getCorrectStaticSpelling());
+
+  if (anyVar) {
     Printer << (anyVar->isSettable(anyVar->getDeclContext()) ? "var " : "let ");
   } else {
     Printer << "let ";
@@ -2167,7 +1955,21 @@ void PrintAST::visitTopLevelCodeDecl(TopLevelCodeDecl *decl) {
 }
 
 void PrintAST::visitIfConfigDecl(IfConfigDecl *ICD) {
-  // FIXME: Pretty print #if decls
+  if (!Options.PrintIfConfig)
+    return;
+
+  for (auto &Clause : ICD->getClauses()) {
+    if (&Clause == &*ICD->getClauses().begin())
+      Printer << tok::pound_if << " /* condition */"; // FIXME: print condition
+    else if (Clause.Cond)
+      Printer << tok::pound_elseif << " /* condition */"; // FIXME: print condition
+    else
+      Printer << tok::pound_else;
+    printASTNodes(Clause.Elements);
+    Printer.printNewline();
+    indent();
+  }
+  Printer << tok::pound_endif;
 }
 
 void PrintAST::visitTypeAliasDecl(TypeAliasDecl *decl) {
@@ -2176,6 +1978,7 @@ void PrintAST::visitTypeAliasDecl(TypeAliasDecl *decl) {
   printAccessibility(decl);
   if (!Options.SkipIntroducerKeywords)
     Printer << tok::kw_typealias << " ";
+  printContextIfNeeded(decl);
   recordDeclLoc(decl,
     [&]{
       Printer.printName(decl->getName());
@@ -2185,9 +1988,8 @@ void PrintAST::visitTypeAliasDecl(TypeAliasDecl *decl) {
           printGenericSignature(genericSig, PrintParams | InnermostOnly);
     });
   bool ShouldPrint = true;
-  Type Ty;
-  if (decl->hasUnderlyingType())
-    Ty = decl->getUnderlyingType();
+  Type Ty = decl->getUnderlyingTypeLoc().getType();
+
   // If the underlying type is private, don't print it.
   if (Options.SkipPrivateStdlibDecls && Ty && Ty.isPrivateStdlibType())
     ShouldPrint = false;
@@ -2222,6 +2024,17 @@ void PrintAST::visitAssociatedTypeDecl(AssociatedTypeDecl *decl) {
     Printer << " = ";
     decl->getDefaultDefinitionLoc().getType().print(Printer, Options);
   }
+
+  auto proto = decl->getProtocol();
+  // As with protocol's trailing where clauses, use the requirement signature
+  // when available.
+  if (proto->isRequirementSignatureComputed()) {
+    printWhereClauseFromRequirementSignature(proto, decl);
+  } else {
+    if (auto trailingWhere = decl->getTrailingWhereClause()) {
+      printTrailingWhereClause(trailingWhere);
+    }
+  }
 }
 
 void PrintAST::visitEnumDecl(EnumDecl *decl) {
@@ -2236,6 +2049,7 @@ void PrintAST::visitEnumDecl(EnumDecl *decl) {
   } else {
     if (!Options.SkipIntroducerKeywords)
       Printer << tok::kw_enum << " ";
+    printContextIfNeeded(decl);
     recordDeclLoc(decl,
       [&]{
         Printer.printName(decl->getName());
@@ -2263,6 +2077,7 @@ void PrintAST::visitStructDecl(StructDecl *decl) {
   } else {
     if (!Options.SkipIntroducerKeywords)
       Printer << tok::kw_struct << " ";
+    printContextIfNeeded(decl);
     recordDeclLoc(decl,
       [&]{
         Printer.printName(decl->getName());
@@ -2290,6 +2105,7 @@ void PrintAST::visitClassDecl(ClassDecl *decl) {
   } else {
     if (!Options.SkipIntroducerKeywords)
       Printer << tok::kw_class << " ";
+    printContextIfNeeded(decl);
     recordDeclLoc(decl,
       [&]{
         Printer.printName(decl->getName());
@@ -2319,6 +2135,7 @@ void PrintAST::visitProtocolDecl(ProtocolDecl *decl) {
   } else {
     if (!Options.SkipIntroducerKeywords)
       Printer << tok::kw_protocol << " ";
+    printContextIfNeeded(decl);
     recordDeclLoc(decl,
       [&]{
         Printer.printName(decl->getName());
@@ -2341,6 +2158,18 @@ void PrintAST::visitProtocolDecl(ProtocolDecl *decl) {
     }
 
     printInherited(decl, explicitClass);
+
+    // The trailing where clause is a syntactic thing, which isn't serialized
+    // (etc.) and thus isn't available for printing things out of
+    // already-compiled SIL modules. The requirement signature is available in
+    // such cases, so let's go with that when we can.
+    if (decl->isRequirementSignatureComputed()) {
+      printWhereClauseFromRequirementSignature(decl, decl);
+    } else {
+      if (auto trailingWhere = decl->getTrailingWhereClause()) {
+        printTrailingWhereClause(trailingWhere);
+      }
+    }
   }
   if (Options.TypeDefinitions) {
     printMembersOfDecl(decl, false, true,
@@ -2361,6 +2190,8 @@ static void printParameterFlags(ASTPrinter &printer, PrintOptions options,
     printer << "@autoclosure ";
   if (!options.excludeAttrKind(TAK_escaping) && flags.isEscaping())
     printer << "@escaping ";
+  if (flags.isShared())
+    printer << "__shared ";
 }
 
 void PrintAST::visitVarDecl(VarDecl *decl) {
@@ -2376,17 +2207,33 @@ void PrintAST::visitVarDecl(VarDecl *decl) {
   if (!Options.SkipIntroducerKeywords) {
     if (decl->isStatic())
       printStaticKeyword(decl->getCorrectStaticSpelling());
-    Printer << (decl->isLet() ? tok::kw_let : tok::kw_var) << " ";
+    if (decl->getKind() == DeclKind::Var
+        || Options.PrintParameterSpecifiers) {
+      // Map all non-let specifiers to 'var'.  This is not correct, but
+      // SourceKit relies on this for info about parameter decls.
+      switch (decl->getSpecifier()) {
+        case VarDecl::Specifier::Owned:
+          Printer << tok::kw_let;
+          break;
+        case VarDecl::Specifier::Var:
+        case VarDecl::Specifier::InOut:
+        case VarDecl::Specifier::Shared:
+          Printer << tok::kw_var;
+          break;
+      }
+      Printer << " ";
+    }
   }
+  printContextIfNeeded(decl);
   recordDeclLoc(decl,
     [&]{
       Printer.printName(decl->getName());
     });
-  if (decl->hasType()) {
+  if (decl->hasInterfaceType()) {
     Printer << ": ";
     auto tyLoc = decl->getTypeLoc();
     if (!tyLoc.getTypeRepr())
-      tyLoc = TypeLoc::withoutLoc(decl->getType());
+      tyLoc = TypeLoc::withoutLoc(decl->getInterfaceType());
     printTypeLoc(tyLoc);
   }
 
@@ -2425,7 +2272,7 @@ void PrintAST::printOneParameter(const ParamDecl *param,
         Printer.printName(BodyName, PrintNameContext::FunctionParameterLocal);
         break;
       }
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     case PrintOptions::ArgAndParamPrintingMode::BothAlways:
       Printer.printName(ArgName, PrintNameContext::FunctionParameterExternal);
       Printer << " ";
@@ -2439,8 +2286,8 @@ void PrintAST::printOneParameter(const ParamDecl *param,
 
   printArgName();
 
-  if (!TheTypeLoc.getTypeRepr() && param->hasType())
-    TheTypeLoc = TypeLoc::withoutLoc(param->getType());
+  if (!TheTypeLoc.getTypeRepr() && param->hasInterfaceType())
+    TheTypeLoc = TypeLoc::withoutLoc(param->getInterfaceType());
 
   // If the parameter is variadic, we will print the "..." after it, but we have
   // to strip off the added array type.
@@ -2455,7 +2302,7 @@ void PrintAST::printOneParameter(const ParamDecl *param,
   // Special case, if we're not going to use the type repr printing, peek
   // through the paren types so that we don't print excessive @escapings.
   unsigned numParens = 0;
-  if (!willUseTypeReprPrinting(TheTypeLoc, Options)) {
+  if (!willUseTypeReprPrinting(TheTypeLoc, CurrentType, Options)) {
     while (auto parenTy =
                 dyn_cast<ParenType>(TheTypeLoc.getType().getPointer())) {
       ++numParens;
@@ -2501,7 +2348,7 @@ void PrintAST::printParameterList(ParameterList *PL, Type paramListTy,
                                   bool isCurried,
                                   std::function<bool()> isAPINameByDefault) {
   SmallVector<ParameterTypeFlags, 4> paramFlags;
-  if (paramListTy) {
+  if (paramListTy && !paramListTy->hasError()) {
     if (auto parenTy = dyn_cast<ParenType>(paramListTy.getPointer())) {
       paramFlags.push_back(parenTy->getParameterFlags());
     } else if (auto tupleTy = paramListTy->getAs<TupleType>()) {
@@ -2528,7 +2375,7 @@ void PrintAST::printParameterList(ParameterList *PL, Type paramListTy,
 
 void PrintAST::printFunctionParameters(AbstractFunctionDecl *AFD) {
   auto BodyParams = AFD->getParameterLists();
-  auto curTy = AFD->hasType() ? AFD->getType() : nullptr;
+  auto curTy = AFD->hasInterfaceType() ? AFD->getInterfaceType() : nullptr;
 
   // Skip over the implicit 'self'.
   if (AFD->getImplicitSelfDecl()) {
@@ -2558,7 +2405,7 @@ void PrintAST::printFunctionParameters(AbstractFunctionDecl *AFD) {
                              ? parameterListTypes[CurrPattern]
                              : nullptr;
     printParameterList(BodyParams[CurrPattern], paramListType,
-                       /*Curried=*/CurrPattern > 0,
+                       /*isCurried=*/CurrPattern > 0,
                        [&]()->bool {
       return CurrPattern > 0 || AFD->argumentNameIsAPIByDefault();
     });
@@ -2682,6 +2529,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
         }
         Printer << tok::kw_func << " ";
       }
+      printContextIfNeeded(decl);
       recordDeclLoc(decl,
         [&]{ // Name
           if (!decl->hasName())
@@ -2696,7 +2544,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
           printFunctionParameters(decl);
         });
 
-      Type ResultTy = decl->getResultType();
+      Type ResultTy = decl->getResultInterfaceType();
       if (ResultTy && !ResultTy->isVoid()) {
         TypeLoc ResultTyLoc = decl->getBodyResultTypeLoc();
         if (!ResultTyLoc.getTypeRepr())
@@ -2743,10 +2591,9 @@ void PrintAST::printEnumElement(EnumElementDecl *elt) {
       Printer.printName(elt->getName());
     });
 
-  if (elt->hasArgumentType()) {
-    Type Ty = elt->getArgumentType();
-    if (!Options.SkipPrivateStdlibDecls || !Ty.isPrivateStdlibType())
-      Ty.print(Printer, Options);
+  if (auto argTy = elt->getArgumentInterfaceType()) {
+    if (!Options.SkipPrivateStdlibDecls || !argTy.isPrivateStdlibType())
+      argTy.print(Printer, Options);
   }
 
   auto *raw = elt->getRawValueExpr();
@@ -2805,17 +2652,21 @@ void PrintAST::visitSubscriptDecl(SubscriptDecl *decl) {
   printDocumentationComment(decl);
   printAttributes(decl);
   printAccessibility(decl);
+  printContextIfNeeded(decl);
   recordDeclLoc(decl, [&]{
     Printer << "subscript";
   }, [&] { // Parameters
-    printParameterList(decl->getIndices(), decl->getIndicesType(),
-                       /*Curried=*/false,
+    printParameterList(decl->getIndices(), decl->getIndicesInterfaceType(),
+                       /*isCurried=*/false,
                        /*isAPINameByDefault*/[]()->bool{return false;});
   });
   Printer << " -> ";
 
   Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
-  printTypeLoc(decl->getElementTypeLoc());
+  TypeLoc elementTy = decl->getElementTypeLoc();
+  if (!elementTy.getTypeRepr())
+    elementTy = TypeLoc::withoutLoc(decl->getElementInterfaceType());
+  printTypeLoc(elementTy);
   Printer.printStructurePost(PrintStructureKind::FunctionReturnType);
 
   printAccessors(decl);
@@ -2835,6 +2686,7 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
       Printer << "/*not inherited*/ ";
   }
 
+  printContextIfNeeded(decl);
   recordDeclLoc(decl,
     [&]{
       Printer << "init";
@@ -2883,6 +2735,7 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
 void PrintAST::visitDestructorDecl(DestructorDecl *decl) {
   printDocumentationComment(decl);
   printAttributes(decl);
+  printContextIfNeeded(decl);
   recordDeclLoc(decl,
     [&]{
       Printer << "deinit";
@@ -2991,6 +2844,12 @@ void PrintAST::visitPostfixOperatorDecl(PostfixOperatorDecl *decl) {
 
 void PrintAST::visitModuleDecl(ModuleDecl *decl) { }
 
+void PrintAST::visitMissingMemberDecl(MissingMemberDecl *decl) {
+  Printer << "/* placeholder for ";
+  recordDeclLoc(decl, [&]{ Printer << decl->getFullName(); });
+  Printer << " */";
+}
+
 void PrintAST::visitBraceStmt(BraceStmt *stmt) {
   Printer << "{";
   printASTNodes(stmt->getElements());
@@ -3032,27 +2891,6 @@ void PrintAST::visitGuardStmt(GuardStmt *stmt) {
   // FIXME: print condition
   Printer << " ";
   visit(stmt->getBody());
-}
-
-void PrintAST::visitIfConfigStmt(IfConfigStmt *stmt) {
-  if (!Options.PrintIfConfig)
-    return;
-
-  for (auto &Clause : stmt->getClauses()) {
-    if (&Clause == &*stmt->getClauses().begin())
-      Printer << tok::pound_if << " "; // FIXME: print condition
-    else if (Clause.Cond)
-      Printer << tok::pound_elseif << ""; // FIXME: print condition
-    else
-      Printer << tok::pound_else;
-    Printer.printNewline();
-    if (printASTNodes(Clause.Elements)) {
-      Printer.printNewline();
-      indent();
-    }
-  }
-  Printer.printNewline();
-  Printer << tok::pound_endif;
 }
 
 void PrintAST::visitWhileStmt(WhileStmt *stmt) {
@@ -3133,8 +2971,11 @@ void PrintAST::visitSwitchStmt(SwitchStmt *stmt) {
   // FIXME: print subject
   Printer << "{";
   Printer.printNewline();
-  for (CaseStmt *C : stmt->getCases()) {
-    visit(C);
+  for (auto N : stmt->getRawCases()) {
+    if (N.is<Stmt*>())
+      visit(cast<CaseStmt>(N.get<Stmt*>()));
+    else
+      visit(cast<IfConfigDecl>(N.get<Decl*>()));
   }
   Printer.printNewline();
   indent();
@@ -3251,68 +3092,18 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
   ASTPrinter &Printer;
   const PrintOptions &Options;
 
-  void printDeclContext(DeclContext *DC) {
-    switch (DC->getContextKind()) {
-    case DeclContextKind::Module: {
-      Module *M = cast<Module>(DC);
-
-      if (auto Parent = M->getParent())
-        printDeclContext(Parent);
-      Printer.printModuleRef(M, M->getName());
-      return;
-    }
-
-    case DeclContextKind::FileUnit:
-      printDeclContext(DC->getParent());
-      return;
-
-    case DeclContextKind::AbstractClosureExpr:
-      // FIXME: print closures somehow.
-      return;
-
-    case DeclContextKind::GenericTypeDecl:
-      visit(cast<GenericTypeDecl>(DC)->getType());
-      return;
-
-    case DeclContextKind::ExtensionDecl:
-      visit(cast<ExtensionDecl>(DC)->getExtendedType());
-      return;
-
-    case DeclContextKind::Initializer:
-    case DeclContextKind::TopLevelCodeDecl:
-    case DeclContextKind::SerializedLocal:
-      llvm_unreachable("bad decl context");
-
-    case DeclContextKind::AbstractFunctionDecl:
-      visit(cast<AbstractFunctionDecl>(DC)->getType());
-      return;
-
-    case DeclContextKind::SubscriptDecl:
-      visit(cast<SubscriptDecl>(DC)->getType());
-      return;
-    }
-  }
-
   void printGenericArgs(ArrayRef<Type> Args) {
     if (Args.empty())
       return;
 
     Printer << "<";
-    bool First = true;
-    for (Type Arg : Args) {
-      if (First)
-        First = false;
-      else
-        Printer << ", ";
-      visit(Arg);
-    }
+    interleave(Args, [&](Type Arg) { visit(Arg); }, [&] { Printer << ", "; });
     Printer << ">";
   }
 
   static bool isSimple(Type type) {
     switch (type->getKind()) {
     case TypeKind::Function:
-    case TypeKind::PolymorphicFunction:
     case TypeKind::GenericFunction:
       return false;
 
@@ -3326,9 +3117,12 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
     }
 
     case TypeKind::ProtocolComposition: {
-      // 'Any' and single protocol compositions are simple
+      // 'Any', 'AnyObject' and single protocol compositions are simple
       auto composition = type->getAs<ProtocolCompositionType>();
-      return composition->getProtocols().size() <= 1;
+      auto memberCount = composition->getMembers().size();
+      if (composition->hasExplicitAnyObject())
+        return memberCount == 0;
+      return memberCount <= 1;
     }
 
     default:
@@ -3357,7 +3151,7 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
 
   template <typename T>
   void printModuleContext(T *Ty) {
-    Module *Mod = Ty->getDecl()->getModuleContext();
+    ModuleDecl *Mod = Ty->getDecl()->getModuleContext();
     Printer.printModuleRef(Mod, Mod->getName());
     Printer << ".";
   }
@@ -3370,7 +3164,7 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
 
   // FIXME: we should have a callback that would tell us
   // whether it's kosher to print a module name or not
-  bool isLLDBExpressionModule(Module *M) {
+  bool isLLDBExpressionModule(ModuleDecl *M) {
     if (!M)
       return false;
     return M->getName().str().startswith(LLDB_EXPRESSIONS_MODULE_NAME_PREFIX);
@@ -3390,7 +3184,7 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
     if (!D)
       return true;
 
-    Module *M = D->getDeclContext()->getParentModule();
+    ModuleDecl *M = D->getDeclContext()->getParentModule();
 
     if (Options.CurrentModule && M == Options.CurrentModule) {
       return false;
@@ -3607,9 +3401,21 @@ public:
     printGenericArgs(T->getGenericArgs());
   }
 
+  void visitParentType(Type T) {
+    PrintOptions innerOptions = Options;
+    innerOptions.SynthesizeSugarOnTypes = false;
+
+    if (auto sugarType = dyn_cast<SyntaxSugarType>(T.getPointer()))
+      T = sugarType->getImplementationType();
+    else if (auto dictType = dyn_cast<DictionaryType>(T.getPointer()))
+      T = dictType->getImplementationType();
+
+    TypePrinter(Printer, innerOptions).visit(T);
+  }
+
   void visitEnumType(EnumType *T) {
     if (auto ParentType = T->getParent()) {
-      visit(ParentType);
+      visitParentType(ParentType);
       Printer << ".";
     } else if (shouldPrintFullyQualified(T)) {
       printModuleContext(T);
@@ -3620,7 +3426,7 @@ public:
 
   void visitStructType(StructType *T) {
     if (auto ParentType = T->getParent()) {
-      visit(ParentType);
+      visitParentType(ParentType);
       Printer << ".";
     } else if (shouldPrintFullyQualified(T)) {
       printModuleContext(T);
@@ -3631,7 +3437,7 @@ public:
 
   void visitClassType(ClassType *T) {
     if (auto ParentType = T->getParent()) {
-      visit(ParentType);
+      visitParentType(ParentType);
       Printer << ".";
     } else if (shouldPrintFullyQualified(T)) {
       printModuleContext(T);
@@ -3652,11 +3458,6 @@ public:
 
     // We spell normal metatypes of existential types as .Protocol.
     if (isa<MetatypeType>(T) &&
-        // Special case AssociatedTypeType's here, since they may not be fully
-        // set up within the type checker (preventing getCanonicalType from
-        // working), and we want type printing to always work even in malformed
-        // programs half way through the type checker.
-        !isa<AssociatedTypeType>(T->getInstanceType().getPointer()) &&
         T->getInstanceType()->isAnyExistentialType()) {
       Printer << ".Protocol";
     } else {
@@ -3671,18 +3472,25 @@ public:
   }
 
   void visitDynamicSelfType(DynamicSelfType *T) {
-    if (Options.StripDynamicSelf) {
-      visit(T->getSelfType());
-      return;
-    }
-
     if (Options.PrintInSILBody) {
       Printer << "@dynamic_self ";
       visit(T->getSelfType());
       return;
     }
 
-    Printer.printTypeRef(T, T->getASTContext().Id_Self);
+    // Try to print as a reference to the static type so that we will get a USR,
+    // in cursor info.
+    auto staticSelfT = T->getSelfType();
+
+    if (auto *NTD = staticSelfT->getAnyNominal()) {
+      if (isa<ClassDecl>(NTD)) {
+        auto Name = T->getASTContext().Id_Self;
+        Printer.printTypeRef(T, NTD, Name);
+        return;
+      }
+    }
+
+    visit(staticSelfT);
   }
 
   void printFunctionExtInfo(AnyFunctionType::ExtInfo info) {
@@ -3780,7 +3588,7 @@ public:
     };
 
     printFunctionExtInfo(T->getExtInfo());
-    
+
     // If we're stripping argument labels from types, do it when printing.
     Type inputType = T->getInput();
     if (auto tupleTy = dyn_cast<TupleType>(inputType.getPointer())) {
@@ -3794,15 +3602,15 @@ public:
     bool needsParens =
       !isa<ParenType>(inputType.getPointer()) &&
       !inputType->is<TupleType>();
-    
+
     if (needsParens)
       Printer << "(";
 
     visit(inputType);
-    
+
     if (needsParens)
       Printer << ")";
-    
+
     if (T->throws())
       Printer << " " << tok::kw_throws;
 
@@ -3811,10 +3619,6 @@ public:
     Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
     T->getResult().print(Printer, Options);
     Printer.printStructurePost(PrintStructureKind::FunctionReturnType);
-  }
-
-  void visitPolymorphicFunctionType(PolymorphicFunctionType *T) {
-    Printer << "I'm not a real thing that exists";
   }
 
   void printGenericSignature(const GenericSignature *genericSig,
@@ -3837,7 +3641,7 @@ public:
     bool needsParens =
       !isa<ParenType>(T->getInput().getPointer()) &&
       !T->getInput()->is<TupleType>();
-      
+
     if (needsParens)
       Printer << "(";
 
@@ -3865,10 +3669,8 @@ public:
     case ParameterConvention::Direct_Guaranteed:
       Printer << "@callee_guaranteed ";
       return;
-    case ParameterConvention::Direct_Deallocating:
-      // Closures do not have destructors.
-      llvm_unreachable("callee convention cannot be deallocating");
     case ParameterConvention::Indirect_In:
+    case ParameterConvention::Indirect_In_Constant:
     case ParameterConvention::Indirect_Inout:
     case ParameterConvention::Indirect_InoutAliasable:
     case ParameterConvention::Indirect_In_Guaranteed:
@@ -3895,13 +3697,12 @@ public:
     }
     Printer << ") -> ";
 
-    unsigned totalResults =
-      T->getNumAllResults() + unsigned(T->hasErrorResult());
+    unsigned totalResults = T->getNumResults() + unsigned(T->hasErrorResult());
 
     if (totalResults != 1) Printer << "(";
 
     first = true;
-    for (auto result : T->getAllResults()) {
+    for (auto result : T->getResults()) {
       Printer.printSeparator(first, ", ");
       result.print(Printer, Options);
     }
@@ -3923,8 +3724,46 @@ public:
   }
 
   void visitSILBoxType(SILBoxType *T) {
-    Printer << "@box ";
-    printWithParensIfNotSimple(T->getBoxedType());
+    {
+      // A box layout has its own independent generic environment. Don't try
+      // to print it with the environment's generic params.
+      PrintOptions subOptions = Options;
+      subOptions.GenericEnv = nullptr;
+      TypePrinter sub(Printer, subOptions);
+
+      // Capture list used here to ensure we don't print anything using `this`
+      // printer, but only the sub-Printer.
+      [&sub, T]{
+        if (auto sig = T->getLayout()->getGenericSignature()) {
+          sub.printGenericSignature(sig,
+                            PrintAST::PrintParams | PrintAST::PrintRequirements);
+          sub.Printer << " ";
+        }
+        sub.Printer << "{";
+        interleave(T->getLayout()->getFields(),
+                   [&](const SILField &field) {
+                     sub.Printer <<
+                       (field.isMutable() ? " var " : " let ");
+                     sub.visit(field.getLoweredType());
+                   },
+                   [&]{
+                     sub.Printer << ",";
+                   });
+        sub.Printer << " }";
+      }();
+    }
+
+    // The arguments to the layout, if any, do come from the outer environment.
+    if (!T->getGenericArgs().empty()) {
+      Printer << " <";
+      interleave(T->getGenericArgs(),
+                 [&](const Substitution &arg) {
+                   visit(arg.getReplacement());
+                 }, [&]{
+                   Printer << ", ";
+                 });
+      Printer << ">";
+    }
   }
 
   void visitArraySliceType(ArraySliceType *T) {
@@ -3956,17 +3795,16 @@ public:
   }
 
   void visitProtocolCompositionType(ProtocolCompositionType *T) {
-    if (T->getProtocols().empty()) {
-      Printer << "Any";
+    if (T->getMembers().empty()) {
+      if (T->hasExplicitAnyObject())
+        Printer << "AnyObject";
+      else
+        Printer << "Any";
     } else {
-      bool First = true;
-      for (auto Proto : T->getProtocols()) {
-        if (First)
-          First = false;
-        else
-          Printer << " & ";
-        visit(Proto);
-      }
+      interleave(T->getMembers(), [&](Type Ty) { visit(Ty); },
+                 [&] { Printer << " & "; });
+      if (T->hasExplicitAnyObject())
+        Printer << " & AnyObject";
     }
   }
 
@@ -3999,21 +3837,14 @@ public:
         }
       }
 
-      if (T->getName().empty())
+      auto Name = T->getName();
+      if (Name.empty())
         Printer << "<anonymous>";
       else {
-        // Print protocol 'Self' as a generic parameter so that it gets
-        // annotated in cursor info.
-        // FIXME: in a protocol extension, we really want the extension, not the
-        // protocol.
-        if (auto *P = T->getSelfProtocol()) {
-          auto *GTD = P->getProtocolSelf();
-          assert(GTD && GTD->isProtocolSelf());
-          Printer.printTypeRef(T, GTD, T->getName());
-          return;
-        }
-
-        Printer.printName(T->getName());
+        PrintNameContext context = PrintNameContext::Normal;
+        if (Name == T->getASTContext().Id_Self)
+          context = PrintNameContext::GenericParameter;
+        Printer.printName(Name, context);
       }
     }
   }
@@ -4039,28 +3870,21 @@ public:
     if (Name.empty())
       Printer << "<anonymous>";
     else {
-      PrintNameContext context = PrintNameContext::Normal;
-      if (T->getDecl() && T->getDecl()->isProtocolSelf())
-        context = PrintNameContext::GenericParameter;
+      if (T->getDecl() &&
+          T->getDecl()->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
+        Printer.printTypeRef(T, T->getDecl(), Name);
+        return;
+      }
 
+      PrintNameContext context = PrintNameContext::Normal;
+      if (Name == T->getASTContext().Id_Self)
+        context = PrintNameContext::GenericParameter;
       Printer.printName(Name, context);
     }
   }
 
-  void visitAssociatedTypeType(AssociatedTypeType *T) {
-    auto Name = T->getDecl()->getName();
-    if (Name.empty())
-      Printer << "<anonymous>";
-    else
-      Printer.printName(Name);
-  }
-
-  void visitSubstitutedType(SubstitutedType *T) {
-    visit(T->getReplacementType());
-  }
-
   void visitDependentMemberType(DependentMemberType *T) {
-    visit(T->getBase());
+    visitParentType(T->getBase());
     Printer << ".";
     Printer.printName(T->getName());
   }
@@ -4105,6 +3929,40 @@ void Type::print(ASTPrinter &Printer, const PrintOptions &PO) const {
     TypePrinter(Printer, PO).visit(*this);
 }
 
+void LayoutConstraintInfo::print(raw_ostream &OS,
+                                 const PrintOptions &PO) const {
+  StreamPrinter Printer(OS);
+  print(Printer, PO);
+}
+
+void LayoutConstraint::print(raw_ostream &OS,
+                             const PrintOptions &PO) const {
+  assert(*this);
+  getPointer()->print(OS, PO);
+}
+
+void LayoutConstraintInfo::print(ASTPrinter &Printer,
+                                 const PrintOptions &PO) const {
+  Printer << getName();
+  switch (getKind()) {
+  case LayoutConstraintKind::UnknownLayout:
+  case LayoutConstraintKind::RefCountedObject:
+  case LayoutConstraintKind::NativeRefCountedObject:
+  case LayoutConstraintKind::Class:
+  case LayoutConstraintKind::NativeClass:
+  case LayoutConstraintKind::Trivial:
+    return;
+  case LayoutConstraintKind::TrivialOfAtMostSize:
+  case LayoutConstraintKind::TrivialOfExactSize:
+    Printer << "(";
+    Printer << SizeInBits;
+    if (Alignment)
+      Printer << ", " << Alignment <<")";
+    Printer << ")";
+    break;
+  }
+}
+
 void GenericSignature::print(raw_ostream &OS) const {
   StreamPrinter Printer(OS);
   PrintAST(Printer, PrintOptions())
@@ -4119,11 +3977,11 @@ void GenericSignature::dump() const {
 
 void Requirement::dump() const {
   switch (getKind()) {
-  case RequirementKind::WitnessMarker:
-    llvm::errs() << "witness_marker: ";
-    break;
   case RequirementKind::Conformance:
     llvm::errs() << "conforms_to: ";
+    break;
+  case RequirementKind::Layout:
+    llvm::errs() << "layout: ";
     break;
   case RequirementKind::Superclass:
     llvm::errs() << "superclass: ";
@@ -4134,12 +3992,19 @@ void Requirement::dump() const {
   }
 
   if (getFirstType()) llvm::errs() << getFirstType() << " ";
-  if (getSecondType()) llvm::errs() << getSecondType();
+  if (getKind() != RequirementKind::Layout && getSecondType())
+    llvm::errs() << getSecondType();
+  else if (getLayoutConstraint())
+    llvm::errs() << getLayoutConstraint();
   llvm::errs() << "\n";
 }
 
 void Requirement::print(raw_ostream &os, const PrintOptions &opts) const {
   StreamPrinter printer(os);
+  PrintAST(printer, opts).printRequirement(*this);
+}
+
+void Requirement::print(ASTPrinter &printer, const PrintOptions &opts) const {
   PrintAST(printer, opts).printRequirement(*this);
 }
 
@@ -4153,13 +4018,14 @@ std::string GenericSignature::getAsString() const {
 static StringRef getStringForParameterConvention(ParameterConvention conv) {
   switch (conv) {
   case ParameterConvention::Indirect_In: return "@in ";
+  case ParameterConvention::Indirect_In_Constant:
+    return "@in_constant ";
   case ParameterConvention::Indirect_In_Guaranteed:  return "@in_guaranteed ";
   case ParameterConvention::Indirect_Inout: return "@inout ";
   case ParameterConvention::Indirect_InoutAliasable: return "@inout_aliasable ";
   case ParameterConvention::Direct_Owned: return "@owned ";
   case ParameterConvention::Direct_Unowned: return "";
   case ParameterConvention::Direct_Guaranteed: return "@guaranteed ";
-  case ParameterConvention::Direct_Deallocating: return "@deallocating ";
   }
   llvm_unreachable("bad parameter convention");
 }
@@ -4178,8 +4044,10 @@ StringRef swift::getCheckedCastKindName(CheckedCastKind kind) {
     return "dictionary_downcast";
   case CheckedCastKind::SetDowncast:
     return "set_downcast";
-  case CheckedCastKind::BridgeFromObjectiveC:
-    return "bridge_from_objc";
+  case CheckedCastKind::BridgingCoercion:
+    return "bridging_coercion";
+  case CheckedCastKind::Swift3BridgingDowncast:
+    return "bridging_downcast";
   }
   llvm_unreachable("bad checked cast name");
 }
@@ -4247,6 +4115,19 @@ void TypeBase::print(ASTPrinter &Printer, const PrintOptions &PO) const {
   Type(const_cast<TypeBase *>(this)).print(Printer, PO);
 }
 
+std::string LayoutConstraint::getString(const PrintOptions &PO) const {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  print(OS, PO);
+  return OS.str();
+}
+
+std::string LayoutConstraintInfo::getString(const PrintOptions &PO) const {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  print(OS, PO);
+  return OS.str();
+}
 
 void ProtocolConformance::printName(llvm::raw_ostream &os,
                                     const PrintOptions &PO) const {

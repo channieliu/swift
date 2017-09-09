@@ -1,7 +1,12 @@
+
+if (SWIFT_FORCE_OPTIMIZED_TYPECHECKER)
+  set(EXTRA_AST_FLAGS "FORCE_BUILD_OPTIMIZED")
+endif()
+
 add_swift_library(swiftAST STATIC
-  ArchetypeBuilder.cpp
   ASTContext.cpp
   ASTDumper.cpp
+  ASTMangler.cpp
   ASTNode.cpp
   ASTPrinter.cpp
   ASTScope.cpp
@@ -18,16 +23,20 @@ add_swift_library(swiftAST STATIC
   DeclContext.cpp
   DeclNameLoc.cpp
   DefaultArgumentKind.cpp
+  DiagnosticConsumer.cpp
   DiagnosticEngine.cpp
   DiagnosticList.cpp
   DocComment.cpp
   Expr.cpp
   GenericEnvironment.cpp
   GenericSignature.cpp
+  GenericSignatureBuilder.cpp
   Identifier.cpp
+  LayoutConstraint.cpp
+  LegacyASTTransformer.cpp
   LookupVisibleDecls.cpp
-  Mangle.cpp
   Module.cpp
+  ModuleLoader.cpp
   ModuleNameLookup.cpp
   NameLookup.cpp
   Parameter.cpp
@@ -36,20 +45,29 @@ add_swift_library(swiftAST STATIC
   PrettyStackTrace.cpp
   ProtocolConformance.cpp
   RawComment.cpp
+  SyntaxASTMap.cpp
+  SILLayout.cpp
   Stmt.cpp
   SourceEntityWalker.cpp
   Substitution.cpp
+  SubstitutionList.cpp
   SubstitutionMap.cpp
+  SwiftNameTranslation.cpp
   Type.cpp
   TypeJoinMeet.cpp
   TypeRefinementContext.cpp
   TypeRepr.cpp
   TypeWalker.cpp
   USRGeneration.cpp
+  DEPENDS
+    swift-syntax-generated-headers
+
   LINK_LIBRARIES
     swiftMarkup
     swiftBasic
+    swiftSyntax
 
+  INTERFACE_LINK_LIBRARIES
     # Clang dependencies.
     # FIXME: Clang should really export these in some reasonable manner.
     clangCodeGen
@@ -72,9 +90,11 @@ add_swift_library(swiftAST STATIC
     clangBasic
 
   LLVM_COMPONENT_DEPENDS
-    bitreader bitwriter coverage irreader debuginfoDWARF
+    bitreader bitwriter coroutines coverage irreader debuginfoDWARF
     profiledata instrumentation object objcarcopts mc mcparser
     bitreader bitwriter lto ipo option core support ${LLVM_TARGETS_TO_BUILD}
+
+  ${EXTRA_AST_FLAGS}
   )
 
 # intrinsics_gen is the LLVM tablegen target that generates the include files

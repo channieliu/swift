@@ -2,22 +2,25 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #include "swift/PrintAsObjC/PrintAsObjC.h"
 #include "swift/Strings.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/ASTVisitor.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/ForeignErrorConvention.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/PrettyStackTrace.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/TypeVisitor.h"
+#include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/Comment.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Basic/Version.h"
@@ -25,18 +28,23 @@
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/IDE/CommentConversion.h"
+#include "swift/Parse/Lexer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/Basic/CharInfo.h"
 #include "clang/Basic/Module.h"
+#include "clang/Lex/Lexer.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace swift;
+using namespace swift::objc_translation;
 
 static bool isNSObjectOrAnyHashable(ASTContext &ctx, Type type) {
   if (auto classDecl = type->getClassOrBoundGenericClass()) {
@@ -45,8 +53,7 @@ static bool isNSObjectOrAnyHashable(ASTContext &ctx, Type type) {
            classDecl->getModuleContext()->getName() == ctx.Id_ObjectiveC;
   }
   if (auto nomDecl = type->getAnyNominal()) {
-    return nomDecl->getName() == ctx.getIdentifier("AnyHashable") &&
-      nomDecl->getModuleContext() == ctx.getStdlibModule();
+    return nomDecl == ctx.getAnyHashableDecl();
   }
 
   return false;
@@ -77,49 +84,52 @@ static bool isClangKeyword(Identifier name) {
 
 
 namespace {
-  enum CustomNamesOnly_t : bool {
-    Normal = false,
-    CustomNamesOnly = true,
-  };
-
   /// Whether the type being printed is in function param position.
   enum IsFunctionParam_t : bool {
     IsFunctionParam = true,
     IsNotFunctionParam = false,
   };
-}
+} // end anonymous namespace
 
-static StringRef getNameForObjC(const ValueDecl *VD,
-                                CustomNamesOnly_t customNamesOnly = Normal) {
-  assert(isa<ClassDecl>(VD) || isa<ProtocolDecl>(VD) || isa<StructDecl>(VD) ||
-         isa<EnumDecl>(VD) || isa<EnumElementDecl>(VD));
-  if (auto objc = VD->getAttrs().getAttribute<ObjCAttr>()) {
-    if (auto name = objc->getName()) {
-      assert(name->getNumSelectorPieces() == 1);
-      return name->getSelectorPieces().front().str();
-    }
-  }
-
-  if (customNamesOnly)
-    return StringRef();
-
-  if (auto clangDecl = dyn_cast_or_null<clang::NamedDecl>(VD->getClangDecl())) {
-    if (const clang::IdentifierInfo *II = clangDecl->getIdentifier())
-      return II->getName();
-    if (auto *anonDecl = dyn_cast<clang::TagDecl>(clangDecl))
-      if (auto *anonTypedef = anonDecl->getTypedefNameForAnonDecl())
-        return anonTypedef->getIdentifier()->getName();
-  }
-
-  return VD->getName().str();
-}
-
-/// Returns true if the given selector might be mistaken for an init method
+/// Returns true if the given selector might be classified as an init method
 /// by Objective-C ARC.
-static bool isMistakableForInit(ObjCSelector selector) {
+static bool looksLikeInitMethod(ObjCSelector selector) {
   ArrayRef<Identifier> selectorPieces = selector.getSelectorPieces();
   assert(!selectorPieces.empty());
-  return selectorPieces.front().str().startswith("init");
+  auto firstPiece = selectorPieces.front().str();
+  if (!firstPiece.startswith("init")) return false;
+  return !(firstPiece.size() > 4 && clang::isLowercase(firstPiece[4]));
+}
+
+/// Returns the name of an <os/object.h> type minus the leading "OS_",
+/// or an empty string if \p decl is not an <os/object.h> type.
+static StringRef maybeGetOSObjectBaseName(const clang::NamedDecl *decl) {
+  StringRef name = decl->getName();
+  if (!name.consume_front("OS_"))
+    return StringRef();
+
+  clang::SourceLocation loc = decl->getLocation();
+  if (!loc.isMacroID())
+    return StringRef();
+
+  // Hack: check to see if the name came from a macro in <os/object.h>.
+  clang::SourceManager &sourceMgr = decl->getASTContext().getSourceManager();
+  clang::SourceLocation expansionLoc =
+      sourceMgr.getImmediateExpansionRange(loc).first;
+  clang::SourceLocation spellingLoc = sourceMgr.getSpellingLoc(expansionLoc);
+
+  if (!sourceMgr.getFilename(spellingLoc).endswith("/os/object.h"))
+    return StringRef();
+
+  return name;
+}
+
+/// Returns true if \p decl represents an <os/object.h> type.
+static bool isOSObjectType(const clang::Decl *decl) {
+  auto *named = dyn_cast_or_null<clang::NamedDecl>(decl);
+  if (!named)
+    return false;
+  return !maybeGetOSObjectBaseName(named).empty();
 }
 
 
@@ -138,7 +148,7 @@ class ObjCPrinter : private DeclVisitor<ObjCPrinter>,
     specialNames;
   Identifier ID_CFTypeRef;
 
-  Module &M;
+  ModuleDecl &M;
   raw_ostream &os;
 
   SmallVector<const FunctionType *, 4> openFunctionTypes;
@@ -153,13 +163,30 @@ class ObjCPrinter : private DeclVisitor<ObjCPrinter>,
   friend TypeVisitor<ObjCPrinter>;
 
 public:
-  explicit ObjCPrinter(Module &mod, raw_ostream &out,
+  explicit ObjCPrinter(ModuleDecl &mod, raw_ostream &out,
                        DelayedMemberSet &delayed, Accessibility access)
     : M(mod), os(out), delayedMembers(delayed), minRequiredAccess(access) {}
 
   void print(const Decl *D) {
     PrettyStackTraceDecl trace("printing", D);
-    visit(const_cast<Decl *>(D));
+    ASTVisitor::visit(const_cast<Decl *>(D));
+  }
+
+  void maybePrintObjCGenericParameters(const ClassDecl *importedClass) {
+    auto *clangDecl = importedClass->getClangDecl();
+    auto *objcClass = dyn_cast_or_null<clang::ObjCInterfaceDecl>(clangDecl);
+    if (!objcClass)
+      return;
+    if (!objcClass->getTypeParamList())
+      return;
+    assert(objcClass->getTypeParamList()->size() != 0);
+    os << "<";
+    interleave(*objcClass->getTypeParamList(),
+               [this](const clang::ObjCTypeParamDecl *param) {
+                 os << param->getName();
+               },
+               [this] { os << ", "; });
+    os << ">";
   }
 
   void printAdHocCategory(iterator_range<const ValueDecl * const *> members) {
@@ -172,46 +199,32 @@ public:
       baseClass = extendedTy->getClassOrBoundGenericClass();
     }
 
-    os << "@interface " << getNameForObjC(baseClass)
-    << " (SWIFT_EXTENSION(" << origDC->getParentModule()->getName() << "))\n";
+    os << "@interface " << getNameForObjC(baseClass);
+    maybePrintObjCGenericParameters(baseClass);
+    os << " (SWIFT_EXTENSION(" << origDC->getParentModule()->getName()
+       << "))\n";
     printMembers</*allowDelayed*/true>(members);
     os << "@end\n\n";
   }
   
-  bool shouldInclude(const ValueDecl *VD, bool checkParent = true) {
-    if (!(VD->isObjC() || VD->getAttrs().hasAttribute<CDeclAttr>()))
-      return false;
-    if (VD->getFormalAccess() >= minRequiredAccess) {
-      return true;
-    } else if (checkParent) {
-      if (auto ctor = dyn_cast<ConstructorDecl>(VD)) {
-        // Check if we're overriding an initializer that is visible to obj-c
-        if (auto parent = ctor->getOverriddenDecl())
-          return shouldInclude(parent, false);
-      }
-    }
-    return false;
+  bool shouldInclude(const ValueDecl *VD) {
+    return isVisibleToObjC(VD, minRequiredAccess);
   }
 
 private:
-  using ASTVisitor::visit;
-
   /// Prints a protocol adoption list: <code>&lt;NSCoding, NSCopying&gt;</code>
   ///
-  /// This method filters out non-ObjC protocols, along with the special
-  /// AnyObject protocol.
+  /// This method filters out non-ObjC protocols.
   void printProtocols(ArrayRef<ProtocolDecl *> protos) {
     SmallVector<ProtocolDecl *, 4> protosToPrint;
     std::copy_if(protos.begin(), protos.end(),
                  std::back_inserter(protosToPrint),
                  [this](const ProtocolDecl *PD) -> bool {
-      if (!shouldInclude(PD))
-        return false;
-      auto knownProtocol = PD->getKnownProtocolKind();
-      if (!knownProtocol)
-        return true;
-      return *knownProtocol != KnownProtocolKind::AnyObject;
+      return shouldInclude(PD);
     });
+
+    // Drop protocols from the list that are implied by other protocols.
+    ProtocolType::canonicalizeProtocols(protosToPrint);
 
     if (protosToPrint.empty())
       return;
@@ -241,7 +254,7 @@ private:
         protocolMembersOptional = VD->getAttrs().hasAttribute<OptionalAttr>();
         os << (protocolMembersOptional ? "@optional\n" : "@required\n");
       }
-      visit(const_cast<ValueDecl*>(VD));
+      ASTVisitor::visit(const_cast<ValueDecl*>(VD));
     }
   }
 
@@ -250,6 +263,42 @@ private:
     auto DC = getSingleDocComment(MC, D);
     if (DC.hasValue())
       ide::getDocumentationCommentAsDoxygen(DC.getValue(), os);
+  }
+
+  /// Prints an encoded string, escaped properly for C.
+  void printEncodedString(StringRef str, bool includeQuotes = true) {
+    // NB: We don't use raw_ostream::write_escaped() because it does hex escapes
+    // for non-ASCII chars.
+
+    llvm::SmallString<128> Buf;
+    StringRef decodedStr = Lexer::getEncodedStringSegment(str, Buf);
+
+    if (includeQuotes) os << '"';
+    for (unsigned char c : decodedStr) {
+      switch (c) {
+      case '\\':
+        os << '\\' << '\\';
+        break;
+      case '\t':
+        os << '\\' << 't';
+        break;
+      case '\n':
+        os << '\\' << 'n';
+        break;
+      case '"':
+        os << '\\' << '"';
+        break;
+      default:
+        if (c < 0x20 || c == 0x7F) {
+          os << '\\' << 'x';
+          os << llvm::hexdigit((c >> 4) & 0xF);
+          os << llvm::hexdigit((c >> 0) & 0xF);
+        } else {
+          os << c;
+        }
+      }
+    }
+    if (includeQuotes) os << '"';
   }
 
   // Ignore other declarations.
@@ -276,11 +325,34 @@ private:
     os << "@end\n";
   }
 
+  bool isEmptyExtensionDecl(ExtensionDecl *ED) {
+    auto members = ED->getMembers();
+    auto hasMembers = std::any_of(members.begin(), members.end(),
+                                  [this](const Decl *D) -> bool {
+      if (auto VD = dyn_cast<ValueDecl>(D))
+        if (shouldInclude(VD))
+          return true;
+      return false;
+    });
+
+    auto protocols = ED->getLocalProtocols(ConformanceLookupKind::OnlyExplicit);
+    auto hasProtocols = std::any_of(protocols.begin(), protocols.end(),
+                                    [this](const ProtocolDecl *PD) -> bool {
+      return shouldInclude(PD);
+    });
+
+    return (!hasMembers && !hasProtocols);
+  }
+
   void visitExtensionDecl(ExtensionDecl *ED) {
+    if (isEmptyExtensionDecl(ED))
+      return;
+
     auto baseClass = ED->getExtendedType()->getClassOrBoundGenericClass();
 
-    os << "@interface " << getNameForObjC(baseClass)
-       << " (SWIFT_EXTENSION(" << ED->getModuleContext()->getName() << "))";
+    os << "@interface " << getNameForObjC(baseClass);
+    maybePrintObjCGenericParameters(baseClass);
+    os << " (SWIFT_EXTENSION(" << ED->getModuleContext()->getName() << "))";
     printProtocols(ED->getLocalProtocols(ConformanceLookupKind::OnlyExplicit));
     os << "\n";
     printMembers(ED->getMembers());
@@ -300,7 +372,7 @@ private:
          << "@protocol " << customName;
     }
 
-    printProtocols(PD->getInheritedProtocols(nullptr));
+    printProtocols(PD->getInheritedProtocols());
     os << "\n";
     assert(!protocolMembersOptional && "protocols start required");
     printMembers(PD->getMembers());
@@ -331,19 +403,8 @@ private:
       // Print the cases as the concatenation of the enum name with the case
       // name.
       os << "  ";
-      StringRef customEltName = getNameForObjC(Elt, CustomNamesOnly);
-      if (customEltName.empty()) {
-        if (customName.empty()) {
-          os << ED->getName();
-        } else {
-          os << customName;
-        }
-
-        SmallString<16> scratch;
-        os << camel_case::toSentencecase(Elt->getName().str(), scratch);
-      } else {
-        os << customEltName
-           << " SWIFT_COMPILE_NAME(\"" << Elt->getName() << "\")";
+      if (printSwiftEnumElemNameInObjC(Elt, os)) {
+        os << " SWIFT_COMPILE_NAME(\"" << Elt->getName() << "\")";
       }
       
       if (auto ILE = cast_or_null<IntegerLiteralExpr>(Elt->getRawValueExpr())) {
@@ -367,7 +428,7 @@ private:
         (clangParam && isNSUInteger(clangParam->getType()))) {
       os << "NSUInteger";
     } else {
-      print(param->getType(), OTK_None, Identifier(), IsFunctionParam);
+      print(param->getInterfaceType(), OTK_None, Identifier(), IsFunctionParam);
     }
     os << ")";
 
@@ -427,7 +488,11 @@ private:
         break;
       }
     }
-    return methodTy->getResult();
+
+    auto result = methodTy->getResult();
+    if (result->isUninhabited())
+      return M.getASTContext().TheEmptyTupleType;
+    return result;
   }
                                           
   void printAbstractFunctionAsMethod(AbstractFunctionDecl *AFD,
@@ -449,7 +514,7 @@ private:
 
     Optional<ForeignErrorConvention> errorConvention
       = AFD->getForeignErrorConvention();
-    Type rawMethodTy = AFD->getType()->castTo<AnyFunctionType>()->getResult();
+    Type rawMethodTy = AFD->getMethodInterfaceType();
     auto methodTy = rawMethodTy->castTo<FunctionType>();
     auto resultTy = getForeignResultType(AFD, methodTy, errorConvention);
 
@@ -465,7 +530,8 @@ private:
       } else {
         auto func = cast<FuncDecl>(AFD);
         OptionalTypeKind optionalKind;
-        (void)func->getResultType()->getAnyOptionalObjectType(optionalKind);
+        (void)func->getResultInterfaceType()
+            ->getAnyOptionalObjectType(optionalKind);
         printNullability(optionalKind,
                          NullabilityPrintKind::ContextSensitive);
       }
@@ -485,8 +551,8 @@ private:
     auto paramLists = AFD->getParameterLists();
     assert(paramLists.size() == 2 && "not an ObjC-compatible method");
 
-    ArrayRef<Identifier> selectorPieces
-      = AFD->getObjCSelector().getSelectorPieces();
+    auto selector = AFD->getObjCSelector();
+    ArrayRef<Identifier> selectorPieces = selector.getSelectorPieces();
     
     const auto &params = paramLists[1]->getArray();
     unsigned paramIndex = 0;
@@ -531,6 +597,7 @@ private:
       ++paramIndex;
     }
 
+    bool skipAvailability = false;
     // Swift designated initializers are Objective-C designated initializers.
     if (auto ctor = dyn_cast<ConstructorDecl>(AFD)) {
       if (ctor->hasStubImplementation()
@@ -538,12 +605,35 @@ private:
         // This will only be reached if the overridden initializer has the
         // required access
         os << " SWIFT_UNAVAILABLE";
+        skipAvailability = true;
       } else if (ctor->isDesignatedInit() &&
           !isa<ProtocolDecl>(ctor->getDeclContext())) {
         os << " OBJC_DESIGNATED_INITIALIZER";
       }
-    } else if (isMistakableForInit(AFD->getObjCSelector())) {
-      os << " SWIFT_METHOD_FAMILY(none)";
+      if (!looksLikeInitMethod(AFD->getObjCSelector())) {
+        os << " SWIFT_METHOD_FAMILY(init)";
+      }
+    } else {
+      if (looksLikeInitMethod(AFD->getObjCSelector())) {
+        os << " SWIFT_METHOD_FAMILY(none)";
+      }
+      if (methodTy->getResult()->isUninhabited()) {
+        os << " SWIFT_NORETURN";
+      } else if (!methodTy->getResult()->isVoid() &&
+                 !AFD->getAttrs().hasAttribute<DiscardableResultAttr>()) {
+        os << " SWIFT_WARN_UNUSED_RESULT";
+      }
+    }
+
+    if (!skipAvailability) {
+      appendAvailabilityAttribute(AFD);
+    }
+
+    if (isa<FuncDecl>(AFD) && cast<FuncDecl>(AFD)->isAccessor()) {
+      printSwift3ObjCDeprecatedInference(
+                              cast<FuncDecl>(AFD)->getAccessorStorageDecl());
+    } else {
+      printSwift3ObjCDeprecatedInference(AFD);
     }
 
     os << ";\n";
@@ -553,9 +643,10 @@ private:
     printDocumentationComment(FD);
     Optional<ForeignErrorConvention> errorConvention
       = FD->getForeignErrorConvention();
-    auto resultTy = getForeignResultType(FD,
-                                         FD->getType()->castTo<FunctionType>(),
-                                         errorConvention);
+    assert(!FD->getGenericSignature() &&
+           "top-level generic functions not supported here");
+    auto funcTy = FD->getInterfaceType()->castTo<FunctionType>();
+    auto resultTy = getForeignResultType(FD, funcTy, errorConvention);
     
     // The result type may be a partial function type we need to close
     // up later.
@@ -569,21 +660,188 @@ private:
     
     assert(FD->getParameterLists().size() == 1 && "not a C-compatible func");
     auto params = FD->getParameterLists().back();
-    interleave(*params,
-               [&](const ParamDecl *param) {
-                 print(param->getType(), OTK_None, param->getName(),
-                       IsFunctionParam);
-               },
-               [&]{ os << ", "; });
+    if (params->size()) {
+      interleave(*params,
+                 [&](const ParamDecl *param) {
+                   print(param->getInterfaceType(), OTK_None, param->getName(),
+                         IsFunctionParam);
+                 },
+                 [&]{ os << ", "; });
+    } else {
+      os << "void";
+    }
     
     os << ')';
     
     // Finish the result type.
     multiPart.finish();
+
+    if (funcTy->getResult()->isUninhabited()) {
+      os << " SWIFT_NORETURN";
+    } else if (!funcTy->getResult()->isVoid() &&
+               !FD->getAttrs().hasAttribute<DiscardableResultAttr>()) {
+      os << " SWIFT_WARN_UNUSED_RESULT";
+    }
+
+    appendAvailabilityAttribute(FD);
     
     os << ';';
   }
-    
+
+  void appendAvailabilityAttribute(const ValueDecl *VD) {
+    for (auto Attr : VD->getAttrs()) {
+      if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
+        if (AvAttr->isInvalid()) continue;
+        if (AvAttr->Platform == PlatformKind::none) {
+          if (AvAttr->PlatformAgnostic == PlatformAgnosticAvailabilityKind::Unavailable) {
+            // Availability for *
+            if (!AvAttr->Rename.empty()) {
+              // NB: Don't bother getting obj-c names, we can't get one for the
+              // rename
+              os << " SWIFT_UNAVAILABLE_MSG(\"'" << VD->getBaseName()
+                 << "' has been renamed to '";
+              printEncodedString(AvAttr->Rename, false);
+              os << '\'';
+              if (!AvAttr->Message.empty()) {
+                os << ": ";
+                printEncodedString(AvAttr->Message, false);
+              }
+              os << "\")";
+            } else if (!AvAttr->Message.empty()) {
+              os << " SWIFT_UNAVAILABLE_MSG(";
+              printEncodedString(AvAttr->Message);
+              os << ")";
+            } else {
+                os << " SWIFT_UNAVAILABLE";
+            }
+            break;
+          }
+          if (AvAttr->isUnconditionallyDeprecated()) {
+            if (!AvAttr->Rename.empty() || !AvAttr->Message.empty()) {
+              os << " SWIFT_DEPRECATED_MSG(";
+              printEncodedString(AvAttr->Message);
+              if (!AvAttr->Rename.empty()) {
+                os << ", ";
+                printEncodedString(AvAttr->Rename);
+              }
+              os << ")";
+            } else {
+              os << " SWIFT_DEPRECATED";
+            }
+          }
+          continue;
+        }
+        // Availability for a specific platform
+        if (!AvAttr->Introduced.hasValue()
+            && !AvAttr->Deprecated.hasValue()
+            && !AvAttr->Obsoleted.hasValue()
+            && !AvAttr->isUnconditionallyDeprecated()
+            && !AvAttr->isUnconditionallyUnavailable()) {
+          continue;
+        }
+        const char *plat = nullptr;
+        switch (AvAttr->Platform) {
+        case PlatformKind::OSX:
+          plat = "macos";
+          break;
+        case PlatformKind::iOS:
+          plat = "ios";
+          break;
+        case PlatformKind::tvOS:
+          plat = "tvos";
+          break;
+        case PlatformKind::watchOS:
+          plat = "watchos";
+          break;
+        case PlatformKind::OSXApplicationExtension:
+          plat = "macos_app_extension";
+          break;
+        case PlatformKind::iOSApplicationExtension:
+          plat = "ios_app_extension";
+          break;
+        case PlatformKind::tvOSApplicationExtension:
+          plat = "tvos_app_extension";
+          break;
+        case PlatformKind::watchOSApplicationExtension:
+          plat = "watchos_app_extension";
+          break;
+        default:
+          break;
+        }
+        if (!plat) continue;
+        os << " SWIFT_AVAILABILITY(" << plat;
+        if (AvAttr->isUnconditionallyUnavailable()) {
+          os << ",unavailable";
+        } else {
+          if (AvAttr->Introduced.hasValue()) {
+            os << ",introduced=" << AvAttr->Introduced.getValue().getAsString();
+          }
+          if (AvAttr->Deprecated.hasValue()) {
+            os << ",deprecated=" << AvAttr->Deprecated.getValue().getAsString();
+          } else if (AvAttr->isUnconditionallyDeprecated()) {
+            // We need to specify some version, we can't just say deprecated.
+            // We also can't deprecate it before it's introduced.
+            if (AvAttr->Introduced.hasValue()) {
+              os << ",deprecated=" << AvAttr->Introduced.getValue().getAsString();
+            } else {
+              os << ",deprecated=0.0.1";
+            }
+          }
+          if (AvAttr->Obsoleted.hasValue()) {
+            os << ",obsoleted=" << AvAttr->Obsoleted.getValue().getAsString();
+          }
+          if (!AvAttr->Rename.empty()) {
+            // NB: Don't bother getting obj-c names, we can't get one for the rename
+            os << ",message=\"'" << VD->getBaseName()
+               << "' has been renamed to '";
+            printEncodedString(AvAttr->Rename, false);
+            os << '\'';
+            if (!AvAttr->Message.empty()) {
+              os << ": ";
+              printEncodedString(AvAttr->Message, false);
+            }
+            os << "\"";
+          } else if (!AvAttr->Message.empty()) {
+            os << ",message=";
+            printEncodedString(AvAttr->Message);
+          }
+        }
+        os << ")";
+      }
+    }
+  }
+
+  void printSwift3ObjCDeprecatedInference(ValueDecl *VD) {
+    const LangOptions &langOpts = M.getASTContext().LangOpts;
+    if (!langOpts.EnableSwift3ObjCInference ||
+        langOpts.WarnSwift3ObjCInference == Swift3ObjCInferenceWarnings::None) {
+      return;
+    }
+    auto attr = VD->getAttrs().getAttribute<ObjCAttr>();
+    if (!attr || !attr->isSwift3Inferred())
+      return;
+
+    os << " SWIFT_DEPRECATED_OBJC(\"Swift ";
+    if (isa<VarDecl>(VD))
+      os << "property";
+    else if (isa<SubscriptDecl>(VD))
+      os << "subscript";
+    else if (isa<ConstructorDecl>(VD))
+      os << "initializer";
+    else
+      os << "method";
+    os << " '";
+    auto nominal =
+      VD->getDeclContext()->getAsNominalTypeOrNominalTypeExtensionContext();
+    printEncodedString(nominal->getName().str(), /*includeQuotes=*/false);
+    os << ".";
+    SmallString<32> scratch;
+    printEncodedString(VD->getFullName().getString(scratch),
+                       /*includeQuotes=*/false);
+    os << "' uses '@objc' inference deprecated in Swift 4; add '@objc' to "
+       <<   "provide an Objective-C entrypoint\")";
+  }
+
   void visitFuncDecl(FuncDecl *FD) {
     if (FD->getDeclContext()->isTypeContext())
       printAbstractFunctionAsMethod(FD, FD->isStatic());
@@ -620,7 +878,7 @@ private:
     const TypeAliasDecl *TAD = nullptr;
     while (auto aliasTy = dyn_cast<NameAliasType>(ty.getPointer())) {
       TAD = aliasTy->getDecl();
-      ty = TAD->getUnderlyingType();
+      ty = aliasTy->getSinglyDesugaredType();
     }
 
     return TAD && TAD->getName() == ID_CFTypeRef && TAD->hasClangNode();
@@ -654,7 +912,7 @@ private:
     // We treat "unowned" as "assign" (even though it's more like
     // "safe_unretained") because we want people to think twice about
     // allowing that object to disappear.
-    Type ty = VD->getType();
+    Type ty = VD->getInterfaceType();
     if (auto weakTy = ty->getAs<WeakStorageType>()) {
       auto innerTy = weakTy->getReferentType()->getAnyOptionalObjectType();
       auto innerClass = innerTy->getClassOrBoundGenericClass();
@@ -673,7 +931,7 @@ private:
       if (auto unwrappedTy = copyTy->getAnyOptionalObjectType(optionalType))
         copyTy = unwrappedTy;
       auto nominal = copyTy->getNominalOrBoundGenericNominal();
-      if (dyn_cast_or_null<StructDecl>(nominal)) {
+      if (nominal && isa<StructDecl>(nominal)) {
         if (nominal == ctx.getArrayDecl() ||
             nominal == ctx.getDictionaryDecl() ||
             nominal == ctx.getSetDecl() ||
@@ -700,7 +958,7 @@ private:
         case FunctionTypeRepresentation::CFunctionPointer:
           break;
         }
-      } else if ((dyn_cast_or_null<ClassDecl>(nominal) &&
+      } else if ((nominal && isa<ClassDecl>(nominal) &&
                   cast<ClassDecl>(nominal)->getForeignClassKind() !=
                     ClassDecl::ForeignKind::CFType) ||
                  (copyTy->isObjCExistentialType() && !isCFTypeRef(copyTy))) {
@@ -746,6 +1004,8 @@ private:
       print(ty, OTK_None, objCName);
     }
 
+    printSwift3ObjCDeprecatedInference(VD);
+
     os << ";";
     if (VD->isStatic()) {
       os << ")\n";
@@ -758,9 +1018,9 @@ private:
       }
     } else {
       os << "\n";
-      if (isMistakableForInit(VD->getObjCGetterSelector()))
+      if (looksLikeInitMethod(VD->getObjCGetterSelector()))
         printAbstractFunctionAsMethod(VD->getGetter(), false);
-      if (isSettable && isMistakableForInit(VD->getObjCSetterSelector()))
+      if (isSettable && looksLikeInitMethod(VD->getObjCSetterSelector()))
         printAbstractFunctionAsMethod(VD->getSetter(), false);
     }
   }
@@ -817,7 +1077,7 @@ private:
       break;
     case NullabilityPrintKind::After:
       os << ' ';
-      [[clang::fallthrough]];
+      LLVM_FALLTHROUGH;
     case NullabilityPrintKind::Before:
       switch (*kind) {
       case OTK_None:
@@ -873,9 +1133,9 @@ private:
 
     // Dig out the Objective-C type.
     auto conformance = conformances.front();
-    Type objcType = ProtocolConformance::getTypeWitnessByName(
+    Type objcType = ProtocolConformanceRef::getTypeWitnessByName(
                       nominal->getDeclaredType(),
-                      conformance,
+                      ProtocolConformanceRef(conformance),
                       ctx.Id_ObjectiveCType,
                       nullptr);
     if (!objcType) return nullptr;
@@ -918,12 +1178,12 @@ private:
     // upper-bounded keys.
     else if (swiftNominal == ctx.getDictionaryDecl() &&
              isNSObjectOrAnyHashable(ctx, typeArgs[0])) {
-      if (Module *M = ctx.getLoadedModule(ctx.Id_Foundation)) {
+      if (ModuleDecl *M = ctx.getLoadedModule(ctx.Id_Foundation)) {
         if (!NSCopyingType) {
           UnqualifiedLookup lookup(ctx.getIdentifier("NSCopying"), M, nullptr);
           auto type = lookup.getSingleTypeResult();
           if (type && isa<ProtocolDecl>(type)) {
-            NSCopyingType = type->getDeclaredType();
+            NSCopyingType = type->getDeclaredInterfaceType();
           } else {
             NSCopyingType = Type();
           }
@@ -1104,11 +1364,24 @@ private:
       return;
 
     if (alias->hasClangNode()) {
-      auto *clangTypeDecl = cast<clang::TypeDecl>(alias->getClangDecl());
-      os << clangTypeDecl->getName();
+      if (auto *clangTypeDecl =
+            dyn_cast<clang::TypeDecl>(alias->getClangDecl())) {
+        maybePrintTagKeyword(alias);
+        os << getNameForObjC(alias);
 
-      if (isClangPointerType(clangTypeDecl))
+        if (isClangPointerType(clangTypeDecl))
+          printNullability(optionalKind);
+      } else if (auto *clangObjCClass
+                   = dyn_cast<clang::ObjCInterfaceDecl>(alias->getClangDecl())){
+        os << clangObjCClass->getName() << " *";
         printNullability(optionalKind);
+      } else {
+        auto *clangCompatAlias =
+          cast<clang::ObjCCompatibleAliasDecl>(alias->getClangDecl());
+        os << clangCompatAlias->getName() << " *";
+        printNullability(optionalKind);
+      }
+
       return;
     }
 
@@ -1117,10 +1390,10 @@ private:
       return;
     }
 
-    visitPart(alias->getUnderlyingType(), optionalKind);
+    visitPart(alias->getUnderlyingTypeLoc().getType(), optionalKind);
   }
 
-  void maybePrintTagKeyword(const NominalTypeDecl *NTD) {
+  void maybePrintTagKeyword(const TypeDecl *NTD) {
     if (isa<EnumDecl>(NTD) && !NTD->hasClangNode()) {
       os << "enum ";
       return;
@@ -1168,7 +1441,7 @@ private:
   void printCollectionElement(Type ty) {
     ASTContext &ctx = M.getASTContext();
 
-    auto isSwiftNewtype = [&ctx](const StructDecl *SD) -> bool {
+    auto isSwiftNewtype = [](const StructDecl *SD) -> bool {
       if (!SD)
         return false;
       auto *clangDecl = SD->getClangDecl();
@@ -1181,8 +1454,7 @@ private:
     // an imported type or a collection.
     const StructDecl *SD = ty->getStructOrBoundGenericStruct();
     if (ty->isAny()) {
-      ty = ctx.getProtocol(KnownProtocolKind::AnyObject)
-        ->getDeclaredType();
+      ty = ctx.getAnyObjectType();
     } else if (SD != ctx.getArrayDecl() &&
         SD != ctx.getDictionaryDecl() &&
         SD != ctx.getSetDecl() &&
@@ -1247,7 +1519,15 @@ private:
 
     visitBoundGenericType(BGT, optionalKind);
   }
-  
+
+  void printGenericArgs(BoundGenericType *BGT) {
+    os << '<';
+    interleave(BGT->getGenericArgs(),
+               [this](Type t) { print(t, None); },
+               [this] { os << ", "; });
+    os << '>';
+  }
+
   void visitBoundGenericClassType(BoundGenericClassType *BGT,
                                   Optional<OptionalTypeKind> optionalKind) {
     // Only handle imported ObjC generics.
@@ -1263,13 +1543,7 @@ private:
       maybePrintTagKeyword(CD);
       os << clangDecl->getName();
     }
-    os << '<';
-    print(BGT->getGenericArgs()[0], None);
-    for (auto arg : BGT->getGenericArgs().slice(1)) {
-      os << ", ";
-      print(arg, None);
-    }
-    os << '>';
+    printGenericArgs(BGT);
     if (isa<clang::ObjCInterfaceDecl>(clangDecl)) {
       os << " *";
     }
@@ -1307,76 +1581,73 @@ private:
     assert(CD->isObjC());
     auto clangDecl = dyn_cast_or_null<clang::NamedDecl>(CD->getClangDecl());
     if (clangDecl) {
-      if (isa<clang::ObjCInterfaceDecl>(clangDecl)) {
+      // Hack for <os/object.h> types, which use classes in Swift but
+      // protocols in Objective-C, and a typedef to hide the difference.
+      StringRef osObjectName = maybeGetOSObjectBaseName(clangDecl);
+      if (!osObjectName.empty()) {
+        os << osObjectName << "_t";
+      } else if (isa<clang::ObjCInterfaceDecl>(clangDecl)) {
         os << clangDecl->getName() << " *";
-        printNullability(optionalKind);
       } else {
         maybePrintTagKeyword(CD);
         os << clangDecl->getName();
-        printNullability(optionalKind);
       }
     } else {
       os << getNameForObjC(CD) << " *";
-      printNullability(optionalKind);
     }
+    printNullability(optionalKind);
   }
 
-  void visitProtocolType(ProtocolType *PT, 
-                         Optional<OptionalTypeKind> optionalKind, 
-                         bool isMetatype = false) {
-    auto proto = PT->getDecl();
-    if (proto->isSpecificProtocol(KnownProtocolKind::Error)) {
+  void visitExistentialType(Type T,
+                            Optional<OptionalTypeKind> optionalKind,
+                            bool isMetatype = false) {
+    auto layout = T->getExistentialLayout();
+    if (layout.isErrorExistential()) {
       if (isMetatype) os << "Class";
       else os << "NSError *";
       printNullability(optionalKind);
       return;
     }
 
-    os << (isMetatype ? "Class" : "id");
-
-    assert(proto->isObjC());
-    if (auto knownKind = proto->getKnownProtocolKind()) {
-      if (*knownKind == KnownProtocolKind::AnyObject) {
-        printNullability(optionalKind);
-        return;
+    if (layout.superclass) {
+      auto *CD = layout.superclass->getClassOrBoundGenericClass();
+      assert(CD->isObjC());
+      if (isMetatype) {
+        os << "SWIFT_METATYPE(" << getNameForObjC(CD) << ")";
+      } else {
+        os << getNameForObjC(CD);
+        if (auto *BGT = layout.superclass->getAs<BoundGenericClassType>())
+          printGenericArgs(BGT);
       }
+    } else {
+      os << (isMetatype ? "Class" : "id");
     }
 
-    printProtocols(proto);
+    SmallVector<ProtocolDecl *, 2> protos;
+    for (auto proto : layout.getProtocols())
+      protos.push_back(proto->getDecl());
+    printProtocols(protos);
+
+    if (layout.superclass && !isMetatype)
+      os << " *";
+
     printNullability(optionalKind);
+  }
+
+  void visitProtocolType(ProtocolType *PT,
+                         Optional<OptionalTypeKind> optionalKind) {
+    visitExistentialType(PT, optionalKind, /*isMetatype=*/false);
   }
 
   void visitProtocolCompositionType(ProtocolCompositionType *PCT, 
-                                    Optional<OptionalTypeKind> optionalKind,
-                                    bool isMetatype = false) {
-    CanType canonicalComposition = PCT->getCanonicalType();
-    if (auto singleProto = dyn_cast<ProtocolType>(canonicalComposition))
-      return visitProtocolType(singleProto, optionalKind, isMetatype);
-    PCT = cast<ProtocolCompositionType>(canonicalComposition);
-
-    // Dig out the protocols. If we see 'Error', record that we saw it.
-    SmallVector<ProtocolDecl *, 4> protos;
-    for (auto protoTy : PCT->getProtocols()) {
-      auto proto = protoTy->castTo<ProtocolType>()->getDecl();
-      protos.push_back(proto);
-    }
-
-    os << (isMetatype ? "Class" : "id");
-    printProtocols(protos);
-
-    printNullability(optionalKind);
+                                    Optional<OptionalTypeKind> optionalKind) {
+    visitExistentialType(PCT, optionalKind, /*isMetatype=*/false);
   }
 
-  void visitExistentialMetatypeType(ExistentialMetatypeType *MT, 
+  void visitExistentialMetatypeType(ExistentialMetatypeType *MT,
                                     Optional<OptionalTypeKind> optionalKind) {
     Type instanceTy = MT->getInstanceType();
-    if (auto protoTy = instanceTy->getAs<ProtocolType>()) {
-      visitProtocolType(protoTy, optionalKind, /*isMetatype=*/true);
-    } else if (auto compTy = instanceTy->getAs<ProtocolCompositionType>()) {
-      visitProtocolCompositionType(compTy, optionalKind, /*isMetatype=*/true);
-    } else {
-      visitType(MT, optionalKind);
-    }
+    visitExistentialType(instanceTy, optionalKind, /*isMetatype=*/true);
   }
 
   void visitMetatypeType(MetatypeType *MT, 
@@ -1384,14 +1655,36 @@ private:
     Type instanceTy = MT->getInstanceType();
     if (auto classTy = instanceTy->getAs<ClassType>()) {
       const ClassDecl *CD = classTy->getDecl();
-      if (CD->isObjC())
-        os << "SWIFT_METATYPE(" << getNameForObjC(CD) << ")";
-      else
-        os << "Class";
+      assert(CD->isObjC());
+      os << "SWIFT_METATYPE(" << getNameForObjC(CD) << ")";
       printNullability(optionalKind);
     } else {
       visitType(MT, optionalKind);
     }
+  }
+
+  void visitGenericTypeParamType(GenericTypeParamType *type,
+                                 Optional<OptionalTypeKind> optionalKind) {
+    const GenericTypeParamDecl *decl = type->getDecl();
+    assert(decl && "can't print canonicalized GenericTypeParamType");
+
+    if (auto *extension = dyn_cast<ExtensionDecl>(decl->getDeclContext())) {
+      const ClassDecl *extendedClass =
+          extension->getAsClassOrClassExtensionContext();
+      assert(extendedClass->isGeneric());
+      assert(extension->getGenericParams()->size() ==
+             extendedClass->getGenericParams()->size() &&
+             "extensions with custom generic parameters?");
+      assert(extension->getGenericSignature()->getCanonicalSignature() ==
+             extendedClass->getGenericSignature()->getCanonicalSignature() &&
+             "constrained extensions or custom generic parameters?");
+      type = extendedClass->getGenericEnvironment()->getSugaredType(type);
+      decl = type->getDecl();
+    }
+
+    assert(decl->getClangDecl() && "can only handle imported ObjC generics");
+    os << cast<clang::ObjCTypeParamDecl>(decl->getClangDecl())->getName();
+    printNullability(optionalKind);
   }
                       
   void printFunctionType(FunctionType *FT, char pointerSigil,
@@ -1426,7 +1719,7 @@ private:
     os << ")(";
     Type paramsTy = FT->getInput();
     if (auto tupleTy = paramsTy->getAs<TupleType>()) {
-      if (tupleTy->getNumElements() == 0) {
+      if (FT->getParams().empty()) {
         os << "void";
       } else {
         interleave(tupleTy->getElements(),
@@ -1449,11 +1742,6 @@ private:
 
   void visitParenType(ParenType *PT, Optional<OptionalTypeKind> optionalKind) {
     visitPart(PT->getSinglyDesugaredType(), optionalKind);
-  }
-
-  void visitSubstitutedType(SubstitutedType *ST, 
-                            Optional<OptionalTypeKind> optionalKind) {
-    visitPart(ST->getSinglyDesugaredType(), optionalKind);
   }
 
   void visitSyntaxSugarType(SyntaxSugarType *SST, 
@@ -1532,7 +1820,7 @@ public:
   }
 };
 
-class ReferencedTypeFinder : private TypeVisitor<ReferencedTypeFinder> {
+class ReferencedTypeFinder : public TypeVisitor<ReferencedTypeFinder> {
   friend TypeVisitor;
 
   ModuleDecl &M;
@@ -1576,16 +1864,17 @@ class ReferencedTypeFinder : private TypeVisitor<ReferencedTypeFinder> {
   }
 
   void visitArchetypeType(ArchetypeType *archetype) {
+    llvm_unreachable("Should not see archetypes in interface types");
+  }
+
+  void visitGenericTypeParamType(GenericTypeParamType *param) {
     // Appears in protocols and in generic ObjC classes.
     return;
   }
 
-  void visitGenericTypeParamType(GenericTypeParamType *archetype) {
-    llvm_unreachable("unexpected generic type param type in @objc decl");
-  }
-
-  void visitSubstitutedType(SubstitutedType *sub) {
-    visit(sub->getSinglyDesugaredType());
+  void visitDependentMemberType(DependentMemberType *member) {
+    // Appears in protocols and in generic ObjC classes.
+    return;
   }
 
   void visitAnyFunctionType(AnyFunctionType *fnTy) {
@@ -1602,19 +1891,22 @@ class ReferencedTypeFinder : private TypeVisitor<ReferencedTypeFinder> {
   }
 
   void visitProtocolCompositionType(ProtocolCompositionType *composition) {
-    for (auto proto : composition->getProtocols())
+    auto layout = composition->getExistentialLayout();
+    if (layout.superclass)
+      visit(layout.superclass);
+    for (auto proto : layout.getProtocols())
       visit(proto);
   }
 
   void visitLValueType(LValueType *lvalue) {
-    visit(lvalue->getObjectType());
+    llvm_unreachable("LValue types should not appear in interface types");
   }
 
   void visitInOutType(InOutType *inout) {
     visit(inout->getObjectType());
   }
 
-  /// Returns true if \p archetype has any constraints other than being
+  /// Returns true if \p paramTy has any constraints other than being
   /// class-bound ("conforms to" AnyObject).
   static bool isConstrained(ModuleDecl &mod,
                             GenericSignature *sig,
@@ -1623,16 +1915,7 @@ class ReferencedTypeFinder : private TypeVisitor<ReferencedTypeFinder> {
       return true;
 
     auto conformsTo = sig->getConformsTo(paramTy, mod);
-
-    if (conformsTo.size() > 1)
-      return true;
-    if (conformsTo.size() == 0)
-      return false;
-
-    const ProtocolDecl *proto = conformsTo.front();
-    if (auto knownKind = proto->getKnownProtocolKind())
-      return knownKind.getValue() != KnownProtocolKind::AnyObject;
-    return true;
+    return conformsTo.size() > 0;
   }
 
   void visitBoundGenericType(BoundGenericType *boundGeneric) {
@@ -1694,18 +1977,18 @@ class ModuleWriter {
   std::vector<const Decl *> declsToWrite;
   DelayedMemberSet delayedMembers;
 
-  using ImportModuleTy = PointerUnion<Module*, const clang::Module*>;
+  using ImportModuleTy = PointerUnion<ModuleDecl*, const clang::Module*>;
   SmallSetVector<ImportModuleTy, 8,
                  PointerLikeComparator<ImportModuleTy>> imports;
 
   std::string bodyBuffer;
   llvm::raw_string_ostream os{bodyBuffer};
 
-  Module &M;
+  ModuleDecl &M;
   StringRef bridgingHeader;
   ObjCPrinter printer;
 public:
-  ModuleWriter(Module &mod, StringRef header, Accessibility access)
+  ModuleWriter(ModuleDecl &mod, StringRef header, Accessibility access)
     : M(mod), bridgingHeader(header), printer(M, os, delayedMembers, access) {}
 
   /// Returns true if we added the decl's module to the import set, false if
@@ -1714,11 +1997,12 @@ public:
   /// The standard library is special-cased: we assume that any types from it
   /// will be handled explicitly rather than needing an explicit @import.
   bool addImport(const Decl *D) {
-    Module *otherModule = D->getModuleContext();
+    ModuleDecl *otherModule = D->getModuleContext();
 
     if (otherModule == &M)
       return false;
-    if (otherModule->isStdlibModule())
+    if (otherModule->isStdlibModule() ||
+        otherModule->isBuiltinModule())
       return true;
     // Don't need a module for SIMD types in C.
     if (otherModule->getName() == M.getASTContext().Id_simd)
@@ -1772,6 +2056,8 @@ public:
     case EmissionState::Defined:
       return true;
     }
+
+    llvm_unreachable("Unhandled EmissionState in switch.");
   }
 
   void forwardDeclare(const NominalTypeDecl *NTD,
@@ -1787,7 +2073,8 @@ public:
 
   bool forwardDeclare(const ClassDecl *CD) {
     if (!CD->isObjC() ||
-        CD->getForeignClassKind() == ClassDecl::ForeignKind::CFType) {
+        CD->getForeignClassKind() == ClassDecl::ForeignKind::CFType ||
+        isOSObjectType(CD->getClangDecl())) {
       return false;
     }
     forwardDeclare(CD, [&]{ os << "@class " << getNameForObjC(CD) << ";\n"; });
@@ -1796,7 +2083,6 @@ public:
 
   void forwardDeclare(const ProtocolDecl *PD) {
     assert(PD->isObjC() ||
-           *PD->getKnownProtocolKind() == KnownProtocolKind::AnyObject ||
            *PD->getKnownProtocolKind() == KnownProtocolKind::Error);
     forwardDeclare(PD, [&]{
       os << "@protocol " << getNameForObjC(PD) << ";\n";
@@ -1845,7 +2131,7 @@ public:
       }
 
       bool needsToBeIndividuallyDelayed = false;
-      ReferencedTypeFinder::walk(M, VD->getType(),
+      ReferencedTypeFinder::walk(M, VD->getInterfaceType(),
                                  [&](ReferencedTypeFinder &finder,
                                      const TypeDecl *TD) {
         if (TD == container)
@@ -1891,7 +2177,7 @@ public:
         } else if (auto TAD = dyn_cast<TypeAliasDecl>(TD)) {
           (void)addImport(TD);
           // Just in case, make sure the underlying type is visible too.
-          finder.visit(TAD->getUnderlyingType());
+          finder.visit(TAD->getUnderlyingTypeLoc().getType());
         } else if (addImport(TD)) {
           return;
         } else if (auto ED = dyn_cast<EnumDecl>(TD)) {
@@ -1957,16 +2243,12 @@ public:
     if (addImport(PD))
       return true;
 
-    auto knownProtocol = PD->getKnownProtocolKind();
-    if (knownProtocol && *knownProtocol == KnownProtocolKind::AnyObject)
-      return true;
-
     if (seenTypes[PD].first == EmissionState::Defined)
       return true;
 
     bool allRequirementsSatisfied = true;
 
-    for (auto proto : PD->getInheritedProtocols(nullptr)) {
+    for (auto proto : PD->getInheritedProtocols()) {
       assert(proto->isObjC());
       allRequirementsSatisfied &= require(proto);
     }
@@ -2039,9 +2321,37 @@ public:
     out << "// Generated by " << version::getSwiftFullVersion(
       M.getASTContext().LangOpts.EffectiveLanguageVersion) << "\n"
            "#pragma clang diagnostic push\n"
+           "#pragma clang diagnostic ignored \"-Wgcc-compat\"\n"
            "\n"
-           "#if defined(__has_include) && "
-             "__has_include(<swift/objc-prologue.h>)\n"
+           "#if !defined(__has_include)\n"
+           "# define __has_include(x) 0\n"
+           "#endif\n"
+           "#if !defined(__has_attribute)\n"
+           "# define __has_attribute(x) 0\n"
+           "#endif\n"
+           "#if !defined(__has_feature)\n"
+           "# define __has_feature(x) 0\n"
+           "#endif\n"
+           "#if !defined(__has_warning)\n"
+           "# define __has_warning(x) 0\n"
+           "#endif\n"
+           "\n"
+           "#if __has_attribute(external_source_symbol)\n"
+           "# define SWIFT_STRINGIFY(str) #str\n"
+           "# define SWIFT_MODULE_NAMESPACE_PUSH(module_name) "
+             "_Pragma(SWIFT_STRINGIFY(clang attribute "
+             "push(__attribute__((external_source_symbol(language=\"Swift\", "
+             "defined_in=module_name, generated_declaration))), "
+             "apply_to=any(function, enum, objc_interface, objc_category, "
+             "objc_protocol))))\n"
+           "# define SWIFT_MODULE_NAMESPACE_POP "
+             "_Pragma(\"clang attribute pop\")\n"
+           "#else\n"
+           "# define SWIFT_MODULE_NAMESPACE_PUSH(module_name)\n"
+           "# define SWIFT_MODULE_NAMESPACE_POP\n"
+           "#endif\n"
+           "\n"
+           "#if __has_include(<swift/objc-prologue.h>)\n"
            "# include <swift/objc-prologue.h>\n"
            "#endif\n"
            "\n"
@@ -2053,7 +2363,7 @@ public:
            "\n"
            "#if !defined(SWIFT_TYPEDEFS)\n"
            "# define SWIFT_TYPEDEFS 1\n"
-           "# if defined(__has_include) && __has_include(<uchar.h>)\n"
+           "# if __has_include(<uchar.h>)\n"
            "#  include <uchar.h>\n"
            "# elif !defined(__cplusplus) || __cplusplus < 201103L\n"
            "typedef uint_least16_t char16_t;\n"
@@ -2085,31 +2395,38 @@ public:
            "# endif\n"
            "#endif\n"
            "\n"
-           "#if defined(__has_attribute) && "
-             "__has_attribute(objc_runtime_name)\n"
+           "#if __has_attribute(objc_runtime_name)\n"
            "# define SWIFT_RUNTIME_NAME(X) "
              "__attribute__((objc_runtime_name(X)))\n"
            "#else\n"
            "# define SWIFT_RUNTIME_NAME(X)\n"
            "#endif\n"
-           "#if defined(__has_attribute) && "
-             "__has_attribute(swift_name)\n"
+           "#if __has_attribute(swift_name)\n"
            "# define SWIFT_COMPILE_NAME(X) "
              "__attribute__((swift_name(X)))\n"
            "#else\n"
            "# define SWIFT_COMPILE_NAME(X)\n"
            "#endif\n"
-           "#if defined(__has_attribute) && "
-             "__has_attribute(objc_method_family)\n"
+           "#if __has_attribute(objc_method_family)\n"
            "# define SWIFT_METHOD_FAMILY(X) "
              "__attribute__((objc_method_family(X)))\n"
            "#else\n"
            "# define SWIFT_METHOD_FAMILY(X)\n"
            "#endif\n"
-           "#if defined(__has_attribute) && __has_attribute(noescape)\n"
+           "#if __has_attribute(noescape)\n"
            "# define SWIFT_NOESCAPE __attribute__((noescape))\n"
            "#else\n"
            "# define SWIFT_NOESCAPE\n"
+           "#endif\n"
+           "#if __has_attribute(warn_unused_result)\n"
+           "# define SWIFT_WARN_UNUSED_RESULT __attribute__((warn_unused_result))\n"
+           "#else\n"
+           "# define SWIFT_WARN_UNUSED_RESULT\n"
+           "#endif\n"
+           "#if __has_attribute(noreturn)\n"
+           "# define SWIFT_NORETURN __attribute__((noreturn))\n"
+           "#else\n"
+           "# define SWIFT_NORETURN\n"
            "#endif\n"
            "#if !defined(SWIFT_CLASS_EXTRA)\n"
            "# define SWIFT_CLASS_EXTRA\n"
@@ -2121,8 +2438,7 @@ public:
            "# define SWIFT_ENUM_EXTRA\n"
            "#endif\n"
            "#if !defined(SWIFT_CLASS)\n"
-           "# if defined(__has_attribute) && "
-             "__has_attribute(objc_subclassing_restricted)\n"
+           "# if __has_attribute(objc_subclassing_restricted)\n"
            "#  define SWIFT_CLASS(SWIFT_NAME) SWIFT_RUNTIME_NAME(SWIFT_NAME) "
              "__attribute__((objc_subclassing_restricted)) "
              "SWIFT_CLASS_EXTRA\n"
@@ -2152,23 +2468,31 @@ public:
            "#endif\n"
            "\n"
            "#if !defined(OBJC_DESIGNATED_INITIALIZER)\n"
-           "# if defined(__has_attribute) && "
-             "__has_attribute(objc_designated_initializer)\n"
+           "# if __has_attribute(objc_designated_initializer)\n"
            "#  define OBJC_DESIGNATED_INITIALIZER "
              "__attribute__((objc_designated_initializer))\n"
            "# else\n"
            "#  define OBJC_DESIGNATED_INITIALIZER\n"
            "# endif\n"
            "#endif\n"
+           "#if !defined(SWIFT_ENUM_ATTR)\n"
+           "# if defined(__has_attribute) && "
+             "__has_attribute(enum_extensibility)\n"
+           "#  define SWIFT_ENUM_ATTR "
+             "__attribute__((enum_extensibility(open)))\n"
+           "# else\n"
+           "#  define SWIFT_ENUM_ATTR\n"
+           "# endif\n"
+           "#endif\n"
            "#if !defined(SWIFT_ENUM)\n"
            "# define SWIFT_ENUM(_type, _name) "
              "enum _name : _type _name; "
-             "enum SWIFT_ENUM_EXTRA _name : _type\n"
-           "# if defined(__has_feature) && "
-             "__has_feature(generalized_swift_name)\n"
+             "enum SWIFT_ENUM_ATTR SWIFT_ENUM_EXTRA _name : _type\n"
+           "# if __has_feature(generalized_swift_name)\n"
            "#  define SWIFT_ENUM_NAMED(_type, _name, SWIFT_NAME) "
              "enum _name : _type _name SWIFT_COMPILE_NAME(SWIFT_NAME); "
-             "enum SWIFT_COMPILE_NAME(SWIFT_NAME) SWIFT_ENUM_EXTRA _name : _type\n"
+             "enum SWIFT_COMPILE_NAME(SWIFT_NAME) SWIFT_ENUM_ATTR "
+             "SWIFT_ENUM_EXTRA _name : _type\n"
            "# else\n"
            "#  define SWIFT_ENUM_NAMED(_type, _name, SWIFT_NAME) "
              "SWIFT_ENUM(_type, _name)\n"
@@ -2177,12 +2501,29 @@ public:
            "#if !defined(SWIFT_UNAVAILABLE)\n"
            "# define SWIFT_UNAVAILABLE __attribute__((unavailable))\n"
            "#endif\n"
+           "#if !defined(SWIFT_UNAVAILABLE_MSG)\n"
+           "# define SWIFT_UNAVAILABLE_MSG(msg) __attribute__((unavailable(msg)))\n"
+           "#endif\n"
+           "#if !defined(SWIFT_AVAILABILITY)\n"
+           "# define SWIFT_AVAILABILITY(plat, ...) __attribute__((availability(plat, __VA_ARGS__)))\n"
+           "#endif\n"
+           "#if !defined(SWIFT_DEPRECATED)\n"
+           "# define SWIFT_DEPRECATED __attribute__((deprecated))\n"
+           "#endif\n"
+           "#if !defined(SWIFT_DEPRECATED_MSG)\n"
+           "# define SWIFT_DEPRECATED_MSG(...) __attribute__((deprecated(__VA_ARGS__)))\n"
+           "#endif\n"
+           "#if __has_feature(attribute_diagnose_if_objc)\n"
+           "# define SWIFT_DEPRECATED_OBJC(Msg) __attribute__((diagnose_if(1, Msg, \"warning\")))\n"
+           "#else\n"
+           "# define SWIFT_DEPRECATED_OBJC(Msg) SWIFT_DEPRECATED_MSG(Msg)\n"
+           "#endif\n"
            ;
     static_assert(SWIFT_MAX_IMPORTED_SIMD_ELEMENTS == 4,
                 "need to add SIMD typedefs here if max elements is increased");
   }
 
-  bool isUnderlyingModule(Module *import) {
+  bool isUnderlyingModule(ModuleDecl *import) {
     if (bridgingHeader.empty())
       return import != &M && import->getName() == M.getName();
 
@@ -2193,13 +2534,13 @@ public:
   }
 
   void writeImports(raw_ostream &out) {
-    out << "#if defined(__has_feature) && __has_feature(modules)\n";
+    out << "#if __has_feature(modules)\n";
 
     // Track printed names to handle overlay modules.
     llvm::SmallPtrSet<Identifier, 8> seenImports;
     bool includeUnderlying = false;
     for (auto import : imports) {
-      if (auto *swiftModule = import.dyn_cast<Module *>()) {
+      if (auto *swiftModule = import.dyn_cast<ModuleDecl *>()) {
         auto Name = swiftModule->getName();
         if (isUnderlyingModule(swiftModule)) {
           includeUnderlying = true;
@@ -2265,7 +2606,7 @@ public:
 
       auto getSortName = [](const Decl *D) -> StringRef {
         if (auto VD = dyn_cast<ValueDecl>(D))
-          return VD->getName().str();
+          return VD->getBaseName().userFacingName();
 
         if (auto ED = dyn_cast<ExtensionDecl>(D)) {
           auto baseClass = ED->getExtendedType()->getClassOrBoundGenericClass();
@@ -2308,8 +2649,8 @@ public:
       // alphabetically first.
       auto mismatch =
         std::mismatch(lhsProtos.begin(), lhsProtos.end(), rhsProtos.begin(),
-                      [getSortName] (const ProtocolDecl *nextLHSProto,
-                                     const ProtocolDecl *nextRHSProto) {
+                      [] (const ProtocolDecl *nextLHSProto,
+                          const ProtocolDecl *nextRHSProto) {
         return nextLHSProto->getName() != nextRHSProto->getName();
       });
       if (mismatch.first == lhsProtos.end())
@@ -2367,14 +2708,22 @@ public:
     out <<
         "#pragma clang diagnostic ignored \"-Wproperty-attribute-mismatch\"\n"
         "#pragma clang diagnostic ignored \"-Wduplicate-method-arg\"\n"
+        "#if __has_warning(\"-Wpragma-clang-attribute\")\n"
+        "# pragma clang diagnostic ignored \"-Wpragma-clang-attribute\"\n"
+        "#endif\n"
+        "#pragma clang diagnostic ignored \"-Wunknown-pragmas\"\n"
+        "#pragma clang diagnostic ignored \"-Wnullability\"\n"
+        "\n"
+        "SWIFT_MODULE_NAMESPACE_PUSH(\"" << M.getNameStr() << "\")\n"
       << os.str()
-      << "#pragma clang diagnostic pop\n";
+      << "SWIFT_MODULE_NAMESPACE_POP\n"
+         "#pragma clang diagnostic pop\n";
     return false;
   }
 };
-}
+} // end anonymous namespace
 
-bool swift::printAsObjC(llvm::raw_ostream &os, Module *M,
+bool swift::printAsObjC(llvm::raw_ostream &os, ModuleDecl *M,
                         StringRef bridgingHeader,
                         Accessibility minRequiredAccess) {
   llvm::PrettyStackTraceString trace("While generating Objective-C header");

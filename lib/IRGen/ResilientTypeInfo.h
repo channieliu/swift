@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -57,28 +57,6 @@ public:
     emitAssignWithTakeCall(IGF, T, dest, src);
   }
 
-  Address allocateBuffer(IRGenFunction &IGF, Address buffer,
-                         SILType T) const override {
-    auto addr = emitAllocateBufferCall(IGF, T, buffer);
-    return this->getAddressForPointer(addr);
-  }
-
-  Address projectBuffer(IRGenFunction &IGF, Address buffer,
-                        SILType T) const override {
-    auto addr = emitProjectBufferCall(IGF, T, buffer);
-    return this->getAddressForPointer(addr);
-  }
-
-  void destroyBuffer(IRGenFunction &IGF, Address buffer,
-                     SILType T) const override {
-    emitDestroyBufferCall(IGF, T, buffer);
-  }
-
-  void deallocateBuffer(IRGenFunction &IGF, Address buffer,
-                        SILType T) const override {
-    emitDeallocateBufferCall(IGF, T, buffer);
-  }
-
   Address initializeBufferWithCopyOfBuffer(IRGenFunction &IGF,
                                    Address dest, Address src,
                                    SILType T) const override {
@@ -90,20 +68,6 @@ public:
                                    Address dest, Address src,
                                    SILType T) const override {
     auto addr = emitInitializeBufferWithTakeOfBufferCall(IGF, T, dest, src);
-    return this->getAddressForPointer(addr);
-  }
-
-  Address initializeBufferWithCopy(IRGenFunction &IGF,
-                                   Address dest, Address src,
-                                   SILType T) const override {
-    auto addr = emitInitializeBufferWithCopyCall(IGF, T, dest, src);
-    return this->getAddressForPointer(addr);
-  }
-
-  Address initializeBufferWithTake(IRGenFunction &IGF,
-                                   Address dest, Address src,
-                                   SILType T) const override {
-    auto addr = emitInitializeBufferWithTakeCall(IGF, T, dest, src);
     return this->getAddressForPointer(addr);
   }
 

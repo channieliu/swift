@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,7 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Basic/Demangle.h"
+#include "swift/Demangling/Demangle.h"
 #include "swift/Reflection/TypeRef.h"
 #include "swift/Reflection/TypeRefBuilder.h"
 
@@ -140,8 +140,10 @@ public:
 
   void visitProtocolCompositionTypeRef(const ProtocolCompositionTypeRef *PC) {
     printHeader("protocol_composition");
-    for (auto protocol : PC->getProtocols())
-      printRec(protocol);
+    if (PC->hasExplicitAnyObject())
+      OS << " any_object";
+    for (auto member : PC->getMembers())
+      printRec(member);
     OS << ')';
   }
 
@@ -253,7 +255,6 @@ struct TypeRefIsConcrete
   }
 
   bool visitFunctionTypeRef(const FunctionTypeRef *F) {
-    std::vector<TypeRef *> SubstitutedArguments;
     for (auto Argument : F->getArguments())
       if (!visit(Argument))
         return false;
@@ -266,8 +267,8 @@ struct TypeRefIsConcrete
 
   bool
   visitProtocolCompositionTypeRef(const ProtocolCompositionTypeRef *PC) {
-    for (auto Protocol : PC->getProtocols())
-      if (!visit(Protocol))
+    for (auto Member : PC->getMembers())
+      if (!visit(Member))
         return false;
     return true;
   }
@@ -417,22 +418,25 @@ bool isClass(Demangle::NodePointer Node) {
       return false;
   }
 }
-}
+} // end anonymous namespace
 
 bool NominalTypeTrait::isStruct() const {
-  auto Demangled = Demangle::demangleTypeAsNode(MangledName);
+  Demangle::Demangler Dem;
+  Demangle::NodePointer Demangled = Dem.demangleType(MangledName);
   return ::isStruct(Demangled);
 }
 
 
 bool NominalTypeTrait::isEnum() const {
-  auto Demangled = Demangle::demangleTypeAsNode(MangledName);
+  Demangle::Demangler Dem;
+  Demangle::NodePointer Demangled = Dem.demangleType(MangledName);
   return ::isEnum(Demangled);
 }
 
 
 bool NominalTypeTrait::isClass() const {
-  auto Demangled = Demangle::demangleTypeAsNode(MangledName);
+  Demangle::Demangler Dem;
+  Demangle::NodePointer Demangled = Dem.demangleType(MangledName);
   return ::isClass(Demangled);
 }
 

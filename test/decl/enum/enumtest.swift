@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 //===----------------------------------------------------------------------===//
 // Tests for various simple enum constructs
@@ -36,7 +36,7 @@ func test1a() -> unionSearchFlags {
 
 func test1b(_ b : Bool) {
   _ = 123
-  _ = .description == 1 // expected-error{{type of expression is ambiguous without more context}} 
+  _ = .description == 1 // expected-error {{ambiguous reference to member '=='}} 
 }
 
 enum MaybeInt {
@@ -311,3 +311,9 @@ enum SyntheticMember { // expected-note {{did you mean the implicitly-synthesize
   case Foo
 }
 print(SyntheticMember.Foo.hasValue) // expected-error {{value of type 'SyntheticMember' has no member 'hasValue'}}
+
+// Non-materializable argument type
+enum Lens<T> {
+  case foo(inout T) // expected-error {{'inout' may only be used on parameters}}
+  case bar(inout T, Int) // expected-error {{'inout' may only be used on parameters}}
+}

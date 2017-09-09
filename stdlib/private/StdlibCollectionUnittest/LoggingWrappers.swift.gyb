@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -42,7 +42,7 @@ extension LoggingType {
 //===----------------------------------------------------------------------===//
 
 public class IteratorLog {
-  public static func dispatchTester<I : IteratorProtocol>(
+  public static func dispatchTester<I>(
     _ iterator: I
   ) -> LoggingIterator<LoggingIterator<I>> {
     return LoggingIterator(wrapping: LoggingIterator(wrapping: iterator))
@@ -72,7 +72,7 @@ public struct LoggingIterator<Base : IteratorProtocol>
 //===----------------------------------------------------------------------===//
 
 public class SequenceLog {
-  public static func dispatchTester<S : Sequence>(
+  public static func dispatchTester<S>(
     _ s: S
   ) -> LoggingSequence<LoggingSequence<S>> {
     return LoggingSequence(wrapping: LoggingSequence(wrapping: s))
@@ -96,7 +96,7 @@ public class SequenceLog {
 }
 
 public class CollectionLog : SequenceLog {
-  public class func dispatchTester<C : Collection>(
+  public class func dispatchTester<C>(
     _ c: C
   ) -> LoggingCollection<LoggingCollection<C>> {
     return LoggingCollection(wrapping: LoggingCollection(wrapping: c))
@@ -123,7 +123,7 @@ public class CollectionLog : SequenceLog {
 }
 
 public class BidirectionalCollectionLog : SequenceLog {
-  public class func dispatchTester<C : BidirectionalCollection>(
+  public class func dispatchTester<C>(
     _ c: C
   ) -> LoggingBidirectionalCollection<LoggingBidirectionalCollection<C>> {
     return LoggingBidirectionalCollection(
@@ -135,7 +135,7 @@ public class BidirectionalCollectionLog : SequenceLog {
 }
 
 public class MutableCollectionLog : CollectionLog {
-  public class func dispatchTester<C : MutableCollection>(
+  public class func dispatchTester<C>(
     _ c: C
   ) -> LoggingMutableCollection<LoggingMutableCollection<C>> {
     return LoggingMutableCollection(
@@ -172,7 +172,7 @@ public class RangeReplaceableCollectionLog : CollectionLog {
   public static var replaceSubrange = TypeIndexed(0)
   public static var reserveCapacity = TypeIndexed(0)
 
-  public class func dispatchTester<C : RangeReplaceableCollection>(
+  public class func dispatchTester<C>(
     _ rrc: C
   ) -> LoggingRangeReplaceableCollection<LoggingRangeReplaceableCollection<C>> {
     return LoggingRangeReplaceableCollection(
@@ -215,7 +215,7 @@ public struct ${Self}<
 
   public typealias Iterator = LoggingIterator<Base.Iterator>
 
-  public func makeIterator() -> LoggingIterator<Base.Iterator> {
+  public func makeIterator() -> Iterator {
     Log.makeIterator[selfType] += 1
     return LoggingIterator(wrapping: base.makeIterator())
   }
@@ -321,10 +321,11 @@ public struct ${Self}<
 
   /// Copy a Sequence into an array.
   public func _copyContents(
-    initializing ptr: UnsafeMutablePointer<Base.Iterator.Element>
-  ) -> UnsafeMutablePointer<Base.Iterator.Element> {
+    initializing buffer: UnsafeMutableBufferPointer<Iterator.Element>
+  ) -> (Iterator,UnsafeMutableBufferPointer<Iterator.Element>.Index) {
     Log._copyContents[selfType] += 1
-    return base._copyContents(initializing: ptr)
+    let (it,idx) = base._copyContents(initializing: buffer)
+    return (Iterator(wrapping: it),idx)
   }
 
 %     if Kind in ['Collection', 'MutableCollection', 'RangeReplaceableCollection']:
@@ -540,7 +541,6 @@ public struct ${Self}<
     return base.removeFirst()
   }
 
-  @discardableResult
   public mutating func removeFirst(_ n: Int) {
     Log.removeFirstN[selfType] += 1
     base.removeFirst(n)
@@ -675,11 +675,10 @@ public struct ${Self}<
 // Custom assertions
 //===----------------------------------------------------------------------===//
 
-public func expectCustomizable<T : Wrapper>(
+public func expectCustomizable<T : LoggingType>(
   _: T, _ counters: TypeIndexed<Int>, ${TRACE}
 ) where
-  T : LoggingType,
-  T.Base : Wrapper, T.Base : LoggingType,
+  T.Base : LoggingType,
   T.Log == T.Base.Log {
   let newTrace = stackTrace.pushIf(showFrame, file: file, line: line)
   expectNotEqual(0, counters[T.self], message(), stackTrace: newTrace)
@@ -687,11 +686,10 @@ public func expectCustomizable<T : Wrapper>(
     counters[T.self], counters[T.Base.self], message(), stackTrace: newTrace)
 }
 
-public func expectNotCustomizable<T : Wrapper>(
+public func expectNotCustomizable<T : LoggingType>(
   _: T, _ counters: TypeIndexed<Int>, ${TRACE}
 ) where
-  T : LoggingType,
-  T.Base : Wrapper, T.Base : LoggingType,
+  T.Base : LoggingType,
   T.Log == T.Base.Log {
   let newTrace = stackTrace.pushIf(showFrame, file: file, line: line)
   expectNotEqual(0, counters[T.self], message(), stackTrace: newTrace)

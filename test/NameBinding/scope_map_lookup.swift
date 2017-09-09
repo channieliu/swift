@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift %s -enable-astscope-lookup
+// RUN: %target-typecheck-verify-swift %s -enable-astscope-lookup
 
 // Name binding in default arguments
 
@@ -24,7 +24,8 @@ protocol P1 {
 
 // Protocols involving associated types.
 protocol AProtocol {
-  associatedtype e : e  // expected-error {{inheritance from non-protocol, non-class type 'Self.e'}}
+  associatedtype e : e
+  // expected-error@-1 {{use of undeclared type 'e'}}
 }
 
 // Extensions.
@@ -72,14 +73,14 @@ class Superclass {
 protocol PConstrained4 { }
 
 extension PConstrained4 where Self : Superclass {
-  final func testFoo() -> Foo {
+  func testFoo() -> Foo {
     foo()
     self.foo()
 
     return Foo(5)
   }
 
-  final static func testBar() {
+  static func testBar() {
     bar()
     self.bar()
   }

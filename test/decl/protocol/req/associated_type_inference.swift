@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P0 {
   associatedtype Assoc1 : PSimple // expected-note{{ambiguous inference of associated type 'Assoc1': 'Double' vs. 'Int'}}
@@ -80,8 +80,8 @@ protocol P1 {
 }
 
 extension P1 {
-  final func f0(_ x: Int) { }
-  final func g0(_ x: Int) { }
+  func f0(_ x: Int) { }
+  func g0(_ x: Int) { }
 }
 
 struct X0j : P0, P1 { }
@@ -93,8 +93,8 @@ protocol P2 {
 }
 
 extension P2 where Self.P2Assoc : PSimple {
-  final func f0(_ x: P2Assoc) { } // expected-note{{inferred type 'Float' (by matching requirement 'f0') is invalid: does not conform to 'PSimple'}}
-  final func g0(_ x: P2Assoc) { } // expected-note{{inferred type 'Float' (by matching requirement 'g0') is invalid: does not conform to 'PSimple'}}
+  func f0(_ x: P2Assoc) { } // expected-note{{inferred type 'Float' (by matching requirement 'f0') is invalid: does not conform to 'PSimple'}}
+  func g0(_ x: P2Assoc) { } // expected-note{{inferred type 'Float' (by matching requirement 'g0') is invalid: does not conform to 'PSimple'}}
 }
 
 struct X0k : P0, P2 {
@@ -129,7 +129,11 @@ struct XProp0b : PropertyP0 { // expected-error{{type 'XProp0b' does not conform
 // Inference from subscripts
 protocol SubscriptP0 {
   associatedtype Index
-  associatedtype Element : PSimple // expected-note{{unable to infer associated type 'Element' for protocol 'SubscriptP0'}}
+  // expected-note@-1 2 {{protocol requires nested type 'Index'; do you want to add it?}}
+
+  associatedtype Element : PSimple
+  // expected-note@-1 {{unable to infer associated type 'Element' for protocol 'SubscriptP0'}}
+  // expected-note@-2 2 {{protocol requires nested type 'Element'; do you want to add it?}}
 
   subscript (i: Index) -> Element { get }
 }
@@ -138,14 +142,27 @@ struct XSubP0a : SubscriptP0 {
   subscript (i: Int) -> Int { get { return i } }
 }
 
-struct XSubP0b : SubscriptP0 { // expected-error{{type 'XSubP0b' does not conform to protocol 'SubscriptP0'}}
+struct XSubP0b : SubscriptP0 {
+// expected-error@-1{{type 'XSubP0b' does not conform to protocol 'SubscriptP0'}}
   subscript (i: Int) -> Float { get { return Float(i) } } // expected-note{{inferred type 'Float' (by matching requirement 'subscript') is invalid: does not conform to 'PSimple'}}
+}
+
+struct XSubP0c : SubscriptP0 {
+// expected-error@-1 {{type 'XSubP0c' does not conform to protocol 'SubscriptP0'}}
+  subscript (i: Index) -> Element { get { } }
+}
+
+struct XSubP0d : SubscriptP0 {
+// expected-error@-1 {{type 'XSubP0d' does not conform to protocol 'SubscriptP0'}}
+  subscript (i: XSubP0d.Index) -> XSubP0d.Element { get { } }
 }
 
 // Inference from properties and subscripts
 protocol CollectionLikeP0 {
   associatedtype Index
+  // expected-note@-1 {{protocol requires nested type 'Index'; do you want to add it?}}
   associatedtype Element
+  // expected-note@-1 {{protocol requires nested type 'Element'; do you want to add it?}}
 
   var startIndex: Index { get }
   var endIndex: Index { get }
@@ -162,6 +179,13 @@ struct XCollectionLikeP0a<T> : CollectionLikeP0 {
   subscript (i: Int) -> T { get { fatalError("blah") } }
 
   subscript (r: Range<Int>) -> SomeSlice<T> { get { return SomeSlice() } }
+}
+
+struct XCollectionLikeP0b : CollectionLikeP0 {
+// expected-error@-1 {{type 'XCollectionLikeP0b' does not conform to protocol 'CollectionLikeP0'}}
+  var startIndex: XCollectionLikeP0b.Index
+  // expected-error@-1 {{'startIndex' used within its own type}}
+  var startElement: XCollectionLikeP0b.Element
 }
 
 // rdar://problem/21304164
@@ -325,4 +349,33 @@ extension P12 {
 
 struct X12 : P12 {
   typealias A = String
+}
+
+// Infinite recursion -- we would try to use the extension
+// initializer's argument type of 'Dough' as a candidate for
+// the associated type
+protocol Cookie {
+  associatedtype Dough
+  // expected-note@-1 {{protocol requires nested type 'Dough'; do you want to add it?}}
+
+  init(t: Dough)
+}
+
+extension Cookie {
+  init(t: Dough?) {}
+}
+
+struct Thumbprint : Cookie {}
+// expected-error@-1 {{type 'Thumbprint' does not conform to protocol 'Cookie'}}
+
+// Looking through typealiases
+protocol Vector {
+  associatedtype Element
+  typealias Elements = [Element]
+
+  func process(elements: Elements)
+}
+
+struct Int8Vector : Vector {
+  func process(elements: [Int8]) { }
 }

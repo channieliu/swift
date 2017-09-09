@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -parse -primary-file %s %S/Inputs/property_helper.swift -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -typecheck -primary-file %s %S/Inputs/property_helper.swift -verify -swift-version 4
 import ObjectiveC
 
 // REQUIRES: objc_interop
@@ -143,9 +143,9 @@ class ObjCClassWithGetterSetter: NSObject {
 // Looking up inherited members
 
 class BaseClass: NSObject {
-  var myVar = 1
+  @objc var myVar = 1
 
-  func myFunc() {
+  @objc func myFunc() {
   }
 }
 

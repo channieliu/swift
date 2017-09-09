@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -145,7 +145,7 @@ public:
     : RequestResponsePrinterBase(OS, Indent) { }
 };
 
-} // anonymous namespace.
+} // anonymous namespace
 
 void sourcekitd::printRequestObject(sourcekitd_object_t Obj, raw_ostream &OS) {
   if (!Obj) {
@@ -349,6 +349,13 @@ bool RequestDict::getInt64(SourceKit::UIdent Key, int64_t &Val,
     return !isOptional;
   Val = xpc_int64_get_value(xobj);
   return false;
+}
+
+Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) {
+  xpc_object_t xobj = xpc_dictionary_get_value(Dict, Key.c_str());
+  if (!xobj)
+    return None;
+  return xpc_int64_get_value(xobj);
 }
 
 sourcekitd_response_t
@@ -606,8 +613,8 @@ static sourcekitd_variant_type_t XPCVar_get_type(sourcekitd_variant_t var) {
 }
 
 static bool XPCVar_array_apply(
-      sourcekitd_variant_t array,
-      sourcekitd_variant_array_applier_t applier) {
+    sourcekitd_variant_t array,
+    llvm::function_ref<bool(size_t, sourcekitd_variant_t)> applier) {
   return xpc_array_apply(XPC_OBJ(array),
                          ^(size_t index, xpc_object_t obj) {
     return applier(index, variantFromXPCObject(obj));
@@ -645,8 +652,8 @@ static bool XPCVar_bool_get_value(sourcekitd_variant_t obj) {
 }
 
 static bool XPCVar_dictionary_apply(
-      sourcekitd_variant_t dict,
-      sourcekitd_variant_dictionary_applier_t applier) {
+    sourcekitd_variant_t dict,
+    llvm::function_ref<bool(sourcekitd_uid_t, sourcekitd_variant_t)> applier) {
   return xpc_dictionary_apply(XPC_OBJ(dict),
                               ^(const char *key, xpc_object_t obj) {
     return applier(sourcekitd_uid_get_from_cstr(key),variantFromXPCObject(obj));

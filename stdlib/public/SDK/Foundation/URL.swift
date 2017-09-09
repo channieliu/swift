@@ -2,31 +2,15 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported import Foundation // Clang module
-
-/// Keys used in the result of `URLResourceValues.thumbnailDictionary`.
-@available(OSX 10.10, iOS 8.0, *)
-public struct URLThumbnailSizeKey : RawRepresentable, Hashable {
-    public typealias RawValue = String
-    
-    public init(rawValue: RawValue) { self.rawValue = rawValue }
-    private(set) public var rawValue: RawValue
-    
-    /// Key for a 1024 x 1024 thumbnail image.
-    static public let none: URLThumbnailSizeKey = URLThumbnailSizeKey(rawValue: URLThumbnailDictionaryItem.NSThumbnail1024x1024SizeKey.rawValue)
-  
-    public var hashValue: Int {
-        return rawValue.hashValue
-    }
-}
 
 /**
  URLs to file system resources support the properties defined below. Note that not all property values will exist for all file system URLs. For example, if a file is located on a volume that does not support creation dates, it is valid to request the creation date property, but the returned value will be nil, and no error will be generated.
@@ -288,20 +272,18 @@ public struct URLResourceValues {
     @available(OSX 10.10, *)
     public var quarantineProperties: [String : Any]? {
         get {
+            let value = _values[.quarantinePropertiesKey]
             // If a caller has caused us to stash NSNull in the dictionary (via set), make sure to return nil instead of NSNull
-            if let isNull = _values[.quarantinePropertiesKey] as? NSNull {
+            if value is NSNull {
                 return nil
             } else {
-                return _values[.quarantinePropertiesKey] as? [String : Any]
+                return value as? [String : Any]
             }
         }
         set {
-            if let v = newValue {
-                _set(.quarantinePropertiesKey, newValue: newValue as NSObject?)
-            } else {
-                // Set to NSNull, a special case for deleting quarantine properties
-                _set(.quarantinePropertiesKey, newValue: NSNull())
-            }
+            // Use NSNull for nil, a special case for deleting quarantine
+            // properties
+            _set(.quarantinePropertiesKey, newValue: newValue ?? NSNull())
         }
     }
 #endif
@@ -317,6 +299,19 @@ public struct URLResourceValues {
     
     /// Total free space in bytes.
     public var volumeAvailableCapacity : Int? { return _get(.volumeAvailableCapacityKey) }
+    
+#if os(OSX) || os(iOS)
+    /// Total available capacity in bytes for "Important" resources, including space expected to be cleared by purging non-essential and cached resources. "Important" means something that the user or application clearly expects to be present on the local system, but is ultimately replaceable. This would include items that the user has explicitly requested via the UI, and resources that an application requires in order to provide functionality.
+    /// Examples: A video that the user has explicitly requested to watch but has not yet finished watching or an audio file that the user has requested to download.
+    /// This value should not be used in determining if there is room for an irreplaceable resource. In the case of irreplaceable resources, always attempt to save the resource regardless of available capacity and handle failure as gracefully as possible.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var volumeAvailableCapacityForImportantUsage: Int64? { return _get(.volumeAvailableCapacityForImportantUsageKey) }
+    
+    /// Total available capacity in bytes for "Opportunistic" resources, including space expected to be cleared by purging non-essential and cached resources. "Opportunistic" means something that the user is likely to want but does not expect to be present on the local system, but is ultimately non-essential and replaceable. This would include items that will be created or downloaded without an explicit request from the user on the current device.
+    /// Examples: A background download of a newly available episode of a TV series that a user has been recently watching, a piece of content explicitly requested on another device, and a new document saved to a network server by the current user from another device.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var volumeAvailableCapacityForOpportunisticUsage: Int64? { return _get(.volumeAvailableCapacityForOpportunisticUsageKey) }
+#endif
     
     /// Total number of resources on the volume.
     public var volumeResourceCount : Int? { return _get(.volumeResourceCountKey) }
@@ -448,6 +443,28 @@ public struct URLResourceValues {
     /// returns the name of this item's container as displayed to users.
     @available(OSX 10.10, iOS 8.0, *)
     public var ubiquitousItemContainerDisplayName : String? { return _get(.ubiquitousItemContainerDisplayNameKey) }
+    
+#if os(OSX) || os(iOS)
+    // true if ubiquitous item is shared.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var ubiquitousItemIsShared: Bool? { return _get(.ubiquitousItemIsSharedKey) }
+    
+    // The current user's role for this shared item, or nil if not shared
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var ubiquitousSharedItemCurrentUserRole: URLUbiquitousSharedItemRole? { return _get(.ubiquitousSharedItemCurrentUserRoleKey) }
+    
+    // The permissions for the current user, or nil if not shared.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var ubiquitousSharedItemCurrentUserPermissions: URLUbiquitousSharedItemPermissions? { return _get(.ubiquitousSharedItemCurrentUserPermissionsKey) }
+    
+    // The name components for the owner, or nil if not shared.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var ubiquitousSharedItemOwnerNameComponents: PersonNameComponents? { return _get(.ubiquitousSharedItemOwnerNameComponentsKey) }
+    
+    // The name components for the most recent editor, or nil if not shared.
+    @available(OSX 10.13, iOS 11.0, *) @available(tvOS, unavailable) @available(watchOS, unavailable)
+    public var ubiquitousSharedItemMostRecentEditorNameComponents: PersonNameComponents? { return _get(.ubiquitousSharedItemMostRecentEditorNameComponentsKey) }
+#endif
     
 #if !os(OSX)
     /// The protection level for this file
@@ -1073,12 +1090,7 @@ public struct URL : ReferenceConvertible, Equatable {
     public func setResourceValues(_ keyedValues: [URLResourceKey : AnyObject]) throws {
         fatalError()
     }
-    
-    @available(*, unavailable, message: "Use struct URLResourceValues and URL.resourceValues(forKeys:) instead")
-    public func resourceValues(forKeys keys: [URLResourceKey]) throws -> [URLResourceKey : AnyObject] {
-        fatalError()
-    }
-    
+        
     @available(*, unavailable, message: "Use struct URLResourceValues and URL.setResourceValues(_:) instead")
     public func getResourceValue(_ value: AutoreleasingUnsafeMutablePointer<AnyObject?>, forKey key: URLResourceKey) throws {
         fatalError()
@@ -1192,6 +1204,54 @@ extension NSURL : _HasCustomAnyHashableRepresentation {
 extension URL : CustomPlaygroundQuickLookable {
     public var customPlaygroundQuickLook: PlaygroundQuickLook {
         return .url(absoluteString)
+    }
+}
+
+extension URL : Codable {
+    private enum CodingKeys : Int, CodingKey {
+        case base
+        case relative
+    }
+
+    public init(from decoder: Decoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        do {
+            // We are allowed to request this container as long as we don't decode anything through it when we need the keyed container below.
+            let singleValueContainer = try decoder.singleValueContainer()
+            if singleValueContainer is _JSONDecoder {
+                // _JSONDecoder has a hook for URLs; this won't recurse since we're not going to defer back to URL in _JSONDecoder.
+                self = try singleValueContainer.decode(URL.self)
+                return
+            }
+        } catch { /* Fall back to default implementation below. */ }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let relative = try container.decode(String.self, forKey: .relative)
+        let base = try container.decodeIfPresent(URL.self, forKey: .base)
+
+        guard let url = URL(string: relative, relativeTo: base) else {
+            throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath,
+                                                                    debugDescription: "Invalid URL string."))
+        }
+
+        self = url
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        // We are allowed to request this container as long as we don't encode anything through it when we need the keyed container below.
+        var singleValueContainer = encoder.singleValueContainer()
+        if singleValueContainer is _JSONEncoder {
+            // _JSONEncoder has a hook for URLs; this won't recurse since we're not going to defer back to URL in _JSONEncoder.
+            try singleValueContainer.encode(self)
+            return
+        }
+
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.relativeString, forKey: .relative)
+        if let base = self.baseURL {
+            try container.encode(base, forKey: .base)
+        }
     }
 }
 

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -76,7 +76,7 @@ public:
 class CalleeCache {
   typedef llvm::SmallVector<SILFunction *, 16> Callees;
   typedef llvm::PointerIntPair<Callees *, 1> CalleesAndCanCallUnknown;
-  typedef llvm::DenseMap<AbstractFunctionDecl *, CalleesAndCanCallUnknown>
+  typedef llvm::DenseMap<SILDeclRef, CalleesAndCanCallUnknown>
       CacheType;
 
   SILModule &M;
@@ -110,10 +110,11 @@ private:
   void sortAndUniqueCallees();
   CalleesAndCanCallUnknown &getOrCreateCalleesForMethod(SILDeclRef Decl);
   void computeClassMethodCalleesForClass(ClassDecl *CD);
+  void computeClassMethodCallees(ClassDecl *CD, SILDeclRef Method);
   void computeWitnessMethodCalleesForWitnessTable(SILWitnessTable &WT);
   void computeMethodCallees();
   SILFunction *getSingleCalleeForWitnessMethod(WitnessMethodInst *WMI) const;
-  CalleeList getCalleeList(AbstractFunctionDecl *Decl) const;
+  CalleeList getCalleeList(SILDeclRef Decl) const;
   CalleeList getCalleeList(WitnessMethodInst *WMI) const;
   CalleeList getCalleeList(ClassMethodInst *CMI) const;
   CalleeList getCalleeListForCalleeKind(SILValue Callee) const;
@@ -131,12 +132,34 @@ public:
     return S->getKind() == AnalysisKind::BasicCallee;
   }
 
-  virtual void invalidate(SILAnalysis::InvalidationKind K) {
-    if (K & InvalidationKind::Functions)
-      Cache.reset();
+  /// Invalidate all information in this analysis.
+  virtual void invalidate() override {
+    Cache.reset();
   }
 
-  virtual void invalidate(SILFunction *F, InvalidationKind K) { invalidate(K); }
+  /// Invalidate all of the information for a specific function.
+  virtual void invalidate(SILFunction *F, InvalidationKind K) override {
+    // No invalidation needed because the analysis does not cache anything
+    // per call-site in functions.
+  }
+
+  /// Notify the analysis about a newly created function.
+  virtual void notifyAddFunction(SILFunction *F) override {
+    // Nothing to be done because the analysis does not cache anything
+    // per call-site in functions.
+  }
+
+  /// Notify the analysis about a function which will be deleted from the
+  /// module.
+  virtual void notifyDeleteFunction(SILFunction *F) override {
+    // No invalidation needed because the analysis does not cache anything
+    // per call-site in functions.
+  };
+
+  /// Notify the analysis about changed witness or vtables.
+  virtual void invalidateFunctionTables() override {
+    Cache.reset();
+  }
 
   CalleeList getCalleeList(FullApplySite FAS) {
     if (!Cache)

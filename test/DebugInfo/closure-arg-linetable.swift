@@ -3,7 +3,7 @@
 public class C {
 
   // Test that curry thunks don't have line table entries.
-  // CHECK: define {{.*}}@_TFC4main1C11someHandlerFT_T_(%C4main1C*)
+  // CHECK: define {{.*}}@_T04main1CC11someHandleryyFTc(%T4main1CC*)
   // CHECK-SAME:         !dbg ![[CURRY_THUNK:[0-9]+]]
   // CHECK-NOT: ret {{.*}},
   // CHECK: {{.*}}, !dbg ![[DBG:[0-9]+]]

@@ -22,21 +22,21 @@ func call_me(_ code: @escaping () -> Void)
 }
 
 func main(_ x: Int64) -> Void
-// CHECK: define hidden void @_TF9linetable4main
+// CHECK: define hidden {{.*}} void @_T09linetable4main{{[_0-9a-zA-Z]*}}F
 {
     var my_class = MyClass(input: 10)
 // Linetable continuity. Don't go into the closure expression.
 // ASM-CHECK: .loc [[FILEID:[0-9]]] [[@LINE+1]] 5
     call_me (
 // ASM-CHECK-NOT: .loc [[FILEID]] [[@LINE+1]] 5
-// CHECK: @_TTSf2i_n___TFF9linetable4mainFVs5Int64T_U_FT_T_
+// CHECK: define {{.*}} @_T09linetable4mainys5Int64VFyycfU_Tf2in_n({{.*}})
         {
             var result = my_class.do_something(x)
             markUsed(result)
 // CHECK: call {{.*}} @swift_rt_swift_release {{.*}}
+// CHECK: bitcast
+// CHECK: llvm.lifetime.end
 // CHECK: call {{.*}} @swift_rt_swift_release {{.*}}, !dbg ![[CLOSURE_END:.*]]
-// CHECK-NEXT: bitcast
-// CHECK-NEXT: llvm.lifetime.end
 // CHECK-NEXT: ret void, !dbg ![[CLOSURE_END]]
 // CHECK: ![[CLOSURE_END]] = !DILocation(line: [[@LINE+1]],
         }
@@ -49,7 +49,7 @@ func main(_ x: Int64) -> Void
 // ASM-CHECK: ret
 }
 
-// ASM-CHECK: {{^_?_TTSf2i_n___TFF9linetable4mainFVs5Int64T_U_FT_T_:}}
+// ASM-CHECK: {{^_?_T09linetable4mainys5Int64VFyycfU_Tf2in_n:}}
 // ASM-CHECK-NOT: retq
 // The end-of-prologue should have a valid location (0 is ok, too).
 // ASM-CHECK: .loc [[FILEID]] 0 {{[0-9]+}} prologue_end

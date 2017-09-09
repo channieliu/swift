@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // TODO: Implement tuple equality in the library.
 // BLOCKED: <rdar://problem/13822406>
@@ -7,7 +7,7 @@ func ~= (x: (Int,Int), y: (Int,Int)) -> Bool {
 }
 
 func parseError1(x: Int) {
-  switch func {} // expected-error {{expected expression in 'switch' statement}} expected-error {{expected '{' after 'switch' subject expression}} expected-error {{expected identifier in function declaration}} expected-error {{braced block of statements is an unused closure}} expected-error{{expression resolves to an unused function}}
+  switch func {} // expected-error {{expected expression in 'switch' statement}} expected-error {{expected '{' after 'switch' subject expression}} expected-error {{expected identifier in function declaration}} expected-error {{closure expression is unused}} expected-note{{did you mean to use a 'do' statement?}} {{15-15=do }}
 }
 
 func parseError2(x: Int) {
@@ -71,7 +71,7 @@ default:
 }
 
 // Multiple cases per case block
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0: // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{8-8= break}}
 case 1:
   x = 0
@@ -83,7 +83,7 @@ default:
   x = 0
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0:
   x = 0
 case 1: // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{8-8= break}}
@@ -95,7 +95,7 @@ case 0:
 default: // expected-error {{'default' label in a 'switch' should have at least one executable statement}} {{9-9= break}}
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0:
   ; // expected-error {{';' statements are not allowed}} {{3-5=}}
 case 1:
@@ -121,11 +121,11 @@ default: // expected-error{{additional 'case' blocks cannot appear after the 'de
   x = 0
 }
 
-switch x {
+switch x { // expected-error{{'switch' statement body must have at least one 'case' or 'default' block}}
   x = 1 // expected-error{{all statements inside a switch must be covered by a 'case' or 'default'}}
 }
 
-switch x {
+switch x { // expected-error{{'switch' statement body must have at least one 'case' or 'default' block}}
   x = 1 // expected-error{{all statements inside a switch must be covered by a 'case' or 'default'}}
   x = 2
 }
@@ -142,22 +142,22 @@ default: // expected-error{{additional 'case' blocks cannot appear after the 'de
   x = 0
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 default where x == 0: // expected-error{{'default' cannot be used with a 'where' guard expression}}
   x = 0
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0: // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{8-8= break}}
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0: // expected-error{{'case' label in a 'switch' should have at least one executable statement}} {{8-8= break}}
 case 1:
   x = 0
 }
 
-switch x {
+switch x { // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
 case 0:
   x = 0
 case 1: // expected-error{{'case' label in a 'switch' should have at least one executable statement}} {{8-8= break}}
@@ -197,41 +197,45 @@ default:
 var t = (1, 2)
 
 switch t {
-case (var a, 2), (1, _): // expected-error {{'a' must be bound in every pattern}}
+case (var a, 2), (1, _): // expected-error {{'a' must be bound in every pattern}} expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
   ()
 
 case (_, 2), (var a, _): // expected-error {{'a' must be bound in every pattern}}
   ()
 
-case (var a, 2), (1, var b): // expected-error {{'a' must be bound in every pattern}} expected-error {{'b' must be bound in every pattern}}
+case (var a, 2), (1, var b): // expected-error {{'a' must be bound in every pattern}} expected-error {{'b' must be bound in every pattern}} expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
   ()
 
-case (var a, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{17-17= break}}
+case (var a, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{17-17= break}} expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
 case (1, _):
   ()
 
 case (_, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{13-13= break}}
-case (1, var a):
+case (1, var a): // expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
   ()
 
-case (var a, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{17-17= break}}
-case (1, var b):
+case (var a, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{17-17= break}} expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
+case (1, var b): // expected-warning {{variable 'b' was never used; consider replacing with '_' or removing it}}
   ()
 
-case (1, let b): // let bindings
+case (1, let b): // let bindings expected-warning {{immutable value 'b' was never used; consider replacing with '_' or removing it}}
   ()
 
-case (_, 2), (let a, _): // expected-error {{'a' must be bound in every pattern}}
+case (_, 2), (let a, _): // expected-error {{'a' must be bound in every pattern}} expected-warning {{case is already handled by previous patterns; consider removing it}}
   ()
 
 // OK
 case (_, 2), (1, _):
   ()
   
-case (_, var a), (_, var a):
+case (_, var a), (_, var a): // expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}}
+  // expected-warning@-1 {{case is already handled by previous patterns; consider removing it}}
+  // expected-warning@-2 {{case is already handled by previous patterns; consider removing it}}
   ()
   
-case (var a, var b), (var b, var a):
+case (var a, var b), (var b, var a): // expected-warning {{variable 'a' was never used; consider replacing with '_' or removing it}} expected-warning {{variable 'b' was never used; consider replacing with '_' or removing it}}
+  // expected-warning@-1 {{case is already handled by previous patterns; consider removing it}}
+  // expected-warning@-2 {{case is already handled by previous patterns; consider removing it}}
   ()
 
 case (_, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{13-13= break}}
@@ -251,12 +255,12 @@ func patternVarUsedInAnotherPattern(x: Int) {
 switch t {
 case (1, 2):
   fallthrough // expected-error {{'fallthrough' cannot transfer control to a case label that declares variables}}
-case (var a, var b):
+case (var a, var b): // expected-warning {{variable 'a' was never mutated; consider changing to 'let' constant}} expected-warning {{variable 'b' was never mutated; consider changing to 'let' constant}}
   t = (b, a)
 }
 
 func test_label(x : Int) {
-Gronk:
+Gronk: // expected-error {{switch must be exhaustive}} expected-note{{do you want to add a default clause?}}
   switch x {
   case 42: return
   }
@@ -264,7 +268,7 @@ Gronk:
 
 func enumElementSyntaxOnTuple() {
   switch (1, 1) {
-  case .Bar: // expected-error {{enum case 'Bar' not found in type '(Int, Int)'}}
+  case .Bar: // expected-error {{pattern cannot match values of type '(Int, Int)'}}
     break
   default:
     break

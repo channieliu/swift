@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,10 +18,10 @@
 #ifndef SWIFT_FRONTEND_H
 #define SWIFT_FRONTEND_H
 
-#include "swift/Basic/DiagnosticConsumer.h"
 #include "swift/Basic/DiagnosticOptions.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/AST/DiagnosticConsumer.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/LinkLibrary.h"
@@ -33,6 +33,7 @@
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangImporterOptions.h"
 #include "swift/Frontend/FrontendOptions.h"
+#include "swift/Migrator/MigratorOptions.h"
 #include "swift/Sema/SourceLoader.h"
 #include "swift/Serialization/Validation.h"
 #include "swift/SIL/SILModule.h"
@@ -62,6 +63,7 @@ class CompilerInvocation {
   ClangImporterOptions ClangImporterOpts;
   SearchPathOptions SearchPathOpts;
   DiagnosticOptions DiagnosticOpts;
+  MigratorOptions MigratorOpts;
   SILOptions SILOpts;
   IRGenOptions IRGenOpts;
 
@@ -133,11 +135,12 @@ public:
     return SearchPathOpts.ImportSearchPaths;
   }
 
-  void setFrameworkSearchPaths(const std::vector<std::string> &Paths) {
+  void setFrameworkSearchPaths(
+             const std::vector<SearchPathOptions::FrameworkSearchPath> &Paths) {
     SearchPathOpts.FrameworkSearchPaths = Paths;
   }
 
-  ArrayRef<std::string> getFrameworkSearchPaths() const {
+  ArrayRef<SearchPathOptions::FrameworkSearchPath> getFrameworkSearchPaths() const {
     return SearchPathOpts.FrameworkSearchPaths;
   }
 
@@ -199,6 +202,10 @@ public:
   DiagnosticOptions &getDiagnosticOptions() { return DiagnosticOpts; }
   const DiagnosticOptions &getDiagnosticOptions() const {
     return DiagnosticOpts;
+  }
+
+  const MigratorOptions &getMigratorOptions() const {
+    return MigratorOpts;
   }
 
   SILOptions &getSILOptions() { return SILOpts; }
@@ -263,6 +270,9 @@ public:
     assert(Buf);
     CodeCompletionBuffer = Buf;
     CodeCompletionOffset = Offset;
+    // We don't need typo-correction for code-completion.
+    // FIXME: This isn't really true, but is a performance issue.
+    LangOpts.TypoCorrectionLimit = 0;
   }
 
   std::pair<llvm::MemoryBuffer *, unsigned> getCodeCompletionPoint() const {
@@ -289,6 +299,11 @@ public:
   bool isDelayedFunctionBodyParsing() const {
     return FrontendOpts.DelayedFunctionBodyParsing;
   }
+
+  /// Retrieve a module hash string that is suitable for uniquely
+  /// identifying the conditions under which the module was built, for use
+  /// in generating a cached PCH file for the bridging header.
+  std::string getPCHHash() const;
 };
 
 /// A class which manages the state and execution of the compiler.
@@ -309,7 +324,7 @@ class CompilerInstance {
   DependencyTracker *DepTracker = nullptr;
   ReferencedNameTracker *NameTracker = nullptr;
 
-  Module *MainModule = nullptr;
+  ModuleDecl *MainModule = nullptr;
   SerializedModuleLoader *SML = nullptr;
 
   /// Contains buffer IDs for input source code files.
@@ -385,7 +400,7 @@ public:
     return static_cast<bool>(TheSILModule);
   }
 
-  Module *getMainModule();
+  ModuleDecl *getMainModule();
 
   SerializedModuleLoader *getSerializedModuleLoader() const { return SML; }
 
@@ -412,6 +427,10 @@ public:
   /// Parses the input file but does no type-checking or module imports.
   /// Note that this only supports parsing an invocation with a single file.
   void performParseOnly();
+
+  /// Frees up the ASTContext and SILModule objects that this instance is
+  /// holding on.
+  void freeContextAndSIL();
 };
 
 } // namespace swift

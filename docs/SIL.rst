@@ -84,7 +84,7 @@ predictable.
   If an arithmetic overflow occurs during the constant expression computation, a diagnostic
   is issued.
 - **Return analysis** verifies that each function returns a value on every
-  code path and doesn't "fall of the end" of its definition, which is an error.
+  code path and doesn't "fall off the end" of its definition, which is an error.
   It also issues an error when a ``noreturn`` function returns.
 - **Critical edge splitting** splits all critical edges from terminators that
   don't support arbitrary basic block arguments (all non cond_branch
@@ -479,6 +479,9 @@ number of ways:
     initialized object; both the caller and callee promise not to mutate the
     pointee, allowing the callee to read it.
 
+  - An ``@in_constant`` parameter is indirect.  The address must be of an
+    initialized object; the function will treat the value held there as read-only.
+
   - Otherwise, the parameter is an unowned direct parameter.
 
 - A SIL function type declares the conventions for its results.
@@ -546,9 +549,9 @@ the caller.  A non-autoreleased ``apply`` of a function that is defined
 with an autoreleased result has the effect of performing an
 autorelease in the callee.
 
-- The @noescape declaration attribute on Swift parameters (which is valid only
-  on parameters of function type, and is implied by the @autoclosure attribute)
-  is turned into a @noescape type attribute on SIL arguments.  @noescape
+- The ``@noescape`` declaration attribute on Swift parameters (which is valid only
+  on parameters of function type, and is implied by the ``@autoclosure`` attribute)
+  is turned into a ``@noescape`` type attribute on SIL arguments.  ``@noescape``
   indicates that the lifetime of the closure parameter will not be extended by
   the callee (e.g. the pointer will not be stored in a global variable).  It
   corresponds to the LLVM "nocapture" attribute in terms of semantics (but is
@@ -1028,7 +1031,7 @@ VTables
   decl ::= sil-vtable
   sil-vtable ::= 'sil_vtable' identifier '{' sil-vtable-entry* '}'
 
-  sil-vtable-entry ::= sil-decl-ref ':' sil-function-name
+  sil-vtable-entry ::= sil-decl-ref ':' sil-linkage? sil-function-name
 
 SIL represents dynamic dispatch for class methods using the `class_method`_,
 `super_method`_, and `dynamic_method`_ instructions. The potential destinations
@@ -1083,6 +1086,9 @@ visible through that class (in the example above, ``B``'s vtable references
 ``C.bas``). The Swift AST maintains override relationships between declarations
 that can be used to look up overridden methods in the SIL vtable for a derived
 class (such as ``C.bas`` in ``C``'s vtable).
+
+In case the SIL function is a thunk, the function name is preceded with the
+linkage of the original implementing function.
 
 Witness Tables
 ~~~~~~~~~~~~~~
@@ -2450,7 +2456,7 @@ index_raw_pointer
   %2 = index_raw_pointer %0 : $Builtin.RawPointer, %1 : $Builtin.Int<n>
   // %0 must be of $Builtin.RawPointer type
   // %1 must be of a builtin integer type
-  // %2 will be of type $*T
+  // %2 will be of type $Builtin.RawPointer
 
 Given a ``Builtin.RawPointer`` value ``%0``, returns a pointer value at the
 byte offset ``%1`` relative to ``%0``.
@@ -2468,6 +2474,66 @@ bind_memory
 
 Binds memory at ``Builtin.RawPointer`` value ``%0`` to type ``$T`` with enough
 capacity to hold ``%1`` values. See SE-0107: UnsafeRawPointer.
+
+begin_access
+````````````
+
+::
+
+  sil-instruction ::= 'begin_access' '[' sil-access ']' '[' sil-enforcement ']' sil-operand
+  sil-access ::= init
+  sil-access ::= read
+  sil-access ::= modify
+  sil-access ::= deinit
+  sil-enforcement ::= unknown
+  sil-enforcement ::= static
+  sil-enforcement ::= dynamic
+  sil-enforcement ::= unsafe
+
+Begins an access to the target memory.
+
+The operand must be a *root address derivation*:
+
+- a function argument,
+- an ``alloc_stack`` instruction,
+- a ``project_box`` instruction,
+- a ``global_addr`` instruction,
+- a ``ref_element_addr`` instruction, or
+- another ``begin_access`` instruction.
+
+It will eventually become a basic structural rule of SIL that no memory
+access instructions can be directly applied to the result of one of these
+instructions; they can only be applied to the result of a ``begin_access``
+on them.  For now, this rule will be conditional based on compiler settings
+and the SIL stage.
+
+An access is ended with a corresponding ``end_access``.  Accesses must be
+uniquely ended on every control flow path which leads to either a function
+exit or back to the ``begin_access`` instruction.  The set of active
+accesses must be the same on every edge into a basic block.
+
+An ``init`` access takes uninitialized memory and initializes it.
+It must always use ``static`` enforcement.
+
+An ``deinit`` access takes initialized memory and leaves it uninitialized.
+It must always use ``static`` enforcement.
+
+``read`` and ``modify`` accesses take initialized memory and leave it
+initialized.  They may use ``unknown`` enforcement only in the ``raw``
+SIL stage.
+
+end_access
+``````````
+
+::
+
+  sil-instruction ::= 'end_access' ( '[' 'abort' ']' )? sil-operand
+
+Ends an access.  The operand must be a ``begin_access`` instruction.
+
+If the ``begin_access`` is ``init`` or ``deinit``, the ``end_access``
+may be an ``abort``, indicating that the described transition did not
+in fact take place.
 
 Reference Counting
 ~~~~~~~~~~~~~~~~~~
@@ -3233,6 +3299,35 @@ For aggregate types, especially enums, it is typically both easier
 and more efficient to reason about aggregate copies than it is to
 reason about copies of the subobjects.
 
+retain_value_addr
+`````````````````
+
+::
+
+  sil-instruction ::= 'retain_value_addr' sil-operand
+
+  retain_value_addr %0 : $*A
+
+Retains a loadable value inside given address,
+which simply retains any references it holds.
+
+unmanaged_retain_value
+``````````````````````
+
+::
+
+  sil-instruction ::= 'unmanaged_retain_value' sil-value
+
+  unmanaged_retain_value %0 : $A
+
+This instruction has the same local semantics as ``retain_value`` but:
+
+* Is valid in ownership qualified SIL.
+* Is not intended to be statically paired at compile time by the compiler.
+
+The intention is that this instruction is used to implement unmanaged
+constructs.
+
 copy_value
 ``````````
 
@@ -3281,6 +3376,35 @@ are the preferred forms.
 For aggregate types, especially enums, it is typically both easier
 and more efficient to reason about aggregate destroys than it is to
 reason about destroys of the subobjects.
+
+release_value_addr
+``````````````````
+
+::
+
+  sil-instruction ::= 'release_value_addr' sil-operand
+
+  release_value_addr %0 : $*A
+
+Destroys a loadable value inside given address,
+by releasing any retainable pointers within it.
+
+unmanaged_release_value
+```````````````````````
+
+::
+
+  sil-instruction ::= 'unmanaged_release_value' sil-value
+
+  unmanaged_release_value %0 : $A
+
+This instruction has the same local semantics as ``release_value`` but:
+
+* Is valid in ownership qualified SIL.
+* Is not intended to be statically paired at compile time by the compiler.
+
+The intention is that this instruction is used to implement unmanaged
+constructs.
 
 destroy_value
 `````````````
@@ -3698,6 +3822,16 @@ container may use one of several representations:
   * `open_existential_addr`_
   * `deinit_existential_addr`_
 
+- **Opaque existential containers loadable types**: In the SIL Opaque Values
+  mode of operation, we take an opaque value as-is.
+  Said value might be replaced with one of the _addr instructions above
+  before IR generation.
+  The following instructions manipulate "loadable" opaque existential containers:
+  
+  * `init_existential_value`_
+  * `open_existential_value`_
+  * `deinit_existential_value`_
+
 - **Class existential containers**: If a protocol type is constrained by one or
   more class protocols, then the existential container for that type is
   loadable and referred to in the implementation as a *class existential
@@ -3725,6 +3859,7 @@ container may use one of several representations:
   * `alloc_existential_box`_
   * `project_existential_box`_
   * `open_existential_box`_
+  * `open_existential_box_value`_
   * `dealloc_existential_box`_
 
 Some existential types may additionally support specialized representations
@@ -3770,6 +3905,21 @@ initialized existential container can be destroyed with ``destroy_addr`` as
 usual. It is undefined behavior to ``destroy_addr`` a partially-initialized
 existential container.
 
+init_existential_value
+``````````````````````
+::
+
+  sil-instruction ::= 'init_existential_value' sil-operand ':' sil-type ','
+                                             sil-type
+
+  %1 = init_existential_value %0 : $L' : $C, $P
+  // %0 must be of loadable type $L', lowered from AST type $L, conforming to
+  //    protocol(s) $P
+  // %1 will be of type $P
+
+Loadable version of the above: Inits-up the existential
+container prepared to contain a value of type ``$P``.
+
 deinit_existential_addr
 ```````````````````````
 ::
@@ -3786,13 +3936,31 @@ existential containers that have been partially initialized by
 ``init_existential_addr`` but haven't had their contained value initialized.
 A fully initialized existential must be destroyed with ``destroy_addr``.
 
+deinit_existential_value
+````````````````````````
+::
+
+  sil-instruction ::= 'deinit_existential_value' sil-operand
+
+  deinit_existential_value %0 : $P
+  // %0 must be of a $P opaque type for non-class protocol or protocol
+  // composition type P
+
+Undoes the partial initialization performed by
+``init_existential_value``.  ``deinit_existential_value`` is only valid for
+existential containers that have been partially initialized by
+``init_existential_value`` but haven't had their contained value initialized.
+A fully initialized existential must be destroyed with ``destroy_value``.
+
 open_existential_addr
 `````````````````````
 ::
 
-  sil-instruction ::= 'open_existential_addr' sil-operand 'to' sil-type
+  sil-instruction ::= 'open_existential_addr' sil-allowed-access sil-operand 'to' sil-type
+  sil-allowed-access ::= 'immutable_access'
+  sil-allowed-access ::= 'mutable_access'
 
-  %1 = open_existential_addr %0 : $*P to $*@opened P
+  %1 = open_existential_addr immutable_access %0 : $*P to $*@opened P
   // %0 must be of a $*P type for non-class protocol or protocol composition
   //   type P
   // $*@opened P must be a unique archetype that refers to an opened
@@ -3803,7 +3971,29 @@ Obtains the address of the concrete value inside the existential
 container referenced by ``%0``. The protocol conformances associated
 with this existential container are associated directly with the
 archetype ``$*@opened P``. This pointer can be used with any operation
-on archetypes, such as ``witness_method``.
+on archetypes, such as ``witness_method`` assuming this operation obeys the
+access constraint: The returned address can either allow ``mutable_access`` or
+``immutable_access``. Users of the returned address may only consume
+(e.g ``destroy_addr`` or ``copy_addr [take]``) or mutate the value at the
+address if they have ``mutable_access``.
+
+open_existential_value
+``````````````````````
+::
+
+  sil-instruction ::= 'open_existential_value' sil-operand 'to' sil-type
+
+  %1 = open_existential_value %0 : $P to $@opened P
+  // %0 must be of a $P type for non-class protocol or protocol composition
+  //   type P
+  // $@opened P must be a unique archetype that refers to an opened
+  // existential type P.
+  // %1 will be of type $P
+
+Loadable version of the above: Opens-up the existential
+container associated with ``%0``. The protocol conformances associated
+with this existential container are associated directly with the
+archetype ``$@opened P``.
 
 init_existential_ref
 ````````````````````
@@ -3928,6 +4118,22 @@ opened archetype ``$@opened P``. The result address is dependent on both
 the owning box and the enclosing function; in order to "open" a boxed
 existential that has directly adopted a class reference, temporary scratch
 space may need to have been allocated.
+
+open_existential_box_value
+``````````````````````````
+::
+
+  sil-instruction ::= 'open_existential_box_value' sil-operand 'to' sil-type
+
+  %1 = open_existential_box_value %0 : $P to $@opened P
+  // %0 must be a value of boxed protocol or protocol composition type $P
+  // %@opened P must be a unique archetype that refers to an opened
+  //   existential type P
+  // %1 will be of type $@opened P
+
+Projects the value inside a boxed existential container, and uses the enclosed
+type and protocol conformance metadata to bind the opened archetype ``$@opened
+P``.
 
 dealloc_existential_box
 ```````````````````````
@@ -4344,9 +4550,9 @@ Checked Conversions
 
 Some user-level cast operations can fail and thus require runtime checking.
 
-The `unconditional_checked_cast_addr`_ and `unconditional_checked_cast`_
+The `unconditional_checked_cast_addr`_, `unconditional_checked_cast_value`_ and `unconditional_checked_cast`_
 instructions performs an unconditional checked cast; it is a runtime failure
-if the cast fails. The `checked_cast_addr_br`_ and `checked_cast_br`_
+if the cast fails. The `checked_cast_addr_br`_, `checked_cast_value_br`_ and `checked_cast_br`_
 terminator instruction performs a conditional checked cast; it branches to one
 of two destinations based on whether the cast succeeds or not.
 
@@ -4381,6 +4587,25 @@ unconditional_checked_cast_addr
   // %1 will be of type $*B
 
 Performs a checked indirect conversion, causing a runtime failure if the
+conversion fails.
+
+unconditional_checked_cast_value
+````````````````````````````````
+::
+
+  sil-instruction ::= 'unconditional_checked_cast_value'
+                       sil-cast-consumption-kind
+                       sil-operand 'to' sil-type
+  sil-cast-consumption-kind ::= 'take_always'
+  sil-cast-consumption-kind ::= 'take_on_success'
+  sil-cast-consumption-kind ::= 'copy_on_success'
+
+  %1 = unconditional_checked_cast_value take_always %0 : $A to $B
+  // $A must not be an address
+  // $B must not be an address
+  // %1 will be of type $B
+
+Performs a checked conversion, causing a runtime failure if the
 conversion fails.
 
 Runtime Failures
@@ -4711,6 +4936,26 @@ transferred to ``bb2``.
 An exact cast checks whether the dynamic type is exactly the target
 type, not any possible subtype of it.  The source and target types
 must be class types.
+
+checked_cast_value_br
+`````````````````````
+::
+
+  sil-terminator ::= 'checked_cast_value_br'
+                      sil-operand 'to' sil-type ','
+                      sil-identifier ',' sil-identifier
+  sil-checked-cast-exact ::= '[' 'exact' ']'
+
+  checked_cast_value_br %0 : $A to $B, bb1, bb2
+  // $A must be not be an address
+  // $B must be an opaque value
+  // bb1 must take a single argument of type $B
+  // bb2 must take no arguments
+
+Performs a checked opaque conversion from ``$A`` to ``$B``. If the conversion
+succeeds, control is transferred to ``bb1``, and the result of the cast is
+passed into ``bb1`` as an argument. If the conversion fails, control is
+transferred to ``bb2``.
 
 checked_cast_addr_br
 ````````````````````

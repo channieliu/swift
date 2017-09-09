@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,16 +15,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/Basic/LLVM.h"
-#include "swift/Basic/Demangle.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/Basic/Lazy.h"
+#include "swift/Demangling/Demangler.h"
+#include "swift/Runtime/Casting.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Enum.h"
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Metadata.h"
 #include "swift/Runtime/Mutex.h"
+#include "swift/Runtime/Unreachable.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerIntPair.h"
+#include "llvm/Support/Compiler.h"
 #include "swift/Runtime/Debug.h"
 #include "ErrorObject.h"
 #include "ExistentialMetadataImpl.h"
@@ -63,276 +65,53 @@ extern "C" const void *swift_dynamicCastObjCProtocolConditional(
                          const ProtocolDescriptor * const *protocols);
 #endif
 
-namespace {
-  enum class TypeSyntaxLevel {
-    /// Any type syntax is valid.
-    Type,
-    /// Function types must be parenthesized.
-    TypeSimple,
-  };
-}
-
-static void _buildNameForMetadata(const Metadata *type,
-                                  TypeSyntaxLevel level,
-                                  bool qualified,
-                                  std::string &result);
-
-static void _buildNominalTypeName(const NominalTypeDescriptor *ntd,
-                                  const Metadata *type,
-                                  bool qualified,
-                                  std::string &result) {
-  auto options = Demangle::DemangleOptions();
-  options.DisplayDebuggerGeneratedModule = false;
-  options.QualifyEntities = qualified;
-
-  // Demangle the basic type name.
-  result += Demangle::demangleTypeAsString(ntd->Name,
-                                           strlen(ntd->Name),
-                                           options);
-  
-  // If generic, demangle the type parameters.
-  if (ntd->GenericParams.NumPrimaryParams > 0) {
-    result += "<";
-    
-    auto typeBytes = reinterpret_cast<const char *>(type);
-    auto genericParam = reinterpret_cast<const Metadata * const *>(
-                         typeBytes + sizeof(void*) * ntd->GenericParams.Offset);
-    for (unsigned i = 0, e = ntd->GenericParams.NumPrimaryParams;
-         i < e; ++i, ++genericParam) {
-      if (i > 0)
-        result += ", ";
-      _buildNameForMetadata(*genericParam, TypeSyntaxLevel::Type, qualified,
-                            result);
-    }
-    
-    result += ">";
-  }
-}
-
-static const char *_getProtocolName(const ProtocolDescriptor *protocol) {
-  const char *name = protocol->Name;
-
-  // An Objective-C protocol's name is unmangled.
-#if SWIFT_OBJC_INTEROP
-  if (!protocol->Flags.isSwift())
-    return name;
-#endif
-
-  // Protocol names are emitted with the _Tt prefix so that ObjC can
-  // recognize them as mangled Swift names.
-  assert(name[0] == '_' && name[1] == 'T' && name[2] == 't');
-  return name + 3;
-}
-
-static void _buildExistentialTypeName(const ProtocolDescriptorList *protocols,
-                                      TypeSyntaxLevel level,
-                                      bool qualified,
-                                      std::string &result) {
-  auto options = Demangle::DemangleOptions();
-  options.QualifyEntities = qualified;
-  options.DisplayDebuggerGeneratedModule = false;
-  
-  // If there's only one protocol, the existential type name is the protocol
-  // name. If there are 0 protocols it is 'Any'
-  auto descriptors = protocols->getProtocols();
-  auto numProtocols = protocols->NumProtocols;
-  
-  if (numProtocols == 0) {
-    result += "Any";
-  } else {
-    // compositions of more than 1 protocol need parens in .Type contexts
-    bool needsParens = (level >= TypeSyntaxLevel::TypeSimple) && (numProtocols != 1);
-    if (needsParens) result += "(";
-    for (unsigned i = 0, e = numProtocols; i < e; ++i) {
-      if (i) result += " & ";
-      auto name = _getProtocolName(descriptors[i]);
-      result += Demangle::demangleTypeAsString(name,
-                                               strlen(name),
-                                               options);
-    }
-    if (needsParens) result += ")";
-  }
-}
-
-static void _buildFunctionTypeName(const FunctionTypeMetadata *func,
-                                   bool qualified,
-                                   std::string &result) {
-
-  result += "(";
-  for (size_t i = 0; i < func->getNumArguments(); ++i) {
-    auto arg = func->getArguments()[i].getPointer();
-    bool isInout = func->getArguments()[i].getFlag();
-    if (isInout)
-      result += "inout ";
-    _buildNameForMetadata(arg, TypeSyntaxLevel::TypeSimple,
-                          qualified, result);
-    if (i < func->getNumArguments() - 1) {
-      result += ", ";
-    }
-  }
-  result += ")";
-  
-  if (func->throws()) {
-    result += " throws";
-  }
-
-  result += " -> ";
-  _buildNameForMetadata(func->ResultType,
-                        TypeSyntaxLevel::Type,
-                        qualified,
-                        result);
-}
-
 // Build a user-comprehensible name for a type.
 static void _buildNameForMetadata(const Metadata *type,
-                                  TypeSyntaxLevel level,
                                   bool qualified,
                                   std::string &result) {
-  auto options = Demangle::DemangleOptions();
-  options.DisplayDebuggerGeneratedModule = false;
-                             
-  switch (type->getKind()) {
-  case MetadataKind::Class: {
-    auto classType = static_cast<const ClassMetadata *>(type);
 #if SWIFT_OBJC_INTEROP
+  if (type->getKind() == MetadataKind::Class) {
+    auto classType = static_cast<const ClassMetadata *>(type);
     // Look through artificial subclasses.
     while (classType->isTypeMetadata() && classType->isArtificialSubclass())
       classType = classType->SuperClass;
-    
+
     // Ask the Objective-C runtime to name ObjC classes.
     if (!classType->isTypeMetadata()) {
       result += class_getName(classType);
       return;
     }
-#endif
-    return _buildNominalTypeName(classType->getDescription(),
-                                    classType, qualified,
-                                    result);
-  }
-  case MetadataKind::Enum:
-  case MetadataKind::Optional:
-  case MetadataKind::Struct: {
-    auto structType = static_cast<const StructMetadata *>(type);
-    return _buildNominalTypeName(structType->Description,
-                                 type, qualified, result);
-  }
-  case MetadataKind::ObjCClassWrapper: {
-#if SWIFT_OBJC_INTEROP
+  } else if (type->getKind() == MetadataKind::ObjCClassWrapper) {
     auto objcWrapper = static_cast<const ObjCClassWrapperMetadata *>(type);
-    result += class_getName(objcWrapper->Class);
-#else
-    assert(false && "no ObjC interop");
+    const char *className = class_getName((Class)objcWrapper->Class);
+    result = className;
+    return;
+  }
 #endif
-    return;
-  }
-  case MetadataKind::ForeignClass: {
-    auto foreign = static_cast<const ForeignClassMetadata *>(type);
-    const char *name = foreign->getName();
-    size_t len = strlen(name);
-    result += Demangle::demangleTypeAsString(name, len, options);
-    return;
-  }
-  case MetadataKind::Existential: {
-    auto exis = static_cast<const ExistentialTypeMetadata *>(type);
-    _buildExistentialTypeName(&exis->Protocols, level, qualified, result);
-    return;
-  }
-  case MetadataKind::ExistentialMetatype: {
-    auto metatype = static_cast<const ExistentialMetatypeMetadata *>(type);
-    _buildNameForMetadata(metatype->InstanceType, TypeSyntaxLevel::TypeSimple,
-                          qualified,
-                          result);
-    result += ".Type";
-    return;
-  }
-  case MetadataKind::Function: {
-    if (level >= TypeSyntaxLevel::TypeSimple)
-      result += "(";
 
-    auto func = static_cast<const FunctionTypeMetadata *>(type);
-    
-    switch (func->getConvention()) {
-    case FunctionMetadataConvention::Swift:
-      break;
-    case FunctionMetadataConvention::Thin:
-      result += "@convention(thin) ";
-      break;
-    case FunctionMetadataConvention::Block:
-      result += "@convention(block) ";
-      break;
-    case FunctionMetadataConvention::CFunctionPointer:
-      result += "@convention(c) ";
-      break;
-    }
-    
-    _buildFunctionTypeName(func, qualified, result);
-
-    if (level >= TypeSyntaxLevel::TypeSimple)
-      result += ")";
+  // Use the remangler to generate a mangled name from the type metadata.
+  
+  Demangle::Demangler Dem;
+  auto demangling = _swift_buildDemanglingForMetadata(type, Dem);
+  if (demangling == nullptr) {
+    result = "<<< invalid type >>>";
     return;
   }
-  case MetadataKind::Metatype: {
-    auto metatype = static_cast<const MetatypeMetadata *>(type);
-    _buildNameForMetadata(metatype->InstanceType, TypeSyntaxLevel::TypeSimple,
-                          qualified, result);
-    if (metatype->InstanceType->isAnyExistentialType())
-      result += ".Protocol";
-    else
-      result += ".Type";
-    return;
-  }
-  case MetadataKind::Tuple: {
-    auto tuple = static_cast<const TupleTypeMetadata *>(type);
-    result += "(";
-    auto elts = tuple->getElements();
-    const char *labels = tuple->Labels;
-    for (unsigned i = 0, e = tuple->NumElements; i < e; ++i) {
-      if (i > 0)
-        result += ", ";
 
-      // If we have any labels, add the label.
-      if (labels) {
-        // Labels are space-separated.
-        if (const char *space = strchr(labels, ' ')) {
-          if (labels != space) {
-            result.append(labels, space - labels);
-            result += ": ";
-          }
-
-          labels = space + 1;
-        } else {
-          labels = nullptr;
-        }
-      }
-
-      _buildNameForMetadata(elts[i].Type, TypeSyntaxLevel::Type, qualified,
-                            result);
-    }
-    result += ")";
-    return;
-  }
-  case MetadataKind::Opaque: {
-    // TODO
-    result += "<<<opaque type>>>";
-    return;
-  }
-  case MetadataKind::HeapLocalVariable:
-  case MetadataKind::HeapGenericLocalVariable:
-  case MetadataKind::ErrorObject:
-    break;
-  }
-  result += "<<<invalid type>>>";
+  Demangle::DemangleOptions options;
+  options.QualifyEntities = qualified;
+  result = Demangle::nodeToString(demangling, options);
 }
 
 /// Return a user-comprehensible name for the given type.
 std::string swift::nameForMetadata(const Metadata *type,
                                    bool qualified) {
   std::string result;
-  _buildNameForMetadata(type, TypeSyntaxLevel::Type, qualified, result);
+  _buildNameForMetadata(type, qualified, result);
   return result;
 }
 
-SWIFT_CC(swift) SWIFT_RUNTIME_EXPORT
+SWIFT_CC(swift)
 TwoWordPair<const char *, uintptr_t>::Return
 swift::swift_getTypeName(const Metadata *type, bool qualified) {
   using Pair = TwoWordPair<const char *, uintptr_t>;
@@ -382,7 +161,7 @@ swift::swift_getTypeName(const Metadata *type, bool qualified) {
 }
 
 /// Report a dynamic cast failure.
-// This is noinline with asm("") to preserve this frame in stack traces.
+// This is noinline to preserve this frame in stack traces.
 // We want "dynamicCastFailure" to appear in crash logs even we crash 
 // during the diagnostic because some Metadata is invalid.
 LLVM_ATTRIBUTE_NORETURN
@@ -391,8 +170,6 @@ void
 swift::swift_dynamicCastFailure(const void *sourceType, const char *sourceName, 
                                 const void *targetType, const char *targetName, 
                                 const char *message) {
-  asm("");
-
   swift::fatalError(/* flags = */ 0,
                     "Could not cast value of type '%s' (%p) to '%s' (%p)%s%s\n",
                     sourceName, sourceType, 
@@ -487,10 +264,8 @@ _dynamicCastClassMetatype(const ClassMetadata *sourceType,
 }
 
 /// Dynamically cast a class instance to a Swift class type.
-SWIFT_RT_ENTRY_VISIBILITY
-const void *
-swift::swift_dynamicCastClass(const void *object,
-                              const ClassMetadata *targetType)
+const void *swift::swift_dynamicCastClass(const void *object,
+                                          const ClassMetadata *targetType)
     SWIFT_CC(RegisterPreservingCC_IMPL) {
 #if SWIFT_OBJC_INTEROP
   assert(!targetType->isPureObjC());
@@ -538,38 +313,6 @@ static bool _conformsToProtocol(const OpaqueValue *value,
                                 const Metadata *type,
                                 const ProtocolDescriptor *protocol,
                                 const WitnessTable **conformance) {
-  // Handle AnyObject directly.
-  if (protocol->Flags.getSpecialProtocol() == SpecialProtocol::AnyObject) {
-    switch (type->getKind()) {
-    case MetadataKind::Class:
-    case MetadataKind::ObjCClassWrapper:
-    case MetadataKind::ForeignClass:
-      // Classes conform to AnyObject.
-      return true;
-
-    case MetadataKind::Existential: {
-      auto sourceExistential = cast<ExistentialTypeMetadata>(type);
-      // The existential conforms to AnyObject if it's class-constrained.
-      // FIXME: It also must not carry witness tables.
-      return sourceExistential->isClassBounded();
-    }
-      
-    case MetadataKind::ExistentialMetatype:
-    case MetadataKind::Metatype:
-    case MetadataKind::Function:
-    case MetadataKind::HeapLocalVariable:
-    case MetadataKind::HeapGenericLocalVariable:
-    case MetadataKind::ErrorObject:
-    case MetadataKind::Enum:
-    case MetadataKind::Optional:
-    case MetadataKind::Opaque:
-    case MetadataKind::Struct:
-    case MetadataKind::Tuple:
-      return false;
-    }
-    _failCorruptType(type);
-  }
-
   // Look up the witness table for protocols that need them.
   if (protocol->Flags.needsWitnessTable()) {
     auto witness = swift_conformsToProtocol(type, protocol);
@@ -636,8 +379,19 @@ static bool _conformsToProtocol(const OpaqueValue *value,
 /// list of conformances.
 static bool _conformsToProtocols(const OpaqueValue *value,
                                  const Metadata *type,
-                                 const ProtocolDescriptorList &protocols,
+                                 const ExistentialTypeMetadata *existentialType,
                                  const WitnessTable **conformances) {
+  if (auto *superclass = existentialType->getSuperclassConstraint()) {
+    if (!swift_dynamicCastMetatype(type, superclass))
+      return false;
+  }
+
+  if (existentialType->isClassBounded()) {
+    if (!Metadata::isAnyKindOfClass(type->getKind()))
+      return false;
+  }
+
+  auto &protocols = existentialType->Protocols;
   for (unsigned i = 0, n = protocols.NumProtocols; i != n; ++i) {
     const ProtocolDescriptor *protocol = protocols[i];
     if (!_conformsToProtocol(value, type, protocol, conformances))
@@ -656,30 +410,12 @@ static bool shouldDeallocateSource(bool castSucceeded, DynamicCastFlags flags) {
         (!castSucceeded && (flags & DynamicCastFlags::DestroyOnFailure));
 }
 
-/// Given that a cast operation is complete, maybe deallocate an
-/// opaque existential value.
-static void _maybeDeallocateOpaqueExistential(OpaqueValue *srcExistential,
-                                              bool castSucceeded,
-                                              DynamicCastFlags flags) {
-  if (shouldDeallocateSource(castSucceeded, flags)) {
-    auto container =
-      reinterpret_cast<OpaqueExistentialContainer *>(srcExistential);
-    container->Type->vw_deallocateBuffer(&container->Buffer);
-  }
-}
-
 static bool
 isAnyObjectExistentialType(const ExistentialTypeMetadata *targetType) {
   unsigned numProtos =  targetType->Protocols.NumProtocols;
-  if (numProtos != 1)
-    return false;
-  const ProtocolDescriptor *protocol = targetType->Protocols[0];
-  bool isAnyObjectProtocol =
-      protocol->Flags.getSpecialProtocol() == SpecialProtocol::AnyObject;
-  // Assert that AnyObject does not need any witness tables. We rely on this.
-  assert(!isAnyObjectProtocol || !protocol->Flags.needsWitnessTable() &&
-         "AnyObject should not require witness tables");
-  return isAnyObjectProtocol;
+  return (numProtos == 0 &&
+          targetType->getSuperclassConstraint() == nullptr &&
+          targetType->isClassBounded());
 }
 
 /// Given a possibly-existential value, find its dynamic type and the
@@ -688,7 +424,8 @@ static void
 findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
                         OpaqueValue *&outValue, const Metadata *&outType,
                         bool &inoutCanTake,
-                        bool isTargetTypeAnyObject) {
+                        bool isTargetTypeAnyObject,
+                        bool isTargetExistentialMetatype) {
   switch (type->getKind()) {
   case MetadataKind::Class:
   case MetadataKind::ObjCClassWrapper:
@@ -702,6 +439,15 @@ findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
 
   case MetadataKind::Existential: {
     auto existentialType = cast<ExistentialTypeMetadata>(type);
+    inoutCanTake &= existentialType->mayTakeValue(value);
+
+    // We can't drill through existential containers unless the result is an
+    // existential metatype.
+    if (!isTargetExistentialMetatype) {
+      outValue = value;
+      outType = type;
+      return;
+    }
     
     switch (existentialType->getRepresentation()) {
     case ExistentialTypeRepresentation::Class: {
@@ -724,15 +470,15 @@ findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
         // inline value buffer storage.
         outValue = value;
         outType = 0;
-        inoutCanTake= true;
+        inoutCanTake = true;
         return;
       }
       OpaqueValue *innerValue
         = existentialType->projectValue(value);
-      inoutCanTake &= existentialType->mayTakeValue(value);
 
       return findDynamicValueAndType(innerValue, innerType,
-                                     outValue, outType, inoutCanTake, false);
+                                     outValue, outType, inoutCanTake, false,
+                                     isTargetExistentialMetatype);
     }
     }
   }
@@ -763,13 +509,17 @@ findDynamicValueAndType(OpaqueValue *value, const Metadata *type,
 }
 
 extern "C" const Metadata *
-swift::swift_getDynamicType(OpaqueValue *value, const Metadata *self) {
+swift::swift_getDynamicType(OpaqueValue *value, const Metadata *self,
+                            bool existentialMetatype) {
   OpaqueValue *outValue;
   const Metadata *outType;
   bool canTake = false;
-  findDynamicValueAndType(value, self, outValue, outType, canTake, false);
+  findDynamicValueAndType(value, self, outValue, outType, canTake,
+                          /*isAnyObject*/ false,
+                          existentialMetatype);
   return outType;
 }
+
 
 /// Given a possibly-existential value, deallocate any buffer in its storage.
 static void deallocateDynamicValue(OpaqueValue *value, const Metadata *type) {
@@ -787,16 +537,9 @@ static void deallocateDynamicValue(OpaqueValue *value, const Metadata *type) {
       break;
       
     case ExistentialTypeRepresentation::Opaque:
-      auto existential =
-        reinterpret_cast<OpaqueExistentialContainer*>(value);
-
-      // Handle the possibility of nested existentials.
-      OpaqueValue *existentialValue =
-        existential->Type->vw_projectBuffer(&existential->Buffer);
-      deallocateDynamicValue(existentialValue, existential->Type);
-
-      // Deallocate the buffer.
-      existential->Type->vw_deallocateBuffer(&existential->Buffer);
+      swift::fatalError(
+          0 /* flags */,
+          "Attempting to move out of a copy-on-write existential");
       break;
     }
     return;
@@ -824,7 +567,7 @@ static void deallocateDynamicValue(OpaqueValue *value, const Metadata *type) {
 
 #if SWIFT_OBJC_INTEROP
 SWIFT_CC(c) SWIFT_RUNTIME_EXPORT
-extern "C" id
+id
 swift_dynamicCastMetatypeToObjectConditional(const Metadata *metatype) {
   switch (metatype->getKind()) {
   case MetadataKind::Class:
@@ -856,7 +599,7 @@ swift_dynamicCastMetatypeToObjectConditional(const Metadata *metatype) {
 }
 
 SWIFT_CC(c) SWIFT_RUNTIME_EXPORT
-extern "C" id
+id
 swift_dynamicCastMetatypeToObjectUnconditional(const Metadata *metatype) {
   switch (metatype->getKind()) {
   case MetadataKind::Class:
@@ -907,10 +650,10 @@ extern "C" id swift_stdlib_getErrorEmbeddedNSErrorIndirect(
 /******************************************************************************/
 
 /// Nominal type descriptor for Swift.AnyHashable.
-extern "C" const NominalTypeDescriptor _TMnVs11AnyHashable;
+extern "C" const NominalTypeDescriptor STRUCT_TYPE_DESCR_SYM(s11AnyHashable);
 
 static bool isAnyHashableType(const StructMetadata *type) {
-  return type->getDescription() == &_TMnVs11AnyHashable;
+  return type->getDescription() == &STRUCT_TYPE_DESCR_SYM(s11AnyHashable);
 }
 
 static bool isAnyHashableType(const Metadata *type) {
@@ -942,7 +685,8 @@ static bool _dynamicCastToAnyHashable(OpaqueValue *destination,
   ValueBuffer buffer;
   bool mustDeallocBuffer = false;
   if (!(flags & DynamicCastFlags::TakeOnSuccess)) {
-    source = sourceType->vw_initializeBufferWithCopy(&buffer, source);
+    auto *valueAddr = sourceType->allocateBufferIn(&buffer);
+    source = sourceType->vw_initializeWithCopy(valueAddr, source);
     mustDeallocBuffer = true;
   }
 
@@ -952,7 +696,7 @@ static bool _dynamicCastToAnyHashable(OpaqueValue *destination,
 
   // Deallocate the buffer if we used it.
   if (mustDeallocBuffer) {
-    sourceType->vw_deallocateBuffer(&buffer);
+    sourceType->deallocateBufferIn(&buffer);
   }
 
   // The cast succeeded.
@@ -1009,7 +753,8 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
   // We don't care what the target type of a cast from class to AnyObject is.
   // srcDynamicType will be set to a nullptr in this case to save a lookup.
   findDynamicValueAndType(src, srcType, srcDynamicValue, srcDynamicType,
-                          canConsumeDynamicValue, isTargetTypeAnyObject);
+                          canConsumeDynamicValue, isTargetTypeAnyObject,
+                          /*isExistentialMetatype*/ true);
 
   // Recursive casts on the dynamic value should not destroy the source
   // if findDynamicValueAndType doesn't allow it.
@@ -1068,7 +813,7 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
 #if SWIFT_OBJC_INTEROP
       // If the destination type is a set of protocols that SwiftValue
       // implements, we're fine.
-      if (findSwiftValueConformances(targetType->Protocols,
+      if (findSwiftValueConformances(targetType,
                                      destExistential->getWitnessTables())) {
         bool consumeValue = dynamicFlags & DynamicCastFlags::TakeOnSuccess;
         destExistential->Value =
@@ -1121,7 +866,7 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
         maybeDeallocateSource(result);
         return result;
       }
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
 
     case MetadataKind::Enum:
     case MetadataKind::Optional:
@@ -1139,7 +884,7 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
         return success;
       }
 #endif
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
 
     case MetadataKind::Function:
     case MetadataKind::HeapLocalVariable:
@@ -1155,14 +900,14 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
     // container with a class instance to AnyObject. In this case no check is
     // necessary.
     if (srcDynamicType && !_conformsToProtocols(srcDynamicValue, srcDynamicType,
-                              targetType->Protocols,
+                              targetType,
                               destExistential->getWitnessTables()))
       return fallbackForNonDirectConformance();
 
     auto object = *(reinterpret_cast<HeapObject**>(srcDynamicValue));
     destExistential->Value = object;
     if (!canConsumeDynamicValue || !(flags & DynamicCastFlags::TakeOnSuccess)) {
-      swift_retain(object);
+      swift_unknownRetain(object);
     }
     maybeDeallocateSource(true);
     return true;
@@ -1173,18 +918,18 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
 
     // Check for protocol conformances and fill in the witness tables.
     if (!_conformsToProtocols(srcDynamicValue, srcDynamicType,
-                              targetType->Protocols,
+                              targetType,
                               destExistential->getWitnessTables()))
       return fallbackForNonDirectConformance();
 
     // Fill in the type and value.
     destExistential->Type = srcDynamicType;
     if (canConsumeDynamicValue && (flags & DynamicCastFlags::TakeOnSuccess)) {
-      srcDynamicType->vw_initializeBufferWithTake(&destExistential->Buffer,
-                                                  srcDynamicValue);
+      auto *value = srcDynamicType->allocateBoxForExistentialIn(&destExistential->Buffer);
+      srcDynamicType->vw_initializeWithTake(value, srcDynamicValue);
     } else {
-      srcDynamicType->vw_initializeBufferWithCopy(&destExistential->Buffer,
-                                                  srcDynamicValue);
+      auto *value = srcDynamicType->allocateBoxForExistentialIn(&destExistential->Buffer);
+      srcDynamicType->vw_initializeWithCopy(value, srcDynamicValue);
     }
     maybeDeallocateSource(true);
     return true;
@@ -1197,7 +942,7 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
     assert(targetType->Protocols.NumProtocols == 1);
     const WitnessTable *errorWitness;
     if (!_conformsToProtocols(srcDynamicValue, srcDynamicType,
-                              targetType->Protocols,
+                              targetType,
                               &errorWitness))
       return fallbackForNonDirectConformance();
 
@@ -1223,6 +968,8 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
     return true;
   }
   }
+
+  swift_runtime_unreachable("Unhandled ExistentialTypeRepresentation in switch.");
 }
 
 /******************************************************************************/
@@ -1232,6 +979,8 @@ static bool _dynamicCastToExistential(OpaqueValue *dest,
 static const void *
 _dynamicCastUnknownClassToExistential(const void *object,
                                     const ExistentialTypeMetadata *targetType) {
+  // FIXME: check superclass constraint here.
+
   for (unsigned i = 0, e = targetType->Protocols.NumProtocols; i < e; ++i) {
     const ProtocolDescriptor *protocol = targetType->Protocols[i];
 
@@ -1242,10 +991,6 @@ _dynamicCastUnknownClassToExistential(const void *object,
       return nullptr;
     case ProtocolDispatchStrategy::ObjC:
 #if SWIFT_OBJC_INTEROP
-      // All classes conform to AnyObject.
-      if (protocol->Flags.getSpecialProtocol() == SpecialProtocol::AnyObject)
-        break;
-
       if (!objectConformsToObjCProtocol(object, protocol))
         return nullptr;
       break;
@@ -1253,13 +998,6 @@ _dynamicCastUnknownClassToExistential(const void *object,
       assert(false && "ObjC interop disabled?!");
       return nullptr;
 #endif
-    case ProtocolDispatchStrategy::Empty:
-      // The only non-@objc, non-witness-table-requiring protocol should be
-      // AnyObject for now.
-      assert(protocol->Flags.getSpecialProtocol() == SpecialProtocol::AnyObject
-             && "swift protocols besides AnyObject should always require a "
-                "witness table");
-      break;
     }
   }
   
@@ -1386,7 +1124,7 @@ swift::swift_dynamicCastMetatype(const Metadata *sourceType,
     // Get the actual class object.
     targetType = static_cast<const ObjCClassWrapperMetadata*>(targetType)
       ->Class;
-    SWIFT_FALLTHROUGH;
+    LLVM_FALLTHROUGH;
   case MetadataKind::Class:
     // The source value must also be a class; otherwise the cast fails.
     switch (sourceType->getKind()) {
@@ -1394,7 +1132,7 @@ swift::swift_dynamicCastMetatype(const Metadata *sourceType,
       // Get the actual class object.
       sourceType = static_cast<const ObjCClassWrapperMetadata*>(sourceType)
         ->Class;
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     case MetadataKind::Class: {
       // Check if the source is a subclass of the target.
 #if SWIFT_OBJC_INTEROP
@@ -1441,7 +1179,7 @@ swift::swift_dynamicCastMetatype(const Metadata *sourceType,
       // Get the actual class object.
       sourceType = static_cast<const ObjCClassWrapperMetadata*>(sourceType)
         ->Class;
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     case MetadataKind::Class:
     case MetadataKind::ForeignClass:
       // Check if the source is a subclass of the target.
@@ -1484,6 +1222,8 @@ swift::swift_dynamicCastMetatype(const Metadata *sourceType,
       return nullptr;
     return origSourceType;
   }
+
+  swift_runtime_unreachable("Unhandled MetadataKind in switch.");
 }
 
 const Metadata *
@@ -1496,7 +1236,7 @@ swift::swift_dynamicCastMetatypeUnconditional(const Metadata *sourceType,
     // Get the actual class object.
     targetType = static_cast<const ObjCClassWrapperMetadata*>(targetType)
       ->Class;
-    SWIFT_FALLTHROUGH;
+    LLVM_FALLTHROUGH;
   case MetadataKind::Class:
     // The source value must also be a class; otherwise the cast fails.
     switch (sourceType->getKind()) {
@@ -1504,7 +1244,7 @@ swift::swift_dynamicCastMetatypeUnconditional(const Metadata *sourceType,
       // Get the actual class object.
       sourceType = static_cast<const ObjCClassWrapperMetadata*>(sourceType)
         ->Class;
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     case MetadataKind::Class: {
       // Check if the source is a subclass of the target.
 #if SWIFT_OBJC_INTEROP
@@ -1552,7 +1292,7 @@ swift::swift_dynamicCastMetatypeUnconditional(const Metadata *sourceType,
       // Get the actual class object.
       sourceType = static_cast<const ObjCClassWrapperMetadata*>(sourceType)
         ->Class;
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     case MetadataKind::Class:
     case MetadataKind::ForeignClass:
       // Check if the source is a subclass of the target.
@@ -1594,6 +1334,8 @@ swift::swift_dynamicCastMetatypeUnconditional(const Metadata *sourceType,
       swift_dynamicCastFailure(sourceType, targetType);
     return origSourceType;
   }
+
+  swift_runtime_unreachable("Unhandled MetadataKind in switch.");
 }
 
 /******************************************************************************/
@@ -1659,10 +1401,10 @@ static bool _dynamicCastUnknownClassIndirect(OpaqueValue *dest,
 /******************************************************************************/
 
 #if SWIFT_OBJC_INTEROP
-extern "C" const ProtocolDescriptor _TMps5Error;
+extern "C" const ProtocolDescriptor PROTOCOL_DESCR_SYM(s5Error);
 
 static const WitnessTable *findErrorWitness(const Metadata *srcType) {
-  return swift_conformsToProtocol(srcType, &_TMps5Error);
+  return swift_conformsToProtocol(srcType, &PROTOCOL_DESCR_SYM(s5Error));
 }
 #endif
 
@@ -1692,15 +1434,19 @@ static bool _dynamicCastToUnknownClassFromExistential(OpaqueValue *dest,
     auto opaqueContainer =
       reinterpret_cast<OpaqueExistentialContainer*>(src);
     auto srcCapturedType = opaqueContainer->Type;
-    OpaqueValue *srcValue =
-      srcCapturedType->vw_projectBuffer(&opaqueContainer->Buffer);
-    bool result = swift_dynamicCast(dest,
-                                    srcValue,
-                                    srcCapturedType,
-                                    targetType,
-                                    flags);
+    OpaqueValue *srcValue = srcType->projectValue(src);
+    // Can't 'take' out of a non-unique box. So we will force a copy.
+    auto subFlags = flags;
     if (src != srcValue)
-      _maybeDeallocateOpaqueExistential(src, result, flags);
+      subFlags = subFlags - (DynamicCastFlags::DestroyOnFailure
+                             | DynamicCastFlags::TakeOnSuccess);
+    bool result = swift_dynamicCast(dest, srcValue, srcCapturedType, targetType,
+                                    subFlags);
+    // We were supposed to 'take' the source but we have copied. Reconcile by
+    // destroying the source.
+    if (src != srcValue)
+      if (shouldDeallocateSource(result, flags))
+        srcType->vw_destroy(src);
     return result;
   }
   case ExistentialTypeRepresentation::Error: {
@@ -1727,6 +1473,9 @@ static bool _dynamicCastToUnknownClassFromExistential(OpaqueValue *dest,
     return result;
   }
   }
+
+  swift_runtime_unreachable(
+      "Unhandled ExistentialTypeRepresentation in switch.");
 }
 
 static void unwrapExistential(OpaqueValue *src,
@@ -1749,9 +1498,12 @@ static void unwrapExistential(OpaqueValue *src,
     case ExistentialTypeRepresentation::Opaque: {
       auto opaqueContainer = reinterpret_cast<OpaqueExistentialContainer*>(src);
       srcCapturedType = opaqueContainer->Type;
-      srcValue = srcCapturedType->vw_projectBuffer(&opaqueContainer->Buffer);
+      srcValue = srcType->projectValue(src);
+      // Can't take out of possibly shared existential boxes.
+      canTake = (src == srcValue);
+      assert(canTake == srcCapturedType->getValueWitnesses()->isValueInline() &&
+             "Only inline storage is take-able");
       isOutOfLine = (src != srcValue);
-      canTake = true;
       break;
     }
     case ExistentialTypeRepresentation::Error: {
@@ -1802,13 +1554,8 @@ static bool _dynamicCastFromExistential(OpaqueValue *dest,
     if (shouldDeallocateSource(result, flags))
       srcType->vw_destroy(src);
   } else {
-    // swift_dynamicCast took or destroyed the value as per the original request
-    // We may still have an opaque existential container to deallocate.
-    if (isOutOfLine) {
-      assert(srcType->getRepresentation()
-               == ExistentialTypeRepresentation::Opaque);
-      _maybeDeallocateOpaqueExistential(src, result, flags);
-    }
+    assert(!isOutOfLine &&
+           "Should only see inline representations of existentials");
   }
 
   return result;
@@ -1905,11 +1652,19 @@ static bool _dynamicCastToMetatype(OpaqueValue *dest,
     case ExistentialTypeRepresentation::Opaque: {
       auto srcExistential = (OpaqueExistentialContainer*) src;
       auto srcValueType = srcExistential->Type;
-      auto srcValue = srcValueType->vw_projectBuffer(&srcExistential->Buffer);
-      bool result = _dynamicCastToMetatype(dest, srcValue, srcValueType,
-                                           targetType, flags);
+      // Can't 'take' out of a non-unique box. So we will force a copy.
+      auto subFlags = flags;
+      auto srcValue = srcExistentialType->projectValue(src);
       if (src != srcValue)
-        _maybeDeallocateOpaqueExistential(src, result, flags);
+        subFlags = subFlags - (DynamicCastFlags::DestroyOnFailure |
+                               DynamicCastFlags::TakeOnSuccess);
+      bool result = _dynamicCastToMetatype(dest, srcValue, srcValueType,
+                                           targetType, subFlags);
+      // We were supposed to 'take' the source but we have copied. Reconcile by
+      // destroying the source.
+      if (src != srcValue)
+        if (shouldDeallocateSource(result, flags))
+          srcType->vw_destroy(src);
       return result;
     }
     case ExistentialTypeRepresentation::Error: {
@@ -1974,18 +1729,14 @@ static bool _dynamicCastMetatypeToExistentialMetatype(OpaqueValue *dest,
         dyn_cast<ExistentialTypeMetadata>(targetInstanceType)) {
     // Check for conformance to all the protocols.
     // TODO: collect the witness tables.
-    auto &protocols = targetInstanceTypeAsExistential->Protocols;
     const WitnessTable **conformance
       = writeDestMetatype ? destMetatype->getWitnessTables() : nullptr;
-    for (unsigned i = 0, n = protocols.NumProtocols; i != n; ++i) {
-      const ProtocolDescriptor *protocol = protocols[i];
-      if (!_conformsToProtocol(nullptr, srcMetatype, protocol, conformance)) {
-        if (flags & DynamicCastFlags::Unconditional)
-          swift_dynamicCastFailure(srcMetatype, targetType);
-        return false;
-      }
-      if (conformance && protocol->Flags.needsWitnessTable())
-        ++conformance;
+    if (!_conformsToProtocols(nullptr, srcMetatype,
+                              targetInstanceTypeAsExistential,
+                              conformance)) {
+      if (flags & DynamicCastFlags::Unconditional)
+        swift_dynamicCastFailure(srcMetatype, targetType);
+      return false;
     }
 
     if (writeDestMetatype)
@@ -2075,11 +1826,19 @@ static bool _dynamicCastToExistentialMetatype(OpaqueValue *dest,
     case ExistentialTypeRepresentation::Opaque: {
       auto srcExistential = (OpaqueExistentialContainer*) src;
       auto srcValueType = srcExistential->Type;
-      auto srcValue = srcValueType->vw_projectBuffer(&srcExistential->Buffer);
-      bool result = _dynamicCastToExistentialMetatype(dest, srcValue, srcValueType,
-                                                      targetType, flags);
+      auto subFlags = flags;
+      auto srcValue = srcExistentialType->projectValue(src);
+      // Can't 'take' out of a non-unique box. So we will force a copy.
       if (src != srcValue)
-        _maybeDeallocateOpaqueExistential(src, result, flags);
+        subFlags = subFlags - (DynamicCastFlags::DestroyOnFailure |
+                               DynamicCastFlags::TakeOnSuccess);
+      bool result = _dynamicCastToExistentialMetatype(
+          dest, srcValue, srcValueType, targetType, subFlags);
+      // We were supposed to 'take' the source but we have copied. Reconcile by
+      // destroying the source.
+      if (src != srcValue)
+        if (shouldDeallocateSource(result, flags))
+          srcType->vw_destroy(src);
       return result;
     }
     case ExistentialTypeRepresentation::Error: {
@@ -2196,6 +1955,8 @@ static bool _dynamicCastToFunction(OpaqueValue *dest,
   case MetadataKind::Tuple:
     return _fail(src, srcType, targetType, flags);
   }
+
+  swift_runtime_unreachable("Unhandled MetadataKind in switch.");
 }
 
 /******************************************************************************/
@@ -2235,7 +1996,7 @@ struct OptionalCastResult {
   const Metadata* payloadType;
 };
 
-}
+} // end anonymous namespace
 
 /// Handle optional unwrapping of the cast source.
 /// \returns {true, nullptr} if the cast succeeds without unwrapping.
@@ -2304,12 +2065,14 @@ static bool tryDynamicCastBoxedSwiftValue(OpaqueValue *dest,
                                           const Metadata *srcType,
                                           const Metadata *targetType,
                                           DynamicCastFlags flags) {
+  // These flag combinations are not handled here.
+  assert(!(flags & DynamicCastFlags::Unconditional));
+  assert(!(flags & DynamicCastFlags::DestroyOnFailure));
+
   // Swift type should be AnyObject or a class type.
   if (!srcType->isAnyClass()) {
     auto existential = dyn_cast<ExistentialTypeMetadata>(srcType);
-    if (!existential ||
-        existential->Flags.getSpecialProtocol()
-          != SpecialProtocol::AnyObject)
+    if (!existential || !isAnyObjectExistentialType(existential))
       return false;
   }
   
@@ -2343,7 +2106,8 @@ static bool tryDynamicCastBoxedSwiftValue(OpaqueValue *dest,
   
   // Maybe we can cast the boxed value to our destination type somehow.
   auto innerFlags = flags - DynamicCastFlags::TakeOnSuccess
-                          - DynamicCastFlags::DestroyOnFailure;
+                          - DynamicCastFlags::DestroyOnFailure
+                          - DynamicCastFlags::Unconditional;
   if (swift_dynamicCast(dest, const_cast<OpaqueValue*>(boxedValue),
                         boxedType, targetType, innerFlags)) {
     // Release the box if we need to.
@@ -2361,13 +2125,13 @@ static bool tryDynamicCastBoxedSwiftValue(OpaqueValue *dest,
 /******************************************************************************/
 
 /// Nominal type descriptor for Swift.Array.
-extern "C" const NominalTypeDescriptor _TMnSa;
+extern "C" const NominalTypeDescriptor NOMINAL_TYPE_DESCR_SYM(Sa);
 
 /// Nominal type descriptor for Swift.Dictionary.
-extern "C" const NominalTypeDescriptor _TMnVs10Dictionary;
+extern "C" const NominalTypeDescriptor STRUCT_TYPE_DESCR_SYM(s10Dictionary);
 
 /// Nominal type descriptor for Swift.Set.
-extern "C" const NominalTypeDescriptor _TMnVs3Set;
+extern "C" const NominalTypeDescriptor STRUCT_TYPE_DESCR_SYM(s3Set);
 
 SWIFT_CC(swift)
 extern "C"
@@ -2435,10 +2199,10 @@ static bool _dynamicCastStructToStruct(OpaqueValue *destination,
   auto descriptor = sourceType->Description.get();
   auto targetDescriptor = targetType->Description.get();
   if (descriptor != targetDescriptor) {
-    if (descriptor == &_TMnVs11AnyHashable) {
+    if (descriptor == &STRUCT_TYPE_DESCR_SYM(s11AnyHashable)) {
       return _dynamicCastFromAnyHashable(destination, source,
                                          sourceType, targetType, flags);
-    } else if (targetDescriptor == &_TMnVs11AnyHashable) {
+    } else if (targetDescriptor == &STRUCT_TYPE_DESCR_SYM(s11AnyHashable)) {
       return _dynamicCastToAnyHashable(destination, source,
                                        sourceType, targetType, flags);
     } else {
@@ -2452,7 +2216,7 @@ static bool _dynamicCastStructToStruct(OpaqueValue *destination,
   bool result;
 
   // Arrays.
-  if (descriptor == &_TMnSa) {
+  if (descriptor == &NOMINAL_TYPE_DESCR_SYM(Sa)) {
     if (flags & DynamicCastFlags::Unconditional) {
       _swift_arrayDownCastIndirect(source, destination,
                                    sourceArgs[0], targetArgs[0]);
@@ -2464,7 +2228,7 @@ static bool _dynamicCastStructToStruct(OpaqueValue *destination,
     }
 
   // Dictionaries.
-  } else if (descriptor == &_TMnVs10Dictionary) {
+  } else if (descriptor == &STRUCT_TYPE_DESCR_SYM(s10Dictionary)) {
     if (flags & DynamicCastFlags::Unconditional) {
       _swift_dictionaryDownCastIndirect(source, destination,
                                         sourceArgs[0], sourceArgs[1],
@@ -2480,7 +2244,7 @@ static bool _dynamicCastStructToStruct(OpaqueValue *destination,
     }
 
   // Sets.
-  } else if (descriptor == &_TMnVs3Set) {
+  } else if (descriptor == &STRUCT_TYPE_DESCR_SYM(s3Set)) {
     if (flags & DynamicCastFlags::Unconditional) {
       _swift_setDownCastIndirect(source, destination,
                                  sourceArgs[0], targetArgs[0],
@@ -2621,9 +2385,8 @@ static bool _dynamicCastTupleToTuple(OpaqueValue *destination,
 /******************************************************************************/
 
 /// Perform a dynamic cast to an arbitrary type.
-SWIFT_RT_ENTRY_VISIBILITY
-bool swift::swift_dynamicCast(OpaqueValue *dest,
-                              OpaqueValue *src,
+
+bool swift::swift_dynamicCast(OpaqueValue *dest, OpaqueValue *src,
                               const Metadata *srcType,
                               const Metadata *targetType,
                               DynamicCastFlags flags)
@@ -2635,10 +2398,19 @@ bool swift::swift_dynamicCast(OpaqueValue *dest,
     return unwrapResult.success;
 
 #if SWIFT_OBJC_INTEROP
-  // A class or AnyObject reference may point at a boxed _SwiftValue.
-  if (tryDynamicCastBoxedSwiftValue(dest, src, srcType,
-                                    targetType, flags)) {
-    return true;
+  // A class or AnyObject reference may point to a _SwiftValue box.
+  {
+    auto innerFlags = flags - DynamicCastFlags::Unconditional
+                            - DynamicCastFlags::DestroyOnFailure;
+    if (tryDynamicCastBoxedSwiftValue(dest, src, srcType,
+                                      targetType, innerFlags)) {
+      // TakeOnSuccess was handled inside tryDynamicCastBoxedSwiftValue().
+      return true;
+    } else {
+      // Couldn't cast boxed value to targetType.
+      // Fall through and try to cast the _SwiftValue box itself to targetType.
+      // (for example, casting _SwiftValue to NSObject will be successful)
+    }
   }
 #endif
 
@@ -2651,8 +2423,7 @@ bool swift::swift_dynamicCast(OpaqueValue *dest,
     if (auto srcExistentialType = dyn_cast<ExistentialTypeMetadata>(srcType)) {
 #if SWIFT_OBJC_INTEROP
       // If coming from AnyObject, we may want to bridge.
-      if (srcExistentialType->Flags.getSpecialProtocol()
-            == SpecialProtocol::AnyObject) {
+      if (isAnyObjectExistentialType(srcExistentialType)) {
         if (auto targetBridgeWitness = findBridgeWitness(targetType)) {
           return _dynamicCastClassToValueViaObjCBridgeable(dest, src, srcType,
                                                            targetType,
@@ -2694,7 +2465,7 @@ bool swift::swift_dynamicCast(OpaqueValue *dest,
         return true;
       }
     }
-    SWIFT_FALLTHROUGH;
+    LLVM_FALLTHROUGH;
 #endif
 
   case MetadataKind::ForeignClass:
@@ -2721,7 +2492,7 @@ bool swift::swift_dynamicCast(OpaqueValue *dest,
         return _dynamicCastFromAnyHashable(dest, src, srcType,
                                            targetType, flags);
       }
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
 
     case MetadataKind::Enum:
     case MetadataKind::Optional: {
@@ -2831,7 +2602,7 @@ bool swift::swift_dynamicCast(OpaqueValue *dest,
       break;
     }
 
-    SWIFT_FALLTHROUGH;
+    LLVM_FALLTHROUGH;
 
   // The non-polymorphic types.
   case MetadataKind::HeapLocalVariable:
@@ -2904,25 +2675,28 @@ struct _ObjectiveCBridgeableWitnessTable {
                      const _ObjectiveCBridgeableWitnessTable *witnessTable);
 
   // func _bridgeToObjectiveC() -> _ObjectiveCType
+  SWIFT_CC(swift)
   HeapObject *(*bridgeToObjectiveC)(
-                OpaqueValue *self, const Metadata *Self,
+                SWIFT_CONTEXT OpaqueValue *self, const Metadata *Self,
                 const _ObjectiveCBridgeableWitnessTable *witnessTable);
 
   // class func _forceBridgeFromObjectiveC(x: _ObjectiveCType,
   //                                       inout result: Self?)
+  SWIFT_CC(swift)
   void (*forceBridgeFromObjectiveC)(
          HeapObject *sourceValue,
          OpaqueValue *result,
-         const Metadata *self,
+         SWIFT_CONTEXT const Metadata *self,
          const Metadata *selfType,
          const _ObjectiveCBridgeableWitnessTable *witnessTable);
 
   // class func _conditionallyBridgeFromObjectiveC(x: _ObjectiveCType,
   //                                              inout result: Self?) -> Bool
+  SWIFT_CC(swift)
   bool (*conditionallyBridgeFromObjectiveC)(
          HeapObject *sourceValue,
          OpaqueValue *result,
-         const Metadata *self,
+         SWIFT_CONTEXT const Metadata *self,
          const Metadata *selfType,
          const _ObjectiveCBridgeableWitnessTable *witnessTable);
 };
@@ -2930,7 +2704,7 @@ struct _ObjectiveCBridgeableWitnessTable {
 
 } // unnamed namespace
 
-extern "C" const ProtocolDescriptor _TMps21_ObjectiveCBridgeable;
+extern "C" const ProtocolDescriptor PROTOCOL_DESCR_SYM(s21_ObjectiveCBridgeable);
 
 /// Dynamic cast from a value type that conforms to the _ObjectiveCBridgeable
 /// protocol to a class type, first by bridging the value to its Objective-C
@@ -3039,7 +2813,7 @@ static bool _dynamicCastClassToValueViaObjCBridgeable(
   }
 
   // The extra byte is for the tag.
-  auto targetSize = targetType->getValueWitnesses()->size + 1;
+  auto targetSize = targetType->getValueWitnesses()->getSize() + 1;
   auto targetAlignMask = targetType->getValueWitnesses()->getAlignmentMask();
 
   // Object that frees a buffer when it goes out of scope.
@@ -3132,11 +2906,11 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
     if (consume) {
       if (canTake) {
         if (isOutOfLine) {
-          // Should only be true of opaque existentials right now.
-          assert(srcExistentialTy->getRepresentation()
-                   == ExistentialTypeRepresentation::Opaque);
-          auto container = reinterpret_cast<OpaqueExistentialContainer*>(src);
-          srcInnerType->vw_deallocateBuffer(&container->Buffer);
+          // Copy-on-write existentials share boxed and can't be 'take'n out of
+          // without a uniqueness check (which we currently don't do).
+          swift::fatalError(
+              0 /* flags */,
+              "Attempting to move out of a copy-on-write existential");
         }
       } else {
         // We didn't take the value, so clean up the existential value.
@@ -3184,7 +2958,6 @@ static id bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
 }
 
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C"
 id _swift_bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
                                                 const Metadata *srcType) {
   return bridgeAnythingNonVerbatimToObjectiveC(src, srcType, /*consume*/ true);
@@ -3196,12 +2969,15 @@ id _swift_bridgeAnythingNonVerbatimToObjectiveC(OpaqueValue *src,
 // documentation.
 //===----------------------------------------------------------------------===//
 
-extern "C" const _ObjectiveCBridgeableWitnessTable
-_TWPVs19_BridgeableMetatypes21_ObjectiveCBridgeables;
+#define BRIDGING_CONFORMANCE_SYM \
+  MANGLE_SYM(s19_BridgeableMetatypeVs21_ObjectiveCBridgeablesWP)
+
+extern "C" const _ObjectiveCBridgeableWitnessTable BRIDGING_CONFORMANCE_SYM;
 
 static const _ObjectiveCBridgeableWitnessTable *
 findBridgeWitness(const Metadata *T) {
-  auto w = swift_conformsToProtocol(T, &_TMps21_ObjectiveCBridgeable);
+  auto w = swift_conformsToProtocol(T,
+                                &PROTOCOL_DESCR_SYM(s21_ObjectiveCBridgeable));
   if (LLVM_LIKELY(w))
     return reinterpret_cast<const _ObjectiveCBridgeableWitnessTable *>(w);
   // Class and ObjC existential metatypes can be bridged, but metatypes can't
@@ -3211,14 +2987,14 @@ findBridgeWitness(const Metadata *T) {
   case MetadataKind::Metatype: {
     auto metaTy = static_cast<const MetatypeMetadata *>(T);
     if (metaTy->InstanceType->isAnyClass())
-      return &_TWPVs19_BridgeableMetatypes21_ObjectiveCBridgeables;
+      return &BRIDGING_CONFORMANCE_SYM;
     break;
   }
   case MetadataKind::ExistentialMetatype: {
     auto existentialMetaTy =
       static_cast<const ExistentialMetatypeMetadata *>(T);
     if (existentialMetaTy->isObjC())
-      return &_TWPVs19_BridgeableMetatypes21_ObjectiveCBridgeables;
+      return &BRIDGING_CONFORMANCE_SYM;
     break;
   }
 
@@ -3241,7 +3017,7 @@ findBridgeWitness(const Metadata *T) {
 }
 
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" const Metadata *_swift_getBridgedNonVerbatimObjectiveCType(
+const Metadata *_swift_getBridgedNonVerbatimObjectiveCType(
   const Metadata *value, const Metadata *T
 ) {
   // Classes and Objective-C existentials bridge verbatim.
@@ -3262,7 +3038,7 @@ extern "C" const Metadata *_swift_getBridgedNonVerbatimObjectiveCType(
 //     inout result: Any?
 // )
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" void
+void
 _swift_bridgeNonVerbatimFromObjectiveCToAny(HeapObject *sourceValue,
                                             OpaqueValue *destValue);
 
@@ -3272,7 +3048,7 @@ _swift_bridgeNonVerbatimFromObjectiveCToAny(HeapObject *sourceValue,
 //     inout result: NativeType?
 // )
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" void
+void
 _swift_bridgeNonVerbatimBoxedValue(const OpaqueValue *sourceValue,
                                    OpaqueValue *destValue,
                                    const Metadata *nativeType);
@@ -3286,7 +3062,8 @@ static bool tryBridgeNonVerbatimFromObjectiveCUniversal(
   // If the type is the Any type, we can bridge by "upcasting" the object
   // to Any.
   if (auto nativeExistential = dyn_cast<ExistentialTypeMetadata>(nativeType)) {
-    if (nativeExistential->Protocols.NumProtocols == 0) {
+    if (nativeExistential->Protocols.NumProtocols == 0 &&
+        !nativeExistential->isClassBounded()) {
       _swift_bridgeNonVerbatimFromObjectiveCToAny(sourceValue,
                                                   destValue);
       return true;
@@ -3317,7 +3094,7 @@ static bool tryBridgeNonVerbatimFromObjectiveCUniversal(
 //     inout result: T?
 // )
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" void
+void
 _swift_bridgeNonVerbatimFromObjectiveC(
   HeapObject *sourceValue,
   const Metadata *nativeType,
@@ -3360,7 +3137,7 @@ _swift_bridgeNonVerbatimFromObjectiveC(
 //   inout result: T?
 // ) -> Bool
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" bool
+bool
 _swift_bridgeNonVerbatimFromObjectiveCConditional(
   HeapObject *sourceValue,
   const Metadata *nativeType,
@@ -3404,7 +3181,7 @@ _swift_bridgeNonVerbatimFromObjectiveCConditional(
 
 // func _isBridgedNonVerbatimToObjectiveC<T>(x: T.Type) -> Bool
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" bool _swift_isBridgedNonVerbatimToObjectiveC(
+bool _swift_isBridgedNonVerbatimToObjectiveC(
   const Metadata *value, const Metadata *T
 ) {
   assert(!swift_isClassOrObjCExistentialTypeImpl(T));
@@ -3416,11 +3193,12 @@ extern "C" bool _swift_isBridgedNonVerbatimToObjectiveC(
 
 // func _isClassOrObjCExistential<T>(x: T.Type) -> Bool
 SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" bool _swift_isClassOrObjCExistentialType(const Metadata *value,
+bool _swift_isClassOrObjCExistentialType(const Metadata *value,
                                                     const Metadata *T) {
   return swift_isClassOrObjCExistentialTypeImpl(T);
 }
 
+SWIFT_CC(swift)
 const Metadata *swift::_swift_class_getSuperclass(const Metadata *theClass) {
   if (const ClassMetadata *classType = theClass->getClassObject())
     if (classHasSuperclass(classType))
@@ -3429,11 +3207,11 @@ const Metadata *swift::_swift_class_getSuperclass(const Metadata *theClass) {
 }
 
 SWIFT_CC(c) SWIFT_RUNTIME_EXPORT
-extern "C" bool swift_isClassType(const Metadata *type) {
+bool swift_isClassType(const Metadata *type) {
   return Metadata::isAnyKindOfClass(type->getKind());
 }
 
 SWIFT_CC(c) SWIFT_RUNTIME_EXPORT
-extern "C" bool swift_isOptionalType(const Metadata *type) {
+bool swift_isOptionalType(const Metadata *type) {
   return type->getKind() == MetadataKind::Optional;
 }

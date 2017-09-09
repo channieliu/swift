@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -73,7 +73,6 @@ void IRGenModule::emitCoverageMapping() {
   // Now we need to build up the list of function records.
   llvm::LLVMContext &Ctx = LLVMContext;
   auto *Int32Ty = llvm::Type::getInt32Ty(Ctx);
-  auto *Int8PtrTy = llvm::Type::getInt8PtrTy(Ctx);
 
   llvm::Type *FunctionRecordTypes[] = {
 #define COVMAP_FUNC_RECORD(Type, LLVMType, Name, Init) LLVMType,
@@ -85,7 +84,6 @@ void IRGenModule::emitCoverageMapping() {
       llvm::StructType::get(Ctx, llvm::makeArrayRef(FunctionRecordTypes),
                             /*isPacked=*/true);
 
-  std::vector<llvm::Constant *> FunctionNames;
   std::vector<llvm::Constant *> FunctionRecords;
   std::vector<CounterMappingRegion> Regions;
   for (const auto &M : Mappings) {
@@ -97,8 +95,9 @@ void IRGenModule::emitCoverageMapping() {
           MR.Counter, /*FileID=*/0, MR.StartLine, MR.StartCol, MR.EndLine,
           MR.EndCol));
     // Append each function's regions into the encoded buffer.
-    llvm::coverage::CoverageMappingWriter W({FileID}, M.getExpressions(),
-                                            Regions);
+    ArrayRef<unsigned> VirtualFileMapping(FileID);
+    llvm::coverage::CoverageMappingWriter W(VirtualFileMapping,
+                                            M.getExpressions(), Regions);
     W.write(OS);
 
     std::string NameValue = llvm::getPGOFuncName(
@@ -106,9 +105,8 @@ void IRGenModule::emitCoverageMapping() {
         M.isPossiblyUsedExternally() ? llvm::GlobalValue::ExternalLinkage
                                      : llvm::GlobalValue::PrivateLinkage,
         M.getFile());
-    llvm::GlobalVariable *NamePtr = llvm::createPGOFuncNameVar(
+    llvm::createPGOFuncNameVar(
         *getModule(), llvm::GlobalValue::LinkOnceAnyLinkage, NameValue);
-    FunctionNames.push_back(llvm::ConstantExpr::getBitCast(NamePtr, Int8PtrTy));
 
     CurrentSize = OS.str().size();
     unsigned MappingLen = CurrentSize - PrevSize;
@@ -174,12 +172,4 @@ void IRGenModule::emitCoverageMapping() {
   CovData->setSection(getCoverageSection(*this));
   CovData->setAlignment(8);
   addUsedGlobal(CovData);
-
-  if (!FunctionNames.empty()) {
-    auto *NamesArrTy = llvm::ArrayType::get(Int8PtrTy, FunctionNames.size());
-    auto *NamesArrVal = llvm::ConstantArray::get(NamesArrTy, FunctionNames);
-    new llvm::GlobalVariable(*getModule(), NamesArrTy, true,
-                             llvm::GlobalValue::InternalLinkage, NamesArrVal,
-                             llvm::getCoverageUnusedNamesVarName());
-  }
 }

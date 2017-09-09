@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -30,6 +30,8 @@ namespace clang {
   class ASTContext;
   class CodeGenOptions;
   class Decl;
+  class DependencyCollector;
+  class DiagnosticConsumer;
   class EnumConstantDecl;
   class EnumDecl;
   class MacroInfo;
@@ -38,11 +40,12 @@ namespace clang {
   class Sema;
   class TargetInfo;
   class VisibleDeclConsumer;
+  class DeclarationName;
 }
 
 namespace swift {
-
 class ASTContext;
+class CompilerInvocation;
 class ClangImporterOptions;
 class ClangModuleUnit;
 class ClangNode;
@@ -77,14 +80,19 @@ public:
   /// \param ctx The ASTContext into which the module will be imported.
   /// The ASTContext's SearchPathOptions will be used for the Clang importer.
   ///
-  /// \param clangImporterOpts The options to use for the Clang importer.
+  /// \param importerOpts The options to use for the Clang importer.
+  ///
+  /// \param swiftPCHHash A hash of Swift's various options in a compiler
+  /// invocation, used to create a unique Bridging PCH if requested.
   ///
   /// \param tracker The object tracking files this compilation depends on.
   ///
   /// \returns a new Clang module importer, or null (with a diagnostic) if
   /// an error occurred.
   static std::unique_ptr<ClangImporter>
-  create(ASTContext &ctx, const ClangImporterOptions &clangImporterOpts,
+  create(ASTContext &ctx,
+         const ClangImporterOptions &importerOpts,
+         std::string swiftPCHHash = "",
          DependencyTracker *tracker = nullptr);
 
   ClangImporter(const ClangImporter &) = delete;
@@ -93,6 +101,18 @@ public:
   ClangImporter &operator=(ClangImporter &&) = delete;
 
   ~ClangImporter();
+
+  /// \brief Create a new clang::DependencyCollector customized to
+  /// ClangImporter's specific uses.
+  static std::shared_ptr<clang::DependencyCollector>
+  createDependencyCollector();
+
+  /// \brief Check whether the module with a given name can be imported without
+  /// importing it.
+  ///
+  /// Note that even if this check succeeds, errors may still occur if the
+  /// module is loaded in full.
+  virtual bool canImportModule(std::pair<Identifier, SourceLoc> named) override;
 
   /// \brief Import a module with the given module path.
   ///
@@ -164,7 +184,8 @@ public:
   /// -I or -F.
   ///
   /// \returns true if there was an error adding the search path.
-  bool addSearchPath(StringRef newSearchPath, bool isFramework) override;
+  bool addSearchPath(StringRef newSearchPath, bool isFramework,
+                     bool isSystem) override;
 
   /// Imports an Objective-C header file into the shared imported header module.
   ///
@@ -194,13 +215,16 @@ public:
   /// \param diagLoc A location to attach any diagnostics to if import fails.
   /// \param trackParsedSymbols If true, tracks decls and macros that were
   ///        parsed from the bridging header.
+  /// \param implicitImport If true, indicates that this import was implicit
+  ///        from a reference in a module file (deprecated behavior).
   ///
   /// \returns true if there was an error importing the header.
   ///
   /// \sa getImportedHeaderModule
   bool importBridgingHeader(StringRef header, ModuleDecl *adapter,
                             SourceLoc diagLoc = {},
-                            bool trackParsedSymbols = false);
+                            bool trackParsedSymbols = false,
+                            bool implicitImport = false);
 
   /// Returns the module that contains imports and declarations from all loaded
   /// Objective-C header files.
@@ -210,6 +234,20 @@ public:
 
   std::string getBridgingHeaderContents(StringRef headerPath, off_t &fileSize,
                                         time_t &fileModTime);
+
+  /// Makes a temporary replica of the ClangImporter's CompilerInstance, reads
+  /// an Objective-C header file into the replica and emits a PCH file of its
+  /// content. Delegates to clang for everything except construction of the
+  /// replica.
+  ///
+  /// \sa clang::GeneratePCHAction
+  bool emitBridgingPCH(StringRef headerPath,
+                       StringRef outputPCHPath);
+
+  /// Returns true if a clang CompilerInstance can successfully read in a PCH,
+  /// assuming it exists, with the current options. This can be used to find out
+  /// if we need to persist a PCH for later reuse.
+  bool canReadPCH(StringRef PCHFilename);
 
   const clang::Module *getClangOwningModule(ClangNode Node) const;
   bool hasTypedef(const clang::Decl *typeDecl) const;
@@ -223,6 +261,7 @@ public:
   clang::ASTContext &getClangASTContext() const override;
   clang::Preprocessor &getClangPreprocessor() const override;
   clang::Sema &getClangSema() const override;
+  const clang::CompilerInstance &getClangInstance() const override;
   clang::CodeGenOptions &getClangCodeGenOpts() const;
 
   std::string getClangModuleHash() const;
@@ -240,21 +279,20 @@ public:
   /// The return value may be an empty identifier, in which case the enum would
   /// not be imported.
   ///
-  /// This is mostly an implementation detail of the importer, but is also
-  /// used by the debugger.
+  /// This is not used by the importer itself, but is used by the debugger.
   Identifier getEnumConstantName(const clang::EnumConstantDecl *enumConstant);
 
   /// Writes the mangled name of \p clangDecl to \p os.
   void getMangledName(raw_ostream &os, const clang::NamedDecl *clangDecl) const;
 
   using ClangModuleLoader::addDependency;
-  
+
   // Print statistics from the Clang AST reader.
   void printStatistics() const override;
 
   /// Dump Swift lookup tables.
   void dumpSwiftLookupTables();
-  
+
   /// Given the path of a Clang module, collect the names of all its submodules.
   /// Calling this function does not load the module.
   void collectSubModuleNames(
@@ -263,6 +301,18 @@ public:
 
   /// Given a Clang module, decide whether this module is imported already.
   static bool isModuleImported(const clang::Module *M);
+
+  DeclName importName(const clang::NamedDecl *D,
+                      clang::DeclarationName givenName);
+
+  Optional<std::string>
+  getOrCreatePCH(const ClangImporterOptions &ImporterOptions,
+                 StringRef SwiftPCHHash);
+  Optional<std::string>
+  /// \param isExplicit true if the PCH filename was passed directly
+  /// with -import-objc-header option.
+  getPCHFilename(const ClangImporterOptions &ImporterOptions,
+                 StringRef SwiftPCHHash, bool &isExplicit);
 };
 
 ImportDecl *createImportDecl(ASTContext &Ctx, DeclContext *DC, ClangNode ClangN,

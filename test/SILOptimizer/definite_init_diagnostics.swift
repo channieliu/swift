@@ -14,6 +14,7 @@ func test1() -> Int {
 }
 
 func takes_inout(_ a: inout Int) {}
+func takes_inout_any(_ a: inout Any) {}
 func takes_closure(_ fn: () -> ()) {}
 
 class SomeClass { 
@@ -47,7 +48,7 @@ func test2() {
   // Address-of with Builtin.addressof.
   var a4 : Int            // expected-note {{variable defined here}}
   Builtin.addressof(&a4)  // expected-error {{address of variable 'a4' taken before it is initialized}}
-  // expected-warning @-1 {{result of call is unused, but produces 'Builtin.RawPointer'}}
+  // expected-warning @-1 {{result of call to 'addressof' is unused}}
 
 
   // Closures.
@@ -81,6 +82,11 @@ func test2() {
     markUsed(b4!)
   }
   b4 = 7
+  
+  let b5: Any
+  b5 = "x"   
+  { takes_inout_any(&b5) }()   // expected-error {{immutable value 'b5' may not be passed inout}}
+  ({ takes_inout_any(&b5) })()   // expected-error {{immutable value 'b5' may not be passed inout}}
 
   // Structs
   var s1 : SomeStruct
@@ -863,7 +869,7 @@ struct LetProperties {
     arr = []
     arr += []      // expected-error {{mutating operator '+=' may not be used on immutable value 'self.arr'}}
     arr.append(4)  // expected-error {{mutating method 'append' may not be used on immutable value 'self.arr'}}
-    arr[12] = 17   // expected-error {{immutable value 'self.arr' may not be assigned to}}
+    arr[12] = 17   // expected-error {{mutating subscript 'subscript' may not be used on immutable value 'self.arr'}}
   }
 }
 
@@ -1246,3 +1252,13 @@ enum SR1469_Enum3 {
   } // expected-error {{return from enum initializer method without storing to 'self'}}
 }
 
+class BadFooSuper {
+  init() {}
+  init(_ x: BadFooSuper) {}
+}
+
+class BadFooSubclass: BadFooSuper {
+  override init() {
+    super.init(self) // expected-error {{'self' used before super.init call}}
+  }
+}

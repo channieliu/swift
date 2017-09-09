@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -emit-silgen > %t.out
+// RUN: %target-swift-frontend -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -emit-silgen -sil-serialize-witness-tables > %t.out
 // RUN: %FileCheck -check-prefix=CHECK -check-prefix=CHECK-%target-ptrsize %s < %t.out
 // RUN: %FileCheck -check-prefix=NEGATIVE %s < %t.out
 
@@ -7,15 +7,15 @@
 import gizmo
 
 
-// CHECK-DAG: sil shared @_TFOSC16NSRuncingOptionsC
-// CHECK-DAG: sil shared @_TFOSC16NSRuncingOptionsg8rawValueSi
-// CHECK-DAG: sil shared @_TFOSC16NSRuncingOptionsg9hashValueSi
+// CHECK-DAG: sil shared [serializable] @_T0SC16NSRuncingOptionsO{{[_0-9a-zA-Z]*}}fC
+// CHECK-DAG: sil shared [serializable] @_T0SC16NSRuncingOptionsO8rawValueSifg
+// CHECK-DAG: sil shared [serializable] @_T0SC16NSRuncingOptionsO9hashValueSifg
 
 // Non-payload enum ctors don't need to be instantiated at all.
-// NEGATIVE-NOT: sil shared [transparent] @_TFOSC16NSRuncingOptions5MinceFMS_S_
-// NEGATIVE-NOT: sil shared [transparent] @_TFOSC16NSRuncingOptions12QuinceSlicedFMS_S_
-// NEGATIVE-NOT: sil shared [transparent] @_TFOSC16NSRuncingOptions15QuinceJuliennedFMS_S_
-// NEGATIVE-NOT: sil shared [transparent] @_TFOSC16NSRuncingOptions11QuinceDicedFMS_S_
+// NEGATIVE-NOT: sil shared [transparent] @_T0SC16NSRuncingOptionsO5MinceAbBmF
+// NEGATIVE-NOT: sil shared [transparent] @_T0SC16NSRuncingOptionsO12QuinceSlicedAbBmF
+// NEGATIVE-NOT: sil shared [transparent] @_T0SC16NSRuncingOptionsO15QuinceJuliennedAbBmF
+// NEGATIVE-NOT: sil shared [transparent] @_T0SC16NSRuncingOptionsO11QuinceDicedAbBmF
 
 var runcing: NSRuncingOptions = .mince
 
@@ -40,12 +40,12 @@ extension NSRuncingOptions: Bub {}
 // CHECK-64-DAG: integer_literal $Builtin.Int2048, 2147483648
 _ = NSFungingMask.toTheMax
 
-// CHECK-DAG: sil_witness_table shared [fragile] NSRuncingOptions: RawRepresentable module gizmo
-// CHECK-DAG: sil_witness_table shared [fragile] NSRuncingOptions: Equatable module gizmo
-// CHECK-DAG: sil_witness_table shared [fragile] NSRuncingOptions: Hashable module gizmo
-// CHECK-DAG: sil_witness_table shared [fragile] NSFungingMask: RawRepresentable module gizmo
+// CHECK-DAG: sil_witness_table shared [serialized] NSRuncingOptions: RawRepresentable module gizmo
+// CHECK-DAG: sil_witness_table shared [serialized] NSRuncingOptions: Equatable module gizmo
+// CHECK-DAG: sil_witness_table shared [serialized] NSRuncingOptions: Hashable module gizmo
+// CHECK-DAG: sil_witness_table shared [serialized] NSFungingMask: RawRepresentable module gizmo
 
-// CHECK-DAG: sil shared [transparent] [thunk] @_TTWOSC16NSRuncingOptionss16RawRepresentable5gizmoFS0_C
+// CHECK-DAG: sil shared [transparent] [serialized] [thunk] @_T0SC16NSRuncingOptionsOs16RawRepresentable5gizmosACP{{[_0-9a-zA-Z]*}}fCTW
 
 // Extension conformances get linkage according to the protocol's accessibility, as normal.
 // CHECK-DAG: sil_witness_table hidden NSRuncingOptions: Bub module objc_enum

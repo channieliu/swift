@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,9 +18,15 @@
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SILOptimizer/Utils/FunctionSignatureOptUtils.h"
 #include "swift/SILOptimizer/Utils/Local.h"
-#include "swift/SIL/Mangle.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace swift;
+
+/// Set to true to enable the support for partial specialization.
+llvm::cl::opt<bool> FSOEnableGenerics(
+  "sil-fso-enable-generics", llvm::cl::init(true),
+    llvm::cl::desc("Support function signature optimization "
+                   "of generic functions"));
 
 bool swift::hasNonTrivialNonDebugUse(SILArgument *Arg) {
   llvm::SmallVector<SILInstruction *, 8> Worklist;
@@ -49,7 +55,8 @@ bool swift::hasNonTrivialNonDebugUse(SILArgument *Arg) {
   return false;
 }
 
-static bool isSpecializableRepresentation(SILFunctionTypeRepresentation Rep) {
+static bool isSpecializableRepresentation(SILFunctionTypeRepresentation Rep,
+                                          bool OptForPartialApply) {
   switch (Rep) {
   case SILFunctionTypeRepresentation::Method:
   case SILFunctionTypeRepresentation::Closure:
@@ -58,36 +65,46 @@ static bool isSpecializableRepresentation(SILFunctionTypeRepresentation Rep) {
   case SILFunctionTypeRepresentation::CFunctionPointer:
     return true;
   case SILFunctionTypeRepresentation::WitnessMethod:
+    return OptForPartialApply;
   case SILFunctionTypeRepresentation::ObjCMethod:
   case SILFunctionTypeRepresentation::Block:
     return false;
   }
+
+  llvm_unreachable("Unhandled SILFunctionTypeRepresentation in switch.");
 }
 
 /// Returns true if F is a function which the pass know show to specialize
 /// function signatures for.
-bool swift::canSpecializeFunction(SILFunction *F) {
+bool swift::canSpecializeFunction(SILFunction *F,
+                                  const CallerAnalysis::FunctionInfo *FuncInfo,
+                                  bool OptForPartialApply) {
   // Do not specialize the signature of SILFunctions that are external
   // declarations since there is no body to optimize.
   if (F->isExternalDeclaration())
     return false;
 
   // For now ignore functions with indirect results.
-  if (F->getLoweredFunctionType()->hasIndirectResults())
+  if (F->getConventions().hasIndirectSILResults())
     return false;
 
   // Do not specialize the signature of always inline functions. We
   // will just inline them and specialize each one of the individual
   // functions that these sorts of functions are inlined into.
-  if (F->getInlineStrategy() == Inline_t::AlwaysInline)
+  // It is OK to specialize always inline functions if they are
+  // used by partial_apply instructions.
+  assert(!OptForPartialApply || FuncInfo);
+  if (F->getInlineStrategy() == Inline_t::AlwaysInline &&
+      (!OptForPartialApply || !FuncInfo->getMinPartialAppliedArgs()))
     return false;
 
   // For now ignore generic functions to keep things simple...
-  if (F->getLoweredFunctionType()->isPolymorphic())
+  if (!FSOEnableGenerics && F->getLoweredFunctionType()->isPolymorphic())
     return false;
 
   // Make sure F has a linkage that we can optimize.
-  if (!isSpecializableRepresentation(F->getRepresentation()))
+  if (!isSpecializableRepresentation(F->getRepresentation(),
+                                     OptForPartialApply))
     return false;
 
   return true;

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,12 +19,14 @@
 
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "swift/Basic/LLVM.h"
 #include "Address.h"
 #include "IRGen.h"
 
 namespace swift {
 namespace irgen {
+class FunctionPointer;
 
 typedef llvm::IRBuilder<> IRBuilderBase;
 
@@ -134,7 +136,7 @@ public:
     void insert(llvm::Instruction *I) {
       assert(isValid() && "inserting at invalid location!");
       assert(I->getParent() == nullptr);
-      if (llvm::BasicBlock *block = After.dyn_cast<llvm::BasicBlock*>()) {
+      if (auto *block = After.dyn_cast<llvm::BasicBlock*>()) {
         block->getInstList().push_front(I);
       } else {
         llvm::Instruction *afterInsn = After.get<llvm::Instruction*>();
@@ -263,18 +265,15 @@ public:
                    llvm::ConstantInt::get(Context, APInt(64, size.getValue())));
   }
 
-  //using IRBuilderBase::CreateCall;
+  // We're intentionally not allowing direct use of
+  // llvm::IRBuilder::CreateCall in order to push code towards using
+  // FunctionPointer.
 
   llvm::CallInst *CreateCall(llvm::Value *Callee, ArrayRef<llvm::Value *> Args,
                              const Twine &Name = "",
-                             llvm::MDNode *FPMathTag = nullptr) {
-    assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on call");
-    auto Call = IRBuilderBase::CreateCall(Callee, Args, Name, FPMathTag);
-    setCallingConvUsingCallee(Call);
-    return Call;
-  }
+                             llvm::MDNode *FPMathTag = nullptr) = delete;
 
-  llvm::CallInst *CreateCall(llvm::FunctionType *FTy, llvm::Value *Callee,
+  llvm::CallInst *CreateCall(llvm::FunctionType *FTy, llvm::Constant *Callee,
                              ArrayRef<llvm::Value *> Args,
                              const Twine &Name = "",
                              llvm::MDNode *FPMathTag = nullptr) {
@@ -284,14 +283,23 @@ public:
     return Call;
   }
 
-  llvm::CallInst *CreateCall(llvm::Function *Callee,
+  llvm::CallInst *CreateCall(llvm::Constant *Callee,
                              ArrayRef<llvm::Value *> Args,
                              const Twine &Name = "",
                              llvm::MDNode *FPMathTag = nullptr) {
-    assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on call");
+    // assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on
+    // call");
     auto Call = IRBuilderBase::CreateCall(Callee, Args, Name, FPMathTag);
     setCallingConvUsingCallee(Call);
     return Call;
+  }
+
+  llvm::CallInst *CreateCall(const FunctionPointer &fn,
+                             ArrayRef<llvm::Value *> args);
+
+  llvm::CallInst *CreateAsmCall(llvm::InlineAsm *asmBlock,
+                                ArrayRef<llvm::Value *> args) {
+    return IRBuilderBase::CreateCall(asmBlock, args);
   }
 };
 

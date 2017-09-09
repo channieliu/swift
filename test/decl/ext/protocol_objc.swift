@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // REQUIRES: objc_interop
 
@@ -7,7 +7,7 @@
 }
 
 extension OP1 {
-  final func extOP1a() -> Bool { return !reqOP1a() }
+  func extOP1a() -> Bool { return !reqOP1a() }
 }
 
 class OC1 : OP1 {

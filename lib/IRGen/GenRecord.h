@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -245,83 +245,6 @@ protected:
 
 public:
   using super::getStorageType;
-  Address allocateBuffer(IRGenFunction &IGF, Address buffer,
-                         SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      Address address =
-        field->getTypeInfo().allocateBuffer(IGF, buffer,
-                                            field->getType(IGF.IGM, type));
-      return IGF.Builder.CreateElementBitCast(address, getStorageType());
-    } else {
-      return super::allocateBuffer(IGF, buffer, type);
-    }
-  }
-
-  Address projectBuffer(IRGenFunction &IGF, Address buffer,
-                        SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      Address address =
-        field->getTypeInfo().projectBuffer(IGF, buffer,
-                                           field->getType(IGF.IGM, type));
-      return IGF.Builder.CreateElementBitCast(address, getStorageType());
-    } else {
-      return super::projectBuffer(IGF, buffer, type);
-    }
-  }
-
-  void destroyBuffer(IRGenFunction &IGF, Address buffer,
-                     SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      field->getTypeInfo().destroyBuffer(IGF, buffer,
-                                         field->getType(IGF.IGM, type));
-    } else {
-      super::destroyBuffer(IGF, buffer, type);
-    }
-  }
-
-  void deallocateBuffer(IRGenFunction &IGF, Address buffer,
-                        SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      field->getTypeInfo().deallocateBuffer(IGF, buffer,
-                                            field->getType(IGF.IGM, type));
-    } else {
-      super::deallocateBuffer(IGF, buffer, type);
-    }
-  }
-
-  Address initializeBufferWithTake(IRGenFunction &IGF,
-                                   Address destBuffer,
-                                   Address srcAddr,
-                                   SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      auto &fieldTI = field->getTypeInfo();
-      Address srcFieldAddr =
-        IGF.Builder.CreateElementBitCast(srcAddr, fieldTI.getStorageType());
-      Address fieldResult =
-        fieldTI.initializeBufferWithTake(IGF, destBuffer, srcFieldAddr,
-                                         field->getType(IGF.IGM, type));
-      return IGF.Builder.CreateElementBitCast(fieldResult, getStorageType());
-    } else {
-      return super::initializeBufferWithTake(IGF, destBuffer, srcAddr, type);
-    }
-  }
-
-  Address initializeBufferWithCopy(IRGenFunction &IGF,
-                                   Address destBuffer,
-                                   Address srcAddr,
-                                   SILType type) const override {
-    if (auto field = getUniqueNonEmptyField()) {
-      auto &fieldTI = field->getTypeInfo();
-      Address srcFieldAddr =
-        IGF.Builder.CreateElementBitCast(srcAddr, fieldTI.getStorageType());
-      Address fieldResult =
-        fieldTI.initializeBufferWithCopy(IGF, destBuffer, srcFieldAddr,
-                                         field->getType(IGF.IGM, type));
-      return IGF.Builder.CreateElementBitCast(fieldResult, getStorageType());
-    } else {
-      return super::initializeBufferWithCopy(IGF, destBuffer, srcAddr, type);
-    }
-  }
 
   Address initializeBufferWithTakeOfBuffer(IRGenFunction &IGF,
                                            Address destBuffer,
@@ -489,14 +412,14 @@ public:
             Explosion &dest, Atomicity atomicity) const override {
     for (auto &field : getFields())
       cast<LoadableTypeInfo>(field.getTypeInfo())
-          .copy(IGF, src, dest, Atomicity::Atomic);
+          .copy(IGF, src, dest, atomicity);
   }
 
   void consume(IRGenFunction &IGF, Explosion &src,
                Atomicity atomicity) const override {
     for (auto &field : getFields())
       cast<LoadableTypeInfo>(field.getTypeInfo())
-          .consume(IGF, src, Atomicity::Atomic);
+          .consume(IGF, src, atomicity);
   }
 
   void fixLifetime(IRGenFunction &IGF, Explosion &src) const override {

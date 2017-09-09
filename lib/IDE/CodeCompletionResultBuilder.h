@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -274,7 +274,7 @@ public:
     if (escapeAllKeywords) {
 #define KEYWORD(kw) .Case(#kw, true)
       shouldEscape = llvm::StringSwitch<bool>(Word)
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
         .Default(false);
     } else {
       shouldEscape = !canBeArgumentLabel(Word);
@@ -315,7 +315,7 @@ public:
   }
 
   void addCallParameter(Identifier Name, Identifier LocalName, Type Ty,
-                        bool IsVarArg, bool Outermost) {
+                        bool IsVarArg, bool Outermost, bool IsInOut) {
     CurrentNestingLevel++;
 
     addSimpleChunk(CodeCompletionString::Chunk::ChunkKind::CallParameterBegin);
@@ -344,10 +344,10 @@ public:
     }
 
     // 'inout' arguments are printed specially.
-    if (auto *IOT = Ty->getAs<InOutType>()) {
+    if (IsInOut) {
       addChunkWithTextNoCopy(
           CodeCompletionString::Chunk::ChunkKind::Ampersand, "&");
-      Ty = IOT->getObjectType();
+      Ty = Ty->getInOutObjectType();
     }
 
     if (Name.empty() && !LocalName.empty()) {
@@ -395,8 +395,8 @@ public:
   }
 
   void addCallParameter(Identifier Name, Type Ty, bool IsVarArg,
-                        bool Outermost) {
-    addCallParameter(Name, Identifier(), Ty, IsVarArg, Outermost);
+                        bool Outermost, bool IsInOut) {
+    addCallParameter(Name, Identifier(), Ty, IsVarArg, Outermost, IsInOut);
   }
 
   void addGenericParameter(StringRef Name) {

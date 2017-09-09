@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -151,6 +151,10 @@ public:
   /// by user.
   virtual void completePostfixExprBeginning(CodeCompletionExpr *E) = 0;
 
+  /// \brief Complete the beginning of expr-postfix in a for-each loop sequqence
+  /// -- no tokens provided by user.
+  virtual void completeForEachSequenceBeginning(CodeCompletionExpr *E) = 0;
+
   /// \brief Complete a given expr-postfix.
   virtual void completePostfixExpr(Expr *E, bool hasSpace) = 0;
 
@@ -171,7 +175,7 @@ public:
   /// \param KPE A partial #keyPath expression that can be used to
   /// provide context. This will be \c NULL if no components of the
   /// #keyPath argument have been parsed yet.
-  virtual void completeExprKeyPath(ObjCKeyPathExpr *KPE, bool HasDot) = 0;
+  virtual void completeExprKeyPath(KeyPathExpr *KPE, bool HasDot) = 0;
 
   /// \brief Complete the beginning of type-simple -- no tokens provided
   /// by user.

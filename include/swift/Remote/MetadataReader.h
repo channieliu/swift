@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,8 +19,9 @@
 
 #include "swift/Runtime/Metadata.h"
 #include "swift/Remote/MemoryReader.h"
-#include "swift/Basic/Demangle.h"
+#include "swift/Demangling/Demangler.h"
 #include "swift/Basic/LLVM.h"
+#include "swift/Runtime/Unreachable.h"
 
 #include <vector>
 #include <unordered_map>
@@ -104,8 +105,7 @@ class TypeDecoder {
         if (repr->getKind() != NodeKind::MetatypeRepresentation ||
             !repr->hasText())
           return BuiltType();
-        auto &str = repr->getText();
-        if (str != "@thin")
+        if (repr->getText() != "@thin")
           wasAbstract = true;
       }
       auto instance = decodeMangledType(Node->getChild(i));
@@ -133,23 +133,68 @@ class TypeDecoder {
       }
       if (protocols.size() == 1)
         return protocols.front();
-      else
-        return Builder.createProtocolCompositionType(protocols);
+      return Builder.createProtocolCompositionType(
+          protocols,
+          /*hasExplicitAnyObject=*/false);
+    }
+    case NodeKind::ProtocolListWithAnyObject: {
+      std::vector<BuiltType> protocols;
+      auto ProtocolList = Node->getChild(0);
+      auto TypeList = ProtocolList->getChild(0);
+      for (auto componentType : *TypeList) {
+        if (auto protocol = decodeMangledType(componentType))
+          protocols.push_back(protocol);
+        else
+          return BuiltType();
+      }
+      return Builder.createProtocolCompositionType(
+          protocols,
+          /*hasExplicitAnyObject=*/true);
+    }
+    case NodeKind::ProtocolListWithClass: {
+      std::vector<BuiltType> members;
+      auto ProtocolList = Node->getChild(0);
+      auto TypeList = ProtocolList->getChild(0);
+      for (auto componentType : *TypeList) {
+        if (auto protocol = decodeMangledType(componentType))
+          members.push_back(protocol);
+        else
+          return BuiltType();
+      }
+
+      auto SuperclassNode = Node->getChild(1);
+      if (auto superclass = decodeMangledType(SuperclassNode))
+        members.push_back(superclass);
+
+      return Builder.createProtocolCompositionType(
+          members,
+          /*hasExplicitAnyObject=*/true);
     }
     case NodeKind::Protocol: {
       auto moduleName = Node->getChild(0)->getText();
-      auto name = Node->getChild(1)->getText();
+      auto nameNode = Node->getChild(1);
+      std::string privateDiscriminator, name;
+      if (nameNode->getKind() == NodeKind::PrivateDeclName) {
+        privateDiscriminator = nameNode->getChild(0)->getText();
+        name = nameNode->getChild(1)->getText();
+      } else if (nameNode->getKind() == NodeKind::Identifier) {
+        name = Node->getChild(1)->getText();
+      } else {
+        return BuiltType();
+      }
 
       // Consistent handling of protocols and protocol compositions
-      auto protocolList = Demangle::NodeFactory::create(NodeKind::ProtocolList);
-      auto typeList = Demangle::NodeFactory::create(NodeKind::TypeList);
-      auto type = Demangle::NodeFactory::create(NodeKind::Type);
-      type->addChild(Node);
-      typeList->addChild(type);
-      protocolList->addChild(typeList);
+      Demangle::Demangler Dem;
+      auto protocolList = Dem.createNode(NodeKind::ProtocolList);
+      auto typeList = Dem.createNode(NodeKind::TypeList);
+      auto type = Dem.createNode(NodeKind::Type);
+      type->addChild(Node, Dem);
+      typeList->addChild(type, Dem);
+      protocolList->addChild(typeList, Dem);
 
       auto mangledName = Demangle::mangleNode(protocolList);
-      return Builder.createProtocolType(mangledName, moduleName, name);
+      return Builder.createProtocolType(mangledName, moduleName,
+                                        privateDiscriminator, name);
     }
     case NodeKind::DependentGenericParamType: {
       auto depth = Node->getChild(0)->getIndex();
@@ -198,9 +243,7 @@ class TypeDecoder {
           if (!child->hasText())
             return BuiltType();
 
-          auto &text = child->getText();
-
-          if (text == "@convention(thin)") {
+          if (child->getText() == "@convention(thin)") {
             flags =
               flags.withConvention(FunctionMetadataConvention::Thin);
           }
@@ -208,7 +251,7 @@ class TypeDecoder {
           if (!child->hasText())
             return BuiltType();
 
-          auto &text = child->getText();
+          StringRef text = child->getText();
           if (text == "@convention(c)") {
             flags =
               flags.withConvention(FunctionMetadataConvention::CFunctionPointer);
@@ -234,17 +277,23 @@ class TypeDecoder {
       return decodeMangledType(Node->getChild(0));
     case NodeKind::ReturnType:
       return decodeMangledType(Node->getChild(0));
-    case NodeKind::NonVariadicTuple:
-    case NodeKind::VariadicTuple: {
+    case NodeKind::Tuple: {
       std::vector<BuiltType> elements;
       std::string labels;
+      bool variadic = false;
       for (auto &element : *Node) {
         if (element->getKind() != NodeKind::TupleElement)
           return BuiltType();
 
         // If the tuple element is labeled, add its label to 'labels'.
         unsigned typeChildIndex = 0;
-        if (element->getChild(0)->getKind() == NodeKind::TupleElementName) {
+        unsigned nameIdx = 0;
+        if (element->getChild(nameIdx)->getKind() == NodeKind::VariadicMarker) {
+          variadic = true;
+          nameIdx = 1;
+          typeChildIndex = 1;
+        }
+        if (element->getChild(nameIdx)->getKind() == NodeKind::TupleElementName) {
           // Add spaces to terminate all the previous labels if this
           // is the first we've seen.
           if (labels.empty()) labels.append(elements.size(), ' ');
@@ -252,7 +301,7 @@ class TypeDecoder {
           // Add the label and its terminator.
           labels += element->getChild(0)->getText();
           labels += ' ';
-          typeChildIndex = 1;
+          typeChildIndex++;
 
         // Otherwise, add a space if a previous element had a label.
         } else if (!labels.empty()) {
@@ -267,7 +316,6 @@ class TypeDecoder {
 
         elements.push_back(elementType);
       }
-      bool variadic = (Node->getKind() == NodeKind::VariadicTuple);
       return Builder.createTupleType(elements, std::move(labels), variadic);
     }
     case NodeKind::TupleElement:
@@ -312,6 +360,11 @@ class TypeDecoder {
       if (!base)
         return BuiltType();
       return Builder.createSILBoxType(base);
+    }
+    case NodeKind::SILBoxTypeWithLayout: {
+      // TODO: Implement SILBoxTypeRefs with layout. As a stopgap, specify the
+      // NativeObject type ref.
+      return Builder.createBuiltinType("Bo");
     }
     default:
       return BuiltType();
@@ -374,8 +427,7 @@ private:
     };
 
     // Expand a single level of tuple.
-    if (node->getKind() == NodeKind::VariadicTuple ||
-        node->getKind() == NodeKind::NonVariadicTuple) {
+    if (node->getKind() == NodeKind::Tuple) {
       // TODO: preserve variadic somewhere?
 
       // Decode all the elements as separate arguments.
@@ -492,9 +544,46 @@ private:
   using OwnedProtocolDescriptorRef =
     std::unique_ptr<const TargetProtocolDescriptor<Runtime>, delete_with_free>;
 
-  /// Cached isa mask.
-  StoredPointer isaMask;
-  bool hasIsaMask = false;
+  enum class IsaEncodingKind {
+    /// We haven't checked yet.
+    Unknown,
+
+    /// There was an error trying to find out the isa encoding.
+    Error,
+
+    /// There's no special isa encoding.
+    None,
+
+    /// There's an unconditional mask to apply to the isa pointer.
+    ///   - IsaMask stores the mask.
+    Masked,
+
+    /// Isa pointers are indexed.  If applying a mask yields a magic value,
+    /// applying a different mask and shifting yields an index into a global
+    /// array of class pointers.  Otherwise, the isa pointer is just a raw
+    /// class pointer.
+    ///  - IsaIndexMask stores the index mask.
+    ///  - IsaIndexShift stores the index shift.
+    ///  - IsaMagicMask stores the magic value mask.
+    ///  - IsaMagicValue stores the magic value.
+    ///  - IndexedClassesPointer stores the pointer to the start of the
+    ///    indexed classes array; this is constant throughout the program.
+    ///  - IndexedClassesCountPointer stores a pointer to the number
+    ///    of elements in the indexed classes array.
+    Indexed
+  };
+
+  IsaEncodingKind IsaEncoding = IsaEncodingKind::Unknown;
+  union {
+    StoredPointer IsaMask;
+    StoredPointer IsaIndexMask;
+  };
+  StoredPointer IsaIndexShift;
+  StoredPointer IsaMagicMask;
+  StoredPointer IsaMagicValue;
+  StoredPointer IndexedClassesPointer;
+  StoredPointer IndexedClassesCountPointer;
+  StoredPointer LastIndexedClassesCount = 0;
 
 public:
   BuilderType Builder;
@@ -529,15 +618,12 @@ public:
 
   /// Get the remote process's swift_isaMask.
   std::pair<bool, StoredPointer> readIsaMask() {
-    auto address = Reader->getSymbolAddress("swift_isaMask");
-    if (!address)
-      return {false, 0};
+    auto encoding = getIsaEncoding();
+    if (encoding != IsaEncodingKind::Masked)
+      // Still return success if there's no isa encoding at all.
+      return {encoding == IsaEncodingKind::None, 0};
 
-    if (!Reader->readInteger(address, &isaMask))
-      return {false, 0};
-
-    hasIsaMask = true;
-    return {true, isaMask};
+    return {true, IsaMask};
   }
 
   /// Given a remote pointer to metadata, attempt to discover its MetadataKind.
@@ -561,41 +647,33 @@ public:
   }
 
   /// Given a remote pointer to class metadata, attempt to discover its class
-  /// instance size and alignment.
-  std::tuple<bool, unsigned, unsigned>
-  readInstanceSizeAndAlignmentFromClassMetadata(StoredPointer MetadataAddress) {
-    auto superMeta = readMetadata(MetadataAddress);
-    if (!superMeta || superMeta->getKind() != MetadataKind::Class)
-      return std::make_tuple(false, 0, 0);
+  /// instance size and whether fields should use the resilient layout strategy.
+  std::pair<bool, unsigned>
+  readInstanceStartAndAlignmentFromClassMetadata(StoredPointer MetadataAddress) {
+    auto meta = readMetadata(MetadataAddress);
+    if (!meta || meta->getKind() != MetadataKind::Class)
+      return std::make_pair(false, 0);
 
-    auto super = cast<TargetClassMetadata<Runtime>>(superMeta);
+    // The following algorithm only works on the non-fragile Apple runtime.
 
-    // See swift_initClassMetadata_UniversalStrategy()
-    uint32_t size, align;
-    if (super->isTypeMetadata()) {
-      size = super->getInstanceSize();
-      align = super->getInstanceAlignMask() + 1;
-    } else {
-      // The following algorithm only works on the non-fragile Apple runtime.
+    // Grab the RO-data pointer.  This part is not ABI.
+    StoredPointer roDataPtr = readObjCRODataPtr(MetadataAddress);
+    if (!roDataPtr)
+      return std::make_pair(false, 0);
 
-      // Grab the RO-data pointer.  This part is not ABI.
-      StoredPointer roDataPtr = readObjCRODataPtr(MetadataAddress);
-      if (!roDataPtr)
-        return std::make_tuple(false, 0, 0);
+    // Get the address of the InstanceStart field.
+    auto address = roDataPtr + sizeof(uint32_t) * 1;
 
-      auto address = roDataPtr + sizeof(uint32_t) * 2;
+    unsigned start;
+    if (!Reader->readInteger(RemoteAddress(address), &start))
+      return std::make_pair(false, 0);
 
-      align = 16; // malloc alignment guarantee
-
-      if (!Reader->readInteger(RemoteAddress(address), &size))
-        return std::make_tuple(false, 0, 0);
-    }
-
-    return std::make_tuple(true, size, align);
+    return std::make_pair(true, start);
   }
 
   /// Given a remote pointer to metadata, attempt to turn it into a type.
-  BuiltType readTypeFromMetadata(StoredPointer MetadataAddress) {
+  BuiltType readTypeFromMetadata(StoredPointer MetadataAddress,
+                                 bool skipArtificialSubclasses = false) {
     auto Cached = TypeCache.find(MetadataAddress);
     if (Cached != TypeCache.end())
       return Cached->second;
@@ -612,7 +690,7 @@ public:
 
     switch (Meta->getKind()) {
     case MetadataKind::Class:
-      return readNominalTypeFromMetadata(Meta);
+      return readNominalTypeFromMetadata(Meta, skipArtificialSubclasses);
     case MetadataKind::Struct:
       return readNominalTypeFromMetadata(Meta);
     case MetadataKind::Enum:
@@ -690,7 +768,20 @@ public:
     }
     case MetadataKind::Existential: {
       auto Exist = cast<TargetExistentialTypeMetadata<Runtime>>(Meta);
-      std::vector<BuiltType> Protocols;
+      std::vector<BuiltType> Members;
+      bool HasExplicitAnyObject = false;
+
+      if (Exist->Flags.hasSuperclassConstraint()) {
+        // The superclass is stored after the list of protocols.
+        auto SuperclassType = readTypeFromMetadata(
+          Exist->Protocols[Exist->Protocols.NumProtocols]);
+        if (!SuperclassType) return BuiltType();
+        Members.push_back(SuperclassType);
+      }
+
+      if (Exist->isClassBounded())
+        HasExplicitAnyObject = true;
+
       for (size_t i = 0; i < Exist->Protocols.NumProtocols; ++i) {
         auto ProtocolAddress = Exist->Protocols[i];
         auto ProtocolDescriptor = readProtocolDescriptor(ProtocolAddress);
@@ -701,14 +792,16 @@ public:
         if (!Reader->readString(RemoteAddress(ProtocolDescriptor->Name),
                                 MangledName))
           return BuiltType();
-        auto Demangled = Demangle::demangleSymbolAsNode(MangledName);
+        Demangle::Context DCtx;
+        auto Demangled = DCtx.demangleSymbolAsNode(MangledName);
         auto Protocol = decodeMangledType(Demangled);
         if (!Protocol)
           return BuiltType();
 
-        Protocols.push_back(Protocol);
+        Members.push_back(Protocol);
       }
-      auto BuiltExist = Builder.createProtocolCompositionType(Protocols);
+      auto BuiltExist = Builder.createProtocolCompositionType(
+        Members, HasExplicitAnyObject);
       TypeCache[MetadataAddress] = BuiltExist;
       return BuiltExist;
     }
@@ -765,30 +858,80 @@ public:
       return BuiltOpaque;
     }
     }
+
+    swift_runtime_unreachable("Unhandled MetadataKind in switch");
   }
 
   BuiltType readTypeFromMangledName(const char *MangledTypeName,
                                     size_t Length) {
-    auto Demangled = Demangle::demangleSymbolAsNode(MangledTypeName, Length);
+    Demangle::Demangler Dem;
+    Demangle::NodePointer Demangled =
+      Dem.demangleSymbol(StringRef(MangledTypeName, Length));
     return decodeMangledType(Demangled);
   }
 
   /// Read the isa pointer of a class or closure context instance and apply
   /// the isa mask.
-  std::pair<bool, StoredPointer> readMetadataFromInstance(
-      StoredPointer ObjectAddress) {
-    StoredPointer isaMaskValue = ~0;
-    auto isaMask = readIsaMask();
-    if (isaMask.first)
-      isaMaskValue = isaMask.second;
-
-    StoredPointer MetadataAddress;
-    if (!Reader->readBytes(RemoteAddress(ObjectAddress),
-                           (uint8_t*)&MetadataAddress,
-                           sizeof(StoredPointer)))
+  std::pair<bool, StoredPointer>
+  readMetadataFromInstance(StoredPointer objectAddress) {
+    StoredPointer isa;
+    if (!Reader->readInteger(RemoteAddress(objectAddress), &isa))
       return {false, 0};
 
-    return {true, MetadataAddress & isaMaskValue};
+    switch (getIsaEncoding()) {
+    case IsaEncodingKind::Unknown:
+    case IsaEncodingKind::Error:
+      return {false, 0};
+
+    case IsaEncodingKind::None:
+      return {true, isa};
+
+    case IsaEncodingKind::Masked:
+      return {true, isa & IsaMask};
+
+    case IsaEncodingKind::Indexed: {
+      // If applying the magic mask doesn't give us the magic value,
+      // it's not an indexed isa.
+      if ((isa & IsaMagicMask) != IsaMagicValue)
+        return {true, isa};
+
+      // Extract the index.
+      auto classIndex = (isa & IsaIndexMask) >> IsaIndexShift;
+
+      // 0 is never a valid index.
+      if (classIndex == 0) {
+        return {false, 0};
+
+      // If the index is out of range, it's an error; but check for an
+      // update first.  (This will also trigger the first time because
+      // we initialize LastIndexedClassesCount to 0).
+      } else if (classIndex >= LastIndexedClassesCount) {
+        StoredPointer count;
+        if (!Reader->readInteger(RemoteAddress(IndexedClassesCountPointer),
+                                 &count)) {
+          return {false, 0};
+        }
+
+        LastIndexedClassesCount = count;
+        if (classIndex >= count) {
+          return {false, 0};
+        }
+      }
+
+      // Find the address of the appropriate array element.
+      RemoteAddress eltPointer =
+        RemoteAddress(IndexedClassesPointer
+                        + classIndex * sizeof(StoredPointer));
+      StoredPointer metadataPointer;
+      if (!Reader->readInteger(eltPointer, &metadataPointer)) {
+        return {false, 0};
+      }
+
+      return {true, metadataPointer};
+    }
+    }
+
+    swift_runtime_unreachable("Unhandled IsaEncodingKind in switch.");
   }
 
   /// Read the parent type metadata from a nested nominal type metadata.
@@ -920,6 +1063,20 @@ protected:
     return targetAddress + signext;
   }
 
+  template<typename Offset>
+  llvm::Optional<StoredPointer>
+  resolveNullableRelativeOffset(StoredPointer targetAddress) {
+    Offset relative;
+    if (!Reader->readInteger(RemoteAddress(targetAddress), &relative))
+      return llvm::None;
+    if (relative == 0)
+      return 0;
+    using SignedOffset = typename std::make_signed<Offset>::type;
+    using SignedPointer = typename std::make_signed<StoredPointer>::type;
+    auto signext = (SignedPointer)(SignedOffset)relative;
+    return targetAddress + signext;
+  }
+
   /// Given a pointer to an Objective-C class, try to read its class name.
   bool readObjCClassName(StoredPointer classAddress, std::string &className) {
     // The following algorithm only works on the non-fragile Apple runtime.
@@ -962,6 +1119,14 @@ protected:
       case MetadataKind::ErrorObject:
         return _readMetadata<TargetEnumMetadata>(address);
       case MetadataKind::Existential: {
+        StoredPointer flagsAddress = address +
+          sizeof(StoredPointer);
+
+        StoredPointer flags;
+        if (!Reader->readInteger(RemoteAddress(flagsAddress),
+                                 &flags))
+          return nullptr;
+
         StoredPointer numProtocolsAddress = address +
           TargetExistentialTypeMetadata<Runtime>::OffsetToNumProtocols;
         StoredPointer numProtocols;
@@ -976,6 +1141,9 @@ protected:
         auto totalSize = sizeof(TargetExistentialTypeMetadata<Runtime>)
           + numProtocols *
           sizeof(ConstTargetMetadataPointer<Runtime, TargetProtocolDescriptor>);
+
+        if (ExistentialTypeFlags(flags).hasSuperclassConstraint())
+          totalSize += sizeof(StoredPointer);
 
         return _readMetadata(address, totalSize);
       }
@@ -1041,12 +1209,39 @@ private:
     return MetadataRef(address, metadata);
   }
 
-  StoredPointer readAddressOfNominalTypeDescriptor(MetadataRef metadata) {
+  StoredPointer readAddressOfNominalTypeDescriptor(MetadataRef &metadata,
+                                        bool skipArtificialSubclasses = false) {
     switch (metadata->getKind()) {
     case MetadataKind::Class: {
       auto classMeta = cast<TargetClassMetadata<Runtime>>(metadata);
-      return resolveRelativeOffset<StoredPointer>(metadata.getAddress() +
-                                       classMeta->offsetToDescriptorOffset());
+      while (true) {
+        auto descriptorAddress =
+          resolveNullableRelativeOffset<StoredPointer>(metadata.getAddress() +
+                                         classMeta->offsetToDescriptorOffset());
+
+        // Propagate errors reading the offset.
+        if (!descriptorAddress) return 0;
+
+        // If this class has a null descriptor, it's artificial,
+        // and we need to skip it upon request.  Otherwise, we're done.
+        if (*descriptorAddress || !skipArtificialSubclasses)
+          return *descriptorAddress;
+
+        auto superclassMetadataAddress = classMeta->SuperClass;
+        if (!superclassMetadataAddress)
+          return 0;
+
+        auto superMeta = readMetadata(superclassMetadataAddress);
+        if (!superMeta)
+          return 0;
+        auto superclassMeta =
+          dyn_cast<TargetClassMetadata<Runtime>>(superMeta);
+        if (!superclassMeta)
+          return 0;
+
+        classMeta = superclassMeta;
+        metadata = superMeta;
+      }
     }
 
     case MetadataKind::Struct:
@@ -1164,10 +1359,23 @@ private:
     return substitutions;
   }
 
-  BuiltType readNominalTypeFromMetadata(MetadataRef metadata) {
-    auto descriptorAddress = readAddressOfNominalTypeDescriptor(metadata);
+  BuiltType readNominalTypeFromMetadata(MetadataRef origMetadata,
+                                        bool skipArtificialSubclasses = false) {
+    auto metadata = origMetadata;
+    auto descriptorAddress =
+      readAddressOfNominalTypeDescriptor(metadata,
+                                         skipArtificialSubclasses);
     if (!descriptorAddress)
       return BuiltType();
+
+    // If we've skipped an artificial subclasses, check the cache at
+    // the superclass.  (This also protects against recursion.)
+    if (skipArtificialSubclasses &&
+        metadata.getAddress() != origMetadata.getAddress()) {
+      auto it = TypeCache.find(metadata.getAddress());
+      if (it != TypeCache.end())
+        return it->second;
+    }
 
     // Read the nominal type descriptor.
     auto descriptor = readNominalTypeDescriptor(descriptorAddress);
@@ -1200,6 +1408,14 @@ private:
     if (!nominal) return BuiltType();
 
     TypeCache[metadata.getAddress()] = nominal;
+
+    // If we've skipped an artificial subclass, remove the
+    // recursion-protection entry we made for it.
+    if (skipArtificialSubclasses &&
+        metadata.getAddress() != origMetadata.getAddress()) {
+      TypeCache.erase(origMetadata.getAddress());
+    }
+
     return nominal;
   }
 
@@ -1242,6 +1458,66 @@ private:
     return dataPtr;
   }
 
+  IsaEncodingKind getIsaEncoding() {
+    if (IsaEncoding != IsaEncodingKind::Unknown)
+      return IsaEncoding;
+
+    auto finish = [&](IsaEncodingKind result) -> IsaEncodingKind {
+      IsaEncoding = result;
+      return result;
+    };
+
+    /// Look up the given global symbol and bind 'varname' to its
+    /// address if its exists.
+#   define tryFindSymbol(varname, symbolName)                \
+      auto varname = Reader->getSymbolAddress(symbolName);   \
+      if (!varname)                                          \
+        return finish(IsaEncodingKind::Error)
+    /// Read from the given pointer into 'dest'.
+#   define tryReadSymbol(varname, dest) do {                 \
+      if (!Reader->readInteger(varname, &dest))              \
+        return finish(IsaEncodingKind::Error);               \
+    } while (0)
+    /// Read from the given global symbol into 'dest'.
+#   define tryFindAndReadSymbol(dest, symbolName) do {       \
+      tryFindSymbol(_address, symbolName);                    \
+      tryReadSymbol(_address, dest);                          \
+    } while (0)
+
+    // Check for the magic-mask symbol that indicates that the ObjC
+    // runtime is using indexed ISAs.
+    if (auto magicMaskAddress =
+          Reader->getSymbolAddress("objc_debug_indexed_isa_magic_mask")) {
+      tryReadSymbol(magicMaskAddress, IsaMagicMask);
+      if (IsaMagicMask != 0) {
+        tryFindAndReadSymbol(IsaMagicValue,
+                             "objc_debug_indexed_isa_magic_value");
+        tryFindAndReadSymbol(IsaIndexMask,
+                             "objc_debug_indexed_isa_index_mask");
+        tryFindAndReadSymbol(IsaIndexShift,
+                             "objc_debug_indexed_isa_index_shift");
+        tryFindSymbol(indexedClasses, "objc_indexed_classes");
+        IndexedClassesPointer = indexedClasses.getAddressData();
+        tryFindSymbol(indexedClassesCount, "objc_indexed_classes_count");
+        IndexedClassesCountPointer = indexedClassesCount.getAddressData();
+
+        return finish(IsaEncodingKind::Indexed);
+      }
+    }
+
+    // Check for the ISA mask symbol.  This has to come second because
+    // the standard library will define this even if the ObjC runtime
+    // doesn't use it.
+    if (auto maskAddress = Reader->getSymbolAddress("swift_isaMask")) {
+      tryReadSymbol(maskAddress, IsaMask);
+      if (IsaMask != 0) {
+        return finish(IsaEncodingKind::Masked);
+      }
+    }
+
+    return finish(IsaEncodingKind::None);
+  }
+
   template <class T>
   static constexpr T roundUpToAlignment(T offset, T alignment) {
     return (offset + alignment - 1) & ~(alignment - 1);
@@ -1263,4 +1539,3 @@ namespace llvm {
 }
 
 #endif // SWIFT_REFLECTION_READER_H
-

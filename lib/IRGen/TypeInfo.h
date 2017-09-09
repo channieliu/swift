@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -39,11 +39,12 @@ namespace swift {
 
 namespace irgen {
   class Address;
-  class ContainedAddress;
+  class StackAddress;
   class IRGenFunction;
   class IRGenModule;
   class Explosion;
   class ExplosionSchema;
+  class NativeConventionSchema;
   enum OnHeap_t : unsigned char;
   class OwnedAddress;
   class RValue;
@@ -89,7 +90,8 @@ protected:
            IsBitwiseTakable_t bitwiseTakable,
            IsFixedSize_t alwaysFixedSize,
            SpecialTypeInfoKind stik)
-    : NextConverted(0), StorageType(Type), StorageAlignment(A),
+    : NextConverted(0), StorageType(Type), nativeReturnSchema(nullptr),
+      nativeParameterSchema(nullptr), StorageAlignment(A),
       POD(pod), BitwiseTakable(bitwiseTakable),
       AlwaysFixedSize(alwaysFixedSize), STIK(stik),
       SubclassKind(InvalidSubclassKind) {
@@ -102,7 +104,7 @@ protected:
   }
 
 public:
-  virtual ~TypeInfo() = default;
+  virtual ~TypeInfo();
 
   /// Unsafely cast this to the given subtype.
   template <class T> const T &as() const {
@@ -114,6 +116,9 @@ private:
   /// The LLVM representation of a stored value of this type.  For
   /// non-fixed types, this is really useful only for forming pointers to it.
   llvm::Type *StorageType;
+
+  mutable NativeConventionSchema *nativeReturnSchema;
+  mutable NativeConventionSchema *nativeParameterSchema;
 
   /// The storage alignment of this type in bytes.  This is never zero
   /// for a completely-converted type.
@@ -202,6 +207,8 @@ public:
              "IsFixedSize vs IsAlwaysFixedSize mismatch");
       return IsFixedSize_t(AlwaysFixedSize);
     }
+
+    llvm_unreachable("Not a valid ResilienceExpansion.");
   }
 
   /// Whether this type is known to be loadable in the local
@@ -255,17 +262,17 @@ public:
   ExplosionSchema getSchema() const;
 
   /// Allocate a variable of this type on the stack.
-  virtual ContainedAddress allocateStack(IRGenFunction &IGF,
-                                         SILType T,
-                                         const llvm::Twine &name) const = 0;
+  virtual StackAddress allocateStack(IRGenFunction &IGF, SILType T,
+                                     bool isInEntryBlock,
+                                     const llvm::Twine &name) const = 0;
 
   /// Deallocate a variable of this type.
-  virtual void deallocateStack(IRGenFunction &IGF, Address addr,
+  virtual void deallocateStack(IRGenFunction &IGF, StackAddress addr,
                                SILType T) const = 0;
 
   /// Destroy the value of a variable of this type, then deallocate its
   /// memory.
-  virtual void destroyStack(IRGenFunction &IGF, Address addr,
+  virtual void destroyStack(IRGenFunction &IGF, StackAddress addr,
                             SILType T) const = 0;
 
   /// Copy or take a value out of one address and into another, destroying
@@ -301,46 +308,6 @@ public:
   virtual void initializeWithCopy(IRGenFunction &IGF, Address destAddr,
                                   Address srcAddr, SILType T) const = 0;
 
-  /// Allocate space for an object of this type within an uninitialized
-  /// fixed-size buffer.
-  virtual Address allocateBuffer(IRGenFunction &IGF, Address buffer,
-                                 SILType T) const;
-
-  /// Project the address of an object of this type from an initialized
-  /// fixed-size buffer.
-  virtual Address projectBuffer(IRGenFunction &IGF, Address buffer,
-                                SILType T) const;
-
-  /// Perform a "take-initialization" from the given object into an
-  /// uninitialized fixed-size buffer, allocating the buffer if necessary.
-  /// Returns the address of the value inside the buffer.
-  ///
-  /// This is equivalent to:
-  ///   auto destAddress = allocateBuffer(IGF, destBuffer, T);
-  ///   initializeWithTake(IGF, destAddr, srcAddr, T);
-  ///   return destAddress;
-  /// but will be more efficient for dynamic types, since it uses a single
-  /// value witness call.
-  virtual Address initializeBufferWithTake(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const;
-
-  /// Perform a copy-initialization from the given object into an
-  /// uninitialized fixed-size buffer, allocating the buffer if necessary.
-  /// Returns the address of the value inside the buffer.
-  ///
-  /// This is equivalent to:
-  ///   auto destAddress = allocateBuffer(IGF, destBuffer, T);
-  ///   initializeWithCopy(IGF, destAddr, srcAddr, T);
-  ///   return destAddress;
-  /// but will be more efficient for dynamic types, since it uses a single
-  /// value witness call.
-  virtual Address initializeBufferWithCopy(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const;
-
   /// Perform a copy-initialization from the given fixed-size buffer
   /// into an uninitialized fixed-size buffer, allocating the buffer if
   /// necessary.  Returns the address of the value inside the buffer.
@@ -371,23 +338,6 @@ public:
                                                    Address destBuffer,
                                                    Address srcBuffer,
                                                    SILType T) const;
-
-  /// Destroy an object of this type within an initialized fixed-size buffer
-  /// and deallocate the buffer.
-  ///
-  /// This is equivalent to:
-  ///   auto valueAddr = projectBuffer(IGF, buffer, T);
-  ///   destroy(IGF, valueAddr, T);
-  ///   deallocateBuffer(IGF, buffer, T);
-  /// but will be more efficient for dynamic types, since it uses a single
-  /// value witness call.
-  virtual void destroyBuffer(IRGenFunction &IGF, Address buffer,
-                             SILType T) const;
-
-  /// Deallocate the space for an object of this type within an initialized
-  /// fixed-size buffer.
-  virtual void deallocateBuffer(IRGenFunction &IGF, Address buffer,
-                                SILType T) const;
 
   /// Take-initialize an address from a parameter explosion.
   virtual void initializeFromParams(IRGenFunction &IGF, Explosion &params,
@@ -481,6 +431,12 @@ public:
   virtual void initializeArrayWithTakeBackToFront(IRGenFunction &IGF,
                                        Address dest, Address src,
                                        llvm::Value *count, SILType T) const;
+
+  /// Get the native (abi) convention for a return value of this type.
+  const NativeConventionSchema &nativeReturnValueSchema(IRGenModule &IGM) const;
+
+  /// Get the native (abi) convention for a parameter value of this type.
+  const NativeConventionSchema &nativeParameterValueSchema(IRGenModule &IGM) const;
 };
 
 } // end namespace irgen

@@ -116,6 +116,18 @@ __attribute__((availability(ios,introduced=8.0)))
 @property NSDictionary *dictProperty;
 @property NSSet *setProperty;
 
+- (nonnull NSString*) fetchNonnullString;
+- (nullable NSString*) fetchNullableString;
+- (null_unspecified NSString*) fetchNullproneString;
+
+- (void) takeNonnullString: (nonnull NSString*) string;
+- (void) takeNullableString: (nullable NSString*) string;
+- (void) takeNullproneString: (null_unspecified NSString*) string;
+
+@property (readwrite) __nonnull NSString *nonnullStringProperty;
+@property (readwrite) __nullable NSString *nullableStringProperty;
+@property (readwrite) __null_unspecified NSString *nullproneStringProperty;
+
 @end
 
 @interface DummyClass (Extras)
@@ -179,7 +191,7 @@ __attribute__((availability(ios,introduced=8.0)))
 @end
 
 @interface NSValue (NSRange)
-+ (NSValue *)valueWithRange:(NSRange)range;
+- (NSValue *)valueWithRange:(NSRange)range;
 @property NSRange rangeValue;
 @end
 
@@ -225,7 +237,7 @@ typedef __INT32_TYPE__ int32_t;
 + (nullable instancetype)stringWithPath:(NSString*)path encoding:(int)encoding;
 @end
 
-NSString *NSStringToNSString(NSString *str);
+__attribute__((warn_unused_result)) NSString *NSStringToNSString(NSString *str);
 
 @interface Bee : NSObject
 -(void)buzz;
@@ -255,7 +267,11 @@ NSString *NSStringToNSString(NSString *str);
 @end
 
 @interface NSURL : NSObject
+- (instancetype)URLWithString:(NSString *)URLString;
 + (instancetype)URLWithString:(NSString *)URLString;
+- (BOOL)getResourceValue:(out id _Nullable *)value
+                  forKey:(NSString *)key
+                   error:(out NSError *_Nullable *)error;
 @end
 
 @interface NSAttributedString : NSString
@@ -378,6 +394,15 @@ typedef NS_ENUM(unsigned char, NSAliasesEnum) {
   NSAliasesByEquivalentValue = -127,
   NSAliasesByName = NSAliasesOriginal,
   NSAliasesDifferentValue = 2
+};
+
+typedef NS_ENUM(unsigned char, NSUnavailableAliasesEnum) {
+  NSUnavailableAliasesOriginalAU = 0,
+  NSUnavailableAliasesAliasAU __attribute__((unavailable)) = 0,
+  NSUnavailableAliasesOriginalUA __attribute__((unavailable)) = 1,
+  NSUnavailableAliasesAliasUA = 1,
+  NSUnavailableAliasesOriginalUU __attribute__((unavailable)) = 2,
+  NSUnavailableAliasesAliasUU __attribute__((unavailable)) = 2,
 };
 
 NS_ENUM(NSInteger, NSMalformedEnumMissingTypedef) {
@@ -710,6 +735,7 @@ typedef NS_OPTIONS(NSUInteger, NSExplicitlyUnavailableOnOSXOptions) {
 @end
 
 @interface NSURLRequest : NSObject
+- (instancetype)requestWithString:(NSString *)URLString;
 + (instancetype)requestWithString:(NSString *)URLString;
 + (instancetype)URLRequestWithURL:(NSURL *)URL;
 @end
@@ -928,7 +954,7 @@ __attribute__((availability(macosx,introduced=10.52)))
 - (nonnull NSString *)stringByAppendingString:(nonnull NSString *)string;
 - (nonnull NSString *)stringWithString:(nonnull NSString *)string;
 - (nullable NSURL *)URLWithAddedString:(nonnull NSString *)string;
-+ (NSString *)stringForCalendarUnits:(NSCalendarUnit)units;
+- (NSString *)stringForCalendarUnits:(NSCalendarUnit)units;
 @end
 
 @interface NSURL (Properties)
@@ -1072,3 +1098,48 @@ typedef enum __attribute__((ns_error_domain(FictionalServerErrorDomain))) Fictio
   FictionalServerErrorMeltedDown = 1
 } FictionalServerErrorCode;
 
+@protocol Wearable
+- (void)wear;
+@end
+
+@protocol Garment
+@end
+
+@protocol Cotton
+@end
+
+@interface Coat : NSObject<Wearable>
+
+- (void)wear;
+@property (class) Coat <Wearable> *fashionStatement;
+
+@end
+
+@protocol NSLaundry
+- (void)wash:(Coat <Garment> * _Nonnull)garment;
+- (void)bleach:(Coat <Garment, Cotton> * _Nonnull)garment;
+- (Coat <Garment> * _Nonnull)dry;
+@end
+
+@interface NSLaundromat : NSObject
+@end
+
+extern NSString * const NSLaundryErrorDomain;
+
+typedef enum __attribute__((ns_error_domain(NSLaundryErrorDomain))) __attribute__((swift_name("NSLaundromat.Error"))) NSLaundryErrorCode {
+    NSLaundryErrorTooMuchSoap = 1,
+    NSLaundryErrorCatInWasher = 2
+};
+
+typedef void (*event_handler)(__nonnull id);
+void install_global_event_handler(__nullable event_handler handler);
+
+@interface NSObject ()
+- (void) addObserver: (id) observer
+         forKeyPath: (NSString*) keyPath
+         options: (NSInteger) options
+         context: (void*) context;
+- (void) removeObserver: (id) observer
+         forKeyPath: (NSString*) keyPath
+         context: (void*) options;
+@end

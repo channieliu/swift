@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,7 +14,7 @@
 // names.
 //
 //===----------------------------------------------------------------------===//
-#include "swift/Basic/Fallthrough.h"
+
 #include "swift/Basic/StringExtras.h"
 #include "clang/Basic/CharInfo.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/Compiler.h"
 #include <algorithm>
 
 using namespace swift;
@@ -177,10 +178,8 @@ void WordIterator::computePrevPosition() const {
     --i;
 
   // If what we found is a plural suffix, keep going.
-  bool skippedPluralSuffix = false;
   unsigned effectiveEndPosition = Position;
   if (i > 0 && isPluralSuffix(String.slice(i, Position))) {
-    skippedPluralSuffix = true;
     effectiveEndPosition = i;
     while (i > 0 && !clang::isUppercase(String[i-1]) && String[i-1] != '_')
       --i;
@@ -331,7 +330,7 @@ size_t camel_case::findWord(StringRef string, StringRef word) {
 
     // If any of the following checks fail, we want to start searching
     // past the end of the match.  (This assumes that the word doesn't
-    // end with a prefix of itself, e.g. "LikeableLike".)
+    // end with a prefix of itself, e.g. "LikableLike".)
     startingIndex = index + word.size();
 
     // We assume that we don't have to check if the match starts a new
@@ -783,7 +782,7 @@ static StringRef omitNeedlessWords(StringRef name,
           break;
         }
 
-        SWIFT_FALLTHROUGH;
+        LLVM_FALLTHROUGH;
 
       case PartOfSpeech::Verb:
       case PartOfSpeech::Gerund:
@@ -996,7 +995,7 @@ static bool isVacuousPreposition(StringRef beforePreposition,
 
 namespace {
   typedef std::reverse_iterator<camel_case::WordIterator> ReverseWordIterator;
-}
+} // end anonymous namespace
 
 /// Find the last preposition in the given word.
 static ReverseWordIterator findLastPreposition(ReverseWordIterator first,

@@ -33,7 +33,7 @@ public func mangle(s: [UnicodeScalar]) -> [UnicodeScalar] {
 // which shares the storage with the expression in the switch statement. Make
 // sure we only emit live range extensions for the storage once per basic block.
 
-// CHECK: define {{.*}}@_TFF11patternvars6mangleFT1sGSaVS_13UnicodeScalar__GSaS0__U_FS0_S0_
+// CHECK: define {{.*}}@_T011patternvars6mangleSayAA13UnicodeScalarVGAE1s_tFA2DcfU_
 // CHECK: call void asm sideeffect "", "r"
 // CHECK-NOT: call void asm sideeffect "", "r"
 // CHECK: br {{.*}}label

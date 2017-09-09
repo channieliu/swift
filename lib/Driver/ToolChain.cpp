@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -30,8 +30,6 @@
 using namespace swift;
 using namespace swift::driver;
 using namespace llvm::opt;
-
-const char * const ToolChain::SWIFT_EXECUTABLE_NAME;
 
 ToolChain::JobContext::JobContext(Compilation &C,
                                   ArrayRef<const Job *> Inputs,
@@ -59,7 +57,7 @@ ToolChain::JobContext::getTemporaryFilePath(const llvm::Twine &name,
     llvm::report_fatal_error("unable to create temporary file for filelist");
   }
 
-  C.addTemporaryFile(buffer.str());
+  C.addTemporaryFile(buffer.str(), PreserveOnSignal::Yes);
   // We can't just reference the data in the TemporaryFiles vector because
   // that could theoretically get copied to a new address.
   return C.getArgs().MakeArgString(buffer.str());
@@ -85,12 +83,17 @@ ToolChain::constructJob(const JobAction &JA,
     CASE(ModuleWrapJob)
     CASE(LinkJob)
     CASE(GenerateDSYMJob)
+    CASE(VerifyDebugInfoJob)
+    CASE(GeneratePCHJob)
     CASE(AutolinkExtractJob)
     CASE(REPLJob)
 #undef CASE
     case Action::Input:
       llvm_unreachable("not a JobAction");
     }
+
+    // Work around MSVC warning: not all control paths return a value
+    llvm_unreachable("All switch cases are covered");
   }();
 
   // Special-case the Swift frontend.
@@ -145,4 +148,12 @@ ToolChain::findProgramRelativeToSwiftImpl(StringRef executableName) const {
 
 types::ID ToolChain::lookupTypeForExtension(StringRef Ext) const {
   return types::lookupTypeForExtension(Ext);
+}
+
+bool
+ToolChain::sanitizerRuntimeLibExists(const ArgList &args,
+                                     StringRef sanitizerName) const {
+  // Assume no sanitizers are supported by default.
+  // This method should be overriden by a platform-specific subclass.
+  return false;
 }
